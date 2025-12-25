@@ -8,17 +8,18 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtGui import QSurfaceFormat, QAction
-from PySide6.QtCore import Qt, Signal, QRectF
-from PySide6.QtGui import QSurfaceFormat, QAction, QColor
+from PySide6.QtCore import Qt, Signal, QRectF, QTimer
+from PySide6.QtGui import QSurfaceFormat, QAction, QColor, QImage, QPainter
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QFileDialog,
     QSlider, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QToolBar,
     QSpinBox, QSplitter, QDockWidget, QPlainTextEdit, QPushButton,
-    QGroupBox, QFormLayout, QDoubleSpinBox
+    QGroupBox, QFormLayout, QDoubleSpinBox, QProgressDialog
 )
 import re
 
 from OpenGL.GL import *
+from OpenGL.GL import shaders
 
 # ==================================================================================
 # 1. Utils
@@ -296,15 +297,22 @@ class GridConfig:
         self.pitch_y = 200.0
         self.rows = 1
         self.cols = 1
+        self.angle = 0.0      # Rotation in degrees
         self.line_width = 1.0 # Reduced from 2.0
         self.opacity = 0.5    # Default 50% opacity
         
+        # Calibration
+        self.use_calib = False
+        self.target_mean = 128.0
+        self.target_std = 40.0
+
 # ==================================================================================
 # 3. OpenGL Widget
 # ==================================================================================
 class GLImageWidget(QOpenGLWidget):
     grid_params_changed = Signal()
-
+    layer_wheel_changed = Signal(int) # Delta (+1 or -1)
+    
     def __init__(self):
         super().__init__()
         self.tiled_image: TiledImage = None
@@ -316,6 +324,10 @@ class GLImageWidget(QOpenGLWidget):
         self.grid_cfg = GridConfig()
         self.bonding_map = None # Single BondingMap Instance
         self.map_tex = None
+        
+        # Auto-Calibration
+        self.calib_tex = None # GL Texture for (Scale, Offset) per cell
+        self.calib_data_shape = (0, 0) # (Rows, Cols)
         
         self.setFocusPolicy(Qt.StrongFocus) # Enable keyboard events
         
@@ -373,6 +385,43 @@ class GLImageWidget(QOpenGLWidget):
         # But OpenGL expects width, height.
         # arr shape is (H, W, 4)
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, cols, rows, 0, GL_RGBA, GL_UNSIGNED_BYTE, arr)
+        
+        self.doneCurrent()
+        self.update()
+
+    def update_calib_texture(self, calib_data: np.ndarray):
+        """
+        Updates the calibration texture.
+        calib_data: (rows, cols, 2) float32 array, where [..., 0] is scale, [..., 1] is offset.
+        """
+        if calib_data is None or calib_data.size == 0:
+            if self.calib_tex:
+                self.makeCurrent()
+                glDeleteTextures([self.calib_tex])
+                self.calib_tex = None
+                self.doneCurrent()
+            self.calib_data_shape = (0, 0)
+            self.update()
+            return
+
+        rows, cols, _ = calib_data.shape
+        self.calib_data_shape = (rows, cols)
+
+        self.makeCurrent()
+        if self.calib_tex:
+            glDeleteTextures([self.calib_tex])
+            
+        self.calib_tex = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, self.calib_tex)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        
+        # Upload as RG float texture
+        # calib_data is (rows, cols, 2)
+        # OpenGL expects (width, height) -> (cols, rows)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RG32F, cols, rows, 0, GL_RG, GL_FLOAT, calib_data)
         
         self.doneCurrent()
         self.update()
@@ -441,6 +490,7 @@ class GLImageWidget(QOpenGLWidget):
         uniform float pitch_y;
         uniform int grid_rows;
         uniform int grid_cols;
+        uniform float grid_angle; // Degrees
         uniform float line_width;
         uniform float zoom; // to adjust line width?
         
@@ -448,88 +498,102 @@ class GLImageWidget(QOpenGLWidget):
         uniform int has_map;
         uniform float grid_opacity;
         
+        uniform sampler2D calib_tex;
+        uniform int use_calib;
+        
         void main() {
             // 1. Base Image
             float val = texture(tex, uv).r; 
-            float res = (val - win_lo) / (win_hi - win_lo);
-            res = clamp(res, 0.0, 1.0);
+
+            // Apply Window Leveling
+            float pixel_val = val * 65535.0;
+            float normalized = (pixel_val - win_lo) / (win_hi - win_lo);
             
-            vec4 baseColor = vec4(res, res, res, 1.0);
+            // Grid Calculation Wrapper
+            
+            // Calculate Grid Coords with Rotation
+            float rad = radians(grid_angle);
+            float s = sin(rad);
+            float c = cos(rad);
+            
+            vec2 rel = pixelPos - vec2(grid_x, grid_y);
+            // Rotate by -angle (World to Grid)
+            // x' = x*cos(-a) - y*sin(-a) = x*c + y*s
+            // y' = x*sin(-a) + y*cos(-a) = -x*s + y*c
+            vec2 rotPos;
+            rotPos.x = rel.x * c + rel.y * s;
+            rotPos.y = -rel.x * s + rel.y * c;
+            
+            float gx = rotPos.x / pitch_x;
+            float gy = rotPos.y / pitch_y;
+            
+            int c_idx = int(floor(gx));
+            int r_idx = int(floor(gy));
+    
+            // Auto-Calibration
+            if (use_calib == 1) {
+                if (c_idx >= 0 && c_idx < grid_cols && r_idx >= 0 && r_idx < grid_rows) {
+                     // Sample Calib Texture
+                     // Center of the texel
+                     // Data array[0] (Row 0, Top) is uploaded to V=0 (Bottom).
+                     // So we want r=0 to map to V=0.
+                     vec2 calibUV = vec2((float(c_idx) + 0.5) / float(grid_cols), (float(r_idx) + 0.5) / float(grid_rows));
+                     vec2 params = texture(calib_tex, calibUV).rg;
+                     
+                     normalized = normalized * params.r + params.g;
+                }
+            }
+            
+            vec3 baseColor = vec3(clamp(normalized, 0.0, 1.0));
             
             // 2. Grid & Overlay
             vec4 overlayColor = vec4(0.0);
             
             if (show_grid == 1) {
                 // Determine if we are inside the grid bounding box
-                float relX = pixelPos.x - grid_x;
-                float relY = pixelPos.y - grid_y;
-                
-                float totalW = float(grid_cols) * pitch_x;
-                float totalH = float(grid_rows) * pitch_y;
-                
-                // Check bounds
-                if (relX >= 0.0 && relX <= totalW && relY >= 0.0 && relY <= totalH) {
+                // Check bounds in Grid Space (gx, gy)
+                if (gx >= 0.0 && gx <= float(grid_cols) && gy >= 0.0 && gy <= float(grid_rows)) {
                     
-                    // Grid Cell Index
-                    int col = int(relX / pitch_x);
-                    int row = int(relY / pitch_y);
+                    int c = int(floor(gx));
+                    int r = int(floor(gy));
                     
-                    // Local coords in cell
-                    float localX = relX - float(col) * pitch_x;
-                    float localY = relY - float(row) * pitch_y;
+                    // Borders
+                    // Distance to nearest integer
+                    float dx = abs(gx - round(gx)) * pitch_x;
+                    float dy = abs(gy - round(gy)) * pitch_y;
                     
-                    // Compute borders
-                    // We want constant screen-space line width
-                    // Shader 'line_width' is in pixels? 
-                    // pixelPos is in Image Pixels.
-                    // Screen Width = Image Width * Zoom.
-                    // So 1 Image Pixel = Zoom Screen Pixels.
-                    // We want N Screen Pixel width -> N / Zoom Image Pixels.
+                    // Zoom-dependent width?
+                    float lw = line_width / zoom; 
+                    if (lw < 1.0) lw = 1.0;
                     
-                    float thresh = line_width / max(zoom, 0.001);
-                    
-                    bool is_border = false;
-                    if (localX < thresh || localX > (pitch_x - thresh)) is_border = true;
-                    if (localY < thresh || localY > (pitch_y - thresh)) is_border = true;
-                    
-                    if (is_border) {
+                    if (dx < lw || dy < lw) {
                         overlayColor = vec4(1.0, 1.0, 0.0, 0.6); // Yellow Grid lines
-                    } else {
-                        // Inside Cell - Check Map
-                        if (has_map == 1) {
-                            // Fetch Map Texture
-                            // Texture Coords: (col / grid_cols, row / grid_rows)
-                            // Note: standard UV origin (0,0) is usually Top-Left?
-                            // In OpenGL Texture (0,0) is Bottom-Left.
-                            // But our map is Row 0 at Top? 
-                            // Let's assume Row 0 (top) maps to V=0? Or V=1?
-                            // Ideally: texelFetch is safer for integer grid
-                            
-                            // Let's use texelFetch
-                            // texelFetch(tex, ivec2(x, y), lod)
-                            // y needs to be inverted if texture is loaded upside down?
-                            // We loaded it linearly. GL convention: row 0 is bottom.
-                            // But usually we want row 0 at top.
-                            // So let's invert row index for look up: (rows - 1 - row)
-                            
-                            ivec2 mapCoord = ivec2(col, grid_rows - 1 - row);
-                            vec4 mapVal = texelFetch(map_tex, mapCoord, 0);
-                            
-                            if (mapVal.a > 0.0) {
-                                overlayColor = mapVal;
+                    }
+                    
+                    // Map Params (Colors)
+                    if (has_map == 1) {
+                            if (c >= 0 && c < grid_cols && r >= 0 && r < grid_rows) {
+                                  // Map Lookup: Flip Y for texture lookup?
+                                  // We previously handled map vertically?
+                                  // Let's assume (row, col) matches Map Texture (row, col) with V inverted?
+                                  // Re-use logic: map is uploaded row-by-row. R=0 at V=0?
+                                  // If BondingMap.data_map[0] is R=0.
+                                  // If we upload it, Row 0 goes to V=0 (Bottom).
+                                  // So mapUV should be (r+0.5)/rows => V=Low.
+                                  // So same as Calib.
+                                  vec2 mapUV = vec2((float(c) + 0.5) / float(grid_cols), (float(r) + 0.5) / float(grid_rows));
+                                  vec4 mapCol = texture(map_tex, mapUV);
+                                  if (mapCol.a > 0.0) {
+                                      // Blend map color
+                                      overlayColor = mix(overlayColor, mapCol, 0.3); // Tint
+                                  }
                             }
-                        }
                     }
                 }
             }
             
             // Blend
-            // Apply global opacity to the overlay
             overlayColor.a *= grid_opacity;
-            
-            // Manual blend: src * src_a + dst * (1-src_a)
-            // dst is baseColor
-            
             color = vec4(mix(baseColor.rgb, overlayColor.rgb, overlayColor.a), 1.0);
         }
         """)
@@ -568,9 +632,9 @@ class GLImageWidget(QOpenGLWidget):
         glEnableVertexAttribArray(1)
         
 
-    def set_tiled_image(self, tiled_img: TiledImage):
-        # Cleanup old
-        if self.tiled_image:
+    def set_tiled_image(self, tiled_img: TiledImage, cleanup_old: bool = True):
+        # Cleanup old if requested
+        if cleanup_old and self.tiled_image and self.tiled_image != tiled_img:
             self.tiled_image.cleanup()
         
         self.tiled_image = tiled_img
@@ -619,8 +683,16 @@ class GLImageWidget(QOpenGLWidget):
         glUniform1f(glGetUniformLocation(self.prog, "pitch_y"), self.grid_cfg.pitch_y)
         glUniform1i(glGetUniformLocation(self.prog, "grid_rows"), self.grid_cfg.rows)
         glUniform1i(glGetUniformLocation(self.prog, "grid_cols"), self.grid_cfg.cols)
+        glUniform1f(glGetUniformLocation(self.prog, "grid_angle"), self.grid_cfg.angle)
         glUniform1f(glGetUniformLocation(self.prog, "line_width"), self.grid_cfg.line_width)
         glUniform1f(glGetUniformLocation(self.prog, "grid_opacity"), self.grid_cfg.opacity)
+        
+        glUniform1i(glGetUniformLocation(self.prog, "use_calib"), 1 if self.grid_cfg.use_calib and self.calib_tex else 0)
+        
+        if self.calib_tex:
+            glActiveTexture(GL_TEXTURE2)
+            glBindTexture(GL_TEXTURE_2D, self.calib_tex)
+            glUniform1i(glGetUniformLocation(self.prog, "calib_tex"), 2)
         
         glUniform1i(glGetUniformLocation(self.prog, "has_map"), 1 if (self.bonding_map is not None and self.map_tex is not None) else 0)
         
@@ -648,29 +720,147 @@ class GLImageWidget(QOpenGLWidget):
     # Mouse Interaction
     # -----------------------------------------------
     def wheelEvent(self, e):
-        delta = e.angleDelta().y()
-        if delta == 0: return
-        
-        factor = 1.1 if delta > 0 else 0.9
-        
-        # Mouse pos in widget
+        # Ctrl + Wheel -> Layer Switch
+        modifiers = QApplication.keyboardModifiers()
+        if modifiers == Qt.ControlModifier:
+            delta = e.angleDelta().y()
+            if delta > 0:
+                self.layer_wheel_changed.emit(-1) # Prev Layer
+            elif delta < 0:
+                self.layer_wheel_changed.emit(1)  # Next Layer
+            return
+
+        # Normal Zoom
+        # Mouse pos in view
         mx = e.position().x()
         my = e.position().y()
         
-        # We need to adjust pan so that the point under mouse stays stationary.
-        # Current Screen Pos X = (PixelX - CenterX) * Zoom * (2/Width)
-        # New Screen Pos X should be same.
+        # ... standard zoom log ...
         
-        # It's easier to calculate "World Point under Mouse" before zoom
-        # then adjust pan so "World Point" is still at Mouse after zoom.
+        delta = e.angleDelta().y()
+        factor = 1.1
+        if delta < 0:
+            factor = 1.0 / 1.1
+            
+        # Zoom around mouse point
+        # Old Image Pos
+        # view_center + (mouse - view_center_screen) / zoom
         
-        # But for now, simple centered zoom + drift approach (ImageJ styleish)
-        # To strictly follow ImageJ 'zoom to mouse':
-        #   WorldX = (ScreenX / (Zoom * 2/Width)) + CenterX
-        #   ...
+        # Simpler approach:
+        # zoom_new = zoom * factor
+        # But we want to keep the mouse pointing at the same image coordinate
         
-        # Let's stick to the simpler accumulation logic from before but careful
-        self.zoom *= factor
+        # Image Coords of mouse before zoom
+        view_w = self.width()
+        view_h = self.height()
+        cx = view_w / 2
+        cy = view_h / 2
+        
+        if self.tiled_image:
+             img_w = self.tiled_image.w
+             img_h = self.tiled_image.h
+        else:
+             img_w = 1000
+             img_h = 1000
+             
+        img_cx = img_w / 2
+        img_cy = img_h / 2
+        
+        # Current Pan
+        # view_center_x = img_cx - pan_x
+        # view_center_y = img_cy - pan_y
+        
+        # Mouse relative to screen center
+        dx = mx - cx
+        dy = my - cy
+        
+        # Mouse in Image Relative to View Center
+        # m_rel_view = (dx, dy)
+        # Mouse in Image Coords
+        # m_img_x = view_center_x + dx / zoom
+        # m_img_x = (img_cx - pan_x) + dx / zoom
+        
+        # We want m_img_x to be same after zoom
+        # (img_cx - new_pan_x) + dx / new_zoom = (img_cx - pan_x) + dx / zoom
+        # new_pan_x = pan_x + dx/zoom - dx/new_zoom
+        
+        new_zoom = self.zoom * factor
+        
+        # Limit zoom
+        if new_zoom < 0.001: new_zoom = 0.001
+        if new_zoom > 1000.0: new_zoom = 1000.0
+        
+        self.pan_x += (dx / self.zoom) - (dx / new_zoom)
+        self.pan_y += (dy / self.zoom) - (dy / new_zoom)
+        
+        self.zoom = new_zoom
+        self.update()
+
+    def mouseDoubleClickEvent(self, e):
+        if not self.grid_cfg.visible or self.tiled_image is None:
+            super().mouseDoubleClickEvent(e)
+            return
+
+        # 1. Map Mouse to Image Coords
+        # Screen Center
+        view_w = self.width()
+        view_h = self.height()
+        cx = view_w / 2
+        cy = view_h / 2
+        
+        # Mouse relative to center
+        mx = e.position().x()
+        my = e.position().y()
+        dx = mx - cx
+        dy = my - cy
+        
+        # Current View Center in Image Space
+        img_w = self.tiled_image.w
+        img_h = self.tiled_image.h
+        img_cx = img_w / 2
+        img_cy = img_h / 2
+        
+        # Pan is (imgCenter - viewCenter)
+        # viewCenter = imgCenter - pan
+        view_center_x = img_cx - self.pan_x
+        view_center_y = img_cy - self.pan_y
+        
+        # Click position in Image Space
+        # Screen Delta = Image Delta * Zoom
+        # Image Delta = Screen Delta / Zoom
+        click_img_x = view_center_x + dx / self.zoom
+        click_img_y = view_center_y + dy / self.zoom
+        
+        # 2. Check Grid intersection
+        gx = click_img_x - self.grid_cfg.start_x
+        gy = click_img_y - self.grid_cfg.start_y
+        
+        if gx < 0 or gy < 0: 
+            return # Clicked before grid start
+            
+        col = int(gx / self.grid_cfg.pitch_x)
+        row = int(gy / self.grid_cfg.pitch_y)
+        
+        if col >= self.grid_cfg.cols or row >= self.grid_cfg.rows:
+            return # Clicked outside grid
+            
+        # 3. Calculate target view
+        # Target Cell Center
+        cell_cx = self.grid_cfg.start_x + (col + 0.5) * self.grid_cfg.pitch_x
+        cell_cy = self.grid_cfg.start_y + (row + 0.5) * self.grid_cfg.pitch_y
+        
+        # New Pan (target view center should be cell center)
+        # new_pan = img_cx - cell_cx
+        self.pan_x = img_cx - cell_cx
+        self.pan_y = img_cy - cell_cy
+        
+        # New Zoom
+        # Fit pitch_x/y into view_w/h
+        margin = 0.95
+        zoom_x = view_w / self.grid_cfg.pitch_x
+        zoom_y = view_h / self.grid_cfg.pitch_y
+        self.zoom = min(zoom_x, zoom_y) * margin
+        
         self.update()
 
     def mousePressEvent(self, e):
@@ -688,7 +878,7 @@ class GLImageWidget(QOpenGLWidget):
         # Check modifiers
         modifiers = QApplication.keyboardModifiers()
         
-        if modifiers == Qt.ShiftModifier and self.grid_cfg.visible:
+        if modifiers == Qt.ControlModifier and self.grid_cfg.visible:
             # Move Grid
             # dx is screen pixels.
             # grid_x/y are Image Pixels.
@@ -752,8 +942,15 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Tiled TIF Viewer (OpenGl Mosaic)")
         self.resize(1280, 720)
         
+        self.calib_timer = QTimer()
+        self.calib_timer.setSingleShot(True)
+        self.calib_timer.timeout.connect(self.calculate_calibration)
+        
         self.full_data = None #(Z, H, W) or (H, W)
         self.current_z = 0
+        self.layer_offset = 0 # Absolute offset of loaded layers
+        self.layer_cache = {} # Cache for TiledImage objects to avoid re-uploading
+        self.layer_calib_data = {} # Cache for Calibration Data (Rows, Cols, 2)
         
         self.glw = GLImageWidget()
         
@@ -830,13 +1027,17 @@ class MainWindow(QMainWindow):
         form.addRow("Rows:", self.sb_rows)
         form.addRow("Cols:", self.sb_cols)
         
+        self.sb_angle = QDoubleSpinBox(); self.sb_angle.setRange(-180, 180); self.sb_angle.setValue(0.0)
+        self.sb_angle.setSingleStep(0.1)
+        form.addRow("Angle:", self.sb_angle)
+        
         self.slider_opacity = QSlider(Qt.Horizontal)
         self.slider_opacity.setRange(0, 100)
         self.slider_opacity.setValue(50)
         form.addRow("Opacity:", self.slider_opacity)
         
         # Connect signals
-        for w in [self.sb_grid_x, self.sb_grid_y, self.sb_pitch_x, self.sb_pitch_y]:
+        for w in [self.sb_grid_x, self.sb_grid_y, self.sb_pitch_x, self.sb_pitch_y, self.sb_angle]:
             w.valueChanged.connect(self.update_grid_params)
         for w in [self.sb_rows, self.sb_cols]:
             w.valueChanged.connect(self.update_grid_params)
@@ -844,8 +1045,20 @@ class MainWindow(QMainWindow):
         self.slider_opacity.valueChanged.connect(self.update_grid_params)
             
         self.glw.grid_params_changed.connect(self.on_grid_moved_by_input)
-            
+        self.glw.layer_wheel_changed.connect(self.on_layer_wheel_scroll)
+        
         dock_layout.addWidget(gb_grid)
+
+        # 1.5 Load Config
+        gb_load = QGroupBox("Load Configuration (Next File)")
+        form_load = QFormLayout(gb_load)
+        
+        self.sb_start_layer = QSpinBox(); self.sb_start_layer.setRange(0, 100); self.sb_start_layer.setValue(0)
+        self.sb_end_layer = QSpinBox(); self.sb_end_layer.setRange(0, 100); self.sb_end_layer.setValue(10)
+        form_load.addRow("Start Limit:", self.sb_start_layer)
+        form_load.addRow("End Limit:", self.sb_end_layer)
+        
+        dock_layout.addWidget(gb_load)
         
         # 2. Bonding Map Paste
         gb_map = QGroupBox("Bonding Map (Paste Excel)")
@@ -866,10 +1079,46 @@ class MainWindow(QMainWindow):
         btn_extract = QPushButton("Extract Patches")
         btn_extract.clicked.connect(self.extract_patches)
         v_ext.addWidget(btn_extract)
+        v_ext.addWidget(btn_extract)
         dock_layout.addWidget(gb_extract)
+        
+        # 4. Auto Calibration
+        gb_calib = QGroupBox("Auto Calibration")
+        form_calib = QFormLayout(gb_calib)
+        
+        self.chk_use_calib = QPushButton("Enable Auto-Calib: OFF")
+        self.chk_use_calib.setCheckable(True)
+        self.chk_use_calib.toggled.connect(self.toggle_calib)
+        form_calib.addRow(self.chk_use_calib)
+        
+        self.chk_calib_robust = QPushButton("Rboust Mode (Ignore Voids): OFF")
+        self.chk_calib_robust.setCheckable(True)
+        self.chk_calib_robust.clicked.connect(lambda c: self.chk_calib_robust.setText(f"Robust Mode (Ignore Voids): {'ON' if c else 'OFF'}"))
+        self.chk_calib_robust.clicked.connect(self.calculate_calibration)
+        form_calib.addRow(self.chk_calib_robust)
+        
+        self.chk_calib_all = QPushButton("Apply to All Layers: OFF")
+        self.chk_calib_all.setCheckable(True)
+        self.chk_calib_all.clicked.connect(lambda c: self.chk_calib_all.setText(f"Apply to All Layers: {'ON' if c else 'OFF'}"))
+        form_calib.addRow(self.chk_calib_all)
+        
+        self.sb_target_mean = QDoubleSpinBox(); self.sb_target_mean.setRange(0, 65535); self.sb_target_mean.setValue(30000)
+        self.sb_target_std = QDoubleSpinBox(); self.sb_target_std.setRange(0, 65535); self.sb_target_std.setValue(10000)
+        form_calib.addRow("Target Mean:", self.sb_target_mean)
+        form_calib.addRow("Target Std:", self.sb_target_std)
+        
+        btn_recalc = QPushButton("Recalculate")
+        btn_recalc.clicked.connect(self.calculate_calibration)
+        form_calib.addRow(btn_recalc)
+        
+        dock_layout.addWidget(gb_calib)
         
         dock_layout.addStretch()
         dock.setWidget(dock_content)
+
+        # Sync initial state
+        self.on_window_changed()
+        self.update_grid_params()
 
     def toggle_grid(self, checked):
         self.chk_grid_show.setText(f"Show Grid: {'ON' if checked else 'OFF'}")
@@ -884,6 +1133,7 @@ class MainWindow(QMainWindow):
         cfg.pitch_y = self.sb_pitch_y.value()
         cfg.rows = self.sb_rows.value()
         cfg.cols = self.sb_cols.value()
+        cfg.angle = self.sb_angle.value()
         cfg.opacity = self.slider_opacity.value() / 100.0
         self.glw.update()
 
@@ -895,9 +1145,27 @@ class MainWindow(QMainWindow):
         
         self.sb_grid_x.setValue(cfg.start_x)
         self.sb_grid_y.setValue(cfg.start_y)
+        self.sb_angle.setValue(cfg.angle)
         
         self.sb_grid_x.blockSignals(False)
         self.sb_grid_y.blockSignals(False)
+        
+        if self.chk_use_calib.isChecked():
+             # Disable auto-recalc on move (User Request)
+             # User must click 'Recalculate'
+             pass
+             # self.calib_timer.start(200) # 200ms debounce
+
+    def on_layer_wheel_scroll(self, delta):
+        # delta is +1 or -1
+        if not self.spin_layer.isEnabled():
+            return
+            
+        current = self.spin_layer.value()
+        new_val = current + delta
+        # Spinbox handles clamping but let's be safe
+        new_val = max(self.spin_layer.minimum(), min(self.spin_layer.maximum(), new_val))
+        self.spin_layer.setValue(new_val)
 
     def import_map_data(self):
         text = self.txt_map.toPlainText()
@@ -932,123 +1200,551 @@ class MainWindow(QMainWindow):
             return
             
         print(f"Extracting to {out_dir}...")
+        
         cfg = self.glw.grid_cfg
+        win_lo = self.glw.win_lo
+        win_hi = self.glw.win_hi
+        win_range = max(1.0, win_hi - win_lo)
+        use_calib = self.chk_use_calib.isChecked()
         
+        # Determine layers
+        # User said "all layers"
+        if self.full_data.ndim == 2 or (self.full_data.ndim == 3 and self.full_data.shape[-1] in (3,4)):
+            layers = [0]
+        elif self.full_data.ndim == 3:
+            layers = range(self.full_data.shape[0])
+        elif self.full_data.ndim == 4:
+             layers = range(self.full_data.shape[0])
+        else:
+            layers = [0]
+            
         import os
-        # import cv2 # Removed
+        
+        total_extracted = 0
+        
+        progress = QProgressDialog("Extracting patches...", "Cancel", 0, len(layers), self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
 
-        
-        # Ensure we have data to extract from
-        # self.full_data is either (Z, H, W) or (H, W) or (H, W, C)
-        # We need the current layer.
-        
-        # Reuse to_gray2d helper or operate on current layer?
-        # Let's operate on the currently displayed layer for now, or all layers?
-        # User request: "Extract patch of bonded chips" -> Usually implies the visual layer.
-        # But maybe they want raw data? Let's implement extraction of the CURRENT layer first.
-        
-        # Get current layer data
-        try:
-            current_layer_img = to_gray2d_uint16(self.full_data, self.current_z)
-        except:
-            print("Failed to get current layer for extraction.")
-            return
-
-        h, w = current_layer_img.shape
-        
-        count = 0
-        for r in range(cfg.rows):
-            for c in range(cfg.cols):
-                # Calculate box
-                x0 = int(cfg.start_x + c * cfg.pitch_x)
-                y0 = int(cfg.start_y + r * cfg.pitch_y)
-                x1 = int(x0 + cfg.pitch_x)
-                y1 = int(y0 + cfg.pitch_y)
+        for idx, z in enumerate(layers):
+            if progress.wasCanceled(): break
+            progress.setValue(idx)
+            QApplication.processEvents()
+            
+            # Create Layer Folder
+            # Folder name: Layer_Z
+            layer_dir = os.path.join(out_dir, f"Layer_{z}")
+            os.makedirs(layer_dir, exist_ok=True)
+            
+            # Get Image
+            try:
+                img = to_gray2d_uint16(self.full_data, z)
+            except:
+                continue
                 
-                # Check bounds (partial clipping ok, or skip?)
-                # Let's clip coordinates
-                x0 = max(0, x0); y0 = max(0, y0)
-                x1 = min(w, x1); y1 = min(h, y1)
+            h, w = img.shape
+            
+            # Get Calibration Data for this layer
+            calib_map = None
+            if use_calib:
+                calib_map = self.layer_calib_data.get(z, None)
                 
-                if x1 <= x0 or y1 <= y0:
-                    continue
+            # Rotation pre-calc
+            rad = np.radians(cfg.angle)
+            sin_a = np.sin(rad)
+            cos_a = np.cos(rad)
+            
+            for r in range(cfg.rows):
+                for c in range(cfg.cols):
+                    # Check Bonding Map
+                    label = "chip"
+                    if self.glw.bonding_map:
+                         key = self.glw.bonding_map.get_key(r, c)
+                         if not key:
+                             continue # Skip unbonded
+                         label = key
                     
-                patch = current_layer_img[y0:y1, x0:x1]
-                
-                # Filename: layer_row_col_label.tif
-                label = "unknown"
-                if self.glw.bonding_map:
-                    k = self.glw.bonding_map.get_key(r, c)
-                    if k: label = k
-                
-                fname = f"L{self.current_z}_R{r}_C{c}_{label}.tif"
-                fpath = os.path.join(out_dir, fname)
-                
-                tifffile.imwrite(fpath, patch)
-                count += 1
-                
-        print(f"Extracted {count} patches.")
+                    # Calculate Rotated Center
+                    # Unrotated Center relative to Grid Origin
+                    cx_rel = (c + 0.5) * cfg.pitch_x
+                    cy_rel = (r + 0.5) * cfg.pitch_y
+                    
+                    # Rotate (Grid Angle)
+                    rot_x = cx_rel * cos_a - cy_rel * sin_a
+                    rot_y = cx_rel * sin_a + cy_rel * cos_a
+                    
+                    # Absolute Center
+                    center_x = cfg.start_x + rot_x
+                    center_y = cfg.start_y + rot_y
+                    
+                    # Extract Upright Patch using QPainter (Large Crop + Rotate)
+                    # 1. Determine safe bounding box for rotation
+                    diag = np.sqrt(cfg.pitch_x**2 + cfg.pitch_y**2)
+                    r_bound = int(diag / 2.0) + 5 # Extra padding
+                    
+                    x_min = int(max(0, center_x - r_bound))
+                    y_min = int(max(0, center_y - r_bound))
+                    x_max = int(min(w, center_x + r_bound))
+                    y_max = int(min(h, center_y + r_bound))
+                    
+                    if x_max <= x_min or y_max <= y_min:
+                        continue
+                        
+                    # Extract Source Crop
+                    roi = img[y_min:y_max, x_min:x_max].astype(np.float32)
+                    
+                    # Apply Window Level
+                    roi = (roi - win_lo) / win_range
+                    
+                    # Apply Calibration
+                    if calib_map is not None:
+                        if r < calib_map.shape[0] and c < calib_map.shape[1]:
+                            scale = calib_map[r, c, 0]
+                            offset = calib_map[r, c, 1]
+                            roi = roi * scale + offset
+                            
+                    # Clip to 0-1
+                    roi = np.clip(roi, 0.0, 1.0)
+                    
+                    # Convert to uint8 (Visual)
+                    roi_u8 = (roi * 255.0).astype(np.uint8)
+                    
+                    # Create Source QImage
+                    h_roi, w_roi = roi_u8.shape
+                    q_src = QImage(roi_u8.data, w_roi, h_roi, w_roi, QImage.Format_Grayscale8)
+                    
+                    # Create Target QImage (Upright)
+                    dst_w = int(cfg.pitch_x)
+                    dst_h = int(cfg.pitch_y)
+                    q_dst = QImage(dst_w, dst_h, QImage.Format_Grayscale8)
+                    q_dst.fill(0)
+                    
+                    # Paint Rotated
+                    p = QPainter(q_dst)
+                    # p.setRenderHint(QPainter.SmoothPixmapTransform) # Bilinear - optional, might blur slightly
+                    # Using default (Nearest) usually preserves edge sharpness for scientific images.
+                    # But user wants "visual appearance", so Smooth might be better for rotation.
+                    # Let's use Smooth.
+                    p.setRenderHint(QPainter.SmoothPixmapTransform)
+                    
+                    # Transform: Target Center -> Rotate -> Match Source Coords
+                    p.translate(dst_w / 2.0, dst_h / 2.0)
+                    p.rotate(-cfg.angle) # Rotate back to upright
+                    p.translate(-center_x, -center_y) # Align with Global System
+                    
+                    # Draw Source at its global position
+                    p.drawImage(x_min, y_min, q_src)
+                    p.end()
+                    
+                    # Filename: X00_Y03_L01_LEG_class.png
+                    fname = f"X{c:02d}_Y{r:02d}_L{z:02d}_LEG_{label}.png"
+                    fpath = os.path.join(layer_dir, fname)
+                    
+                    q_dst.save(fpath)
+                    
+                    total_extracted += 1
+
+        progress.setValue(len(layers))
+        print(f"Extraction Complete. Total {total_extracted} patches.")
 
     def open_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open", "", "TIFF (*.tif *.tiff)")
         if not path:
             return
             
+        # Get Load Limits
+        req_start = self.sb_start_layer.value()
+        req_end = self.sb_end_layer.value()
+        
         print(f"Loading {path}...")
+        print(f"Requested Range: {req_start} to {req_end}")
+        
         try:
-            # Memory map if possible for huge files? 
-            # tifffile.memmap is good but let's try standard read first (user has RAM)
-            data = tifffile.imread(path)
+            # Use TiffFile for robust multi-page/series handling
+            with tifffile.TiffFile(path) as tif:
+                
+                # Determine structure
+                num_series = len(tif.series)
+                num_pages = len(tif.pages)
+                
+                # Logic to select range
+                # We prioritize Series (OME-TIFF style often) over Pages if multiple series exist
+                
+                target_data = [] # List of arrays
+                
+                real_start = 0
+                
+                if num_series > 1:
+                    print(f"Detected {num_series} series.")
+                    # Clamp range
+                    s = max(0, req_start)
+                    e = min(num_series - 1, req_end)
+                    if e < s: e = s
+                    
+                    real_start = s
+                    print(f"Loading Series [{s}..{e}]")
+                    
+                    # Stack selected series
+                    # tif.series is not a list, but supports indexing? Yes, usually.
+                    selected_series = tif.series[s : e+1]
+                    data = np.stack([ser.asarray() for ser in selected_series])
+                    
+                else:
+                    # Single Series, check pages
+                    # Some TIFs put Z in pages
+                    print(f"Detected 1 series, {num_pages} pages.")
+                    if num_pages > 1:
+                        s = max(0, req_start)
+                        e = min(num_pages - 1, req_end)
+                        if e < s: e = s
+                        
+                        real_start = s
+                        print(f"Loading Pages [{s}..{e}]")
+                        
+                        # tif.asarray(key=slice) or similar
+                        # But safer to manually stack pages if memory is concern?
+                        # tif.asarray(key=...) reads efficiently
+                        data = tif.asarray(key=slice(s, e+1))
+                    else:
+                        # 1 Page
+                        real_start = 0
+                        data = tif.asarray()
+            
             print(f"Shape: {data.shape}, Dtype: {data.dtype}")
             
             self.full_data = data
+            self.layer_offset = real_start
+            
+            # Clear cache for new file
+            for t in self.layer_cache.values():
+                t.cleanup()
+            self.layer_cache.clear()
+            self.layer_calib_data.clear()
             
             # Detect layers
-            if self.full_data.ndim > 2 and self.full_data.shape[0] > 1:
-                # Assume dim 0 is Layers if not RGB
-                 # Refine layer detection
-                is_rgb = (self.full_data.ndim == 3 and self.full_data.shape[-1] in (3,4))
-                if not is_rgb:
+            self.spin_layer.blockSignals(True) # Mute signals
+            
+            if self.full_data.ndim > 2:
+                # Check for RGB (H, W, 3/4) vs (Z, H, W) vs (Z, H, W, C)
+                # Heuristic: if last dim is 3 or 4, it's RGB
+                is_rgb = (self.full_data.shape[-1] in (3, 4))
+                
+                if is_rgb:
+                    # (H,W,3) or (Z,H,W,3)
+                    if self.full_data.ndim == 4:
+                        # (Z, H, W, C)
+                        num_layers = self.full_data.shape[0]
+                        self.spin_layer.setRange(0, num_layers - 1)
+                        self.spin_layer.setValue(0)
+                        self.spin_layer.setEnabled(True)
+                    else:
+                        # (H, W, C) -> 1 Layer
+                        self.spin_layer.setRange(0, 0)
+                        self.spin_layer.setEnabled(False)
+                else:
+                    # (Z, H, W)
                     num_layers = self.full_data.shape[0]
                     self.spin_layer.setRange(0, num_layers - 1)
                     self.spin_layer.setValue(0)
                     self.spin_layer.setEnabled(True)
-                else:
-                    self.spin_layer.setEnabled(False)
             else:
+                self.spin_layer.setRange(0, 0)
                 self.spin_layer.setEnabled(False)
+                
+            self.spin_layer.blockSignals(False)
+            
+            # Auto-Leveling (Estimate from first visual layer)
+            try:
+                sample_layer = to_gray2d_uint16(self.full_data, 0)
+                # Subsample for speed (max 10k items)
+                h, w = sample_layer.shape
+                step = int(max(1, np.sqrt((h*w)/10000)))
+                stats_slice = sample_layer[::step, ::step]
+                
+                # Use percentiles for robustness against noise
+                # p1, p99 = np.percentile(stats_slice, [1, 99])
+                # Or just min/max
+                vmin, vmax = np.min(stats_slice), np.max(stats_slice)
+                
+                # Set sliders
+                self.slider_lo.blockSignals(True)
+                self.slider_hi.blockSignals(True)
+                self.slider_lo.setValue(int(vmin))
+                self.slider_hi.setValue(int(vmax))
+                self.slider_lo.blockSignals(False)
+                self.slider_hi.blockSignals(False)
+                
+                # Apply to GL
+                self.on_window_changed()
+                
+                print(f"Auto-Leveled to [{vmin}, {vmax}]")
+            except Exception as e:
+                print(f"Auto-Level failed: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            # Preload GPU Cache
+            self.preload_gpu_cache()
                 
             self.load_layer(0)
             
         except Exception as e:
             print(f"Error loading file: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def preload_gpu_cache(self):
+        """
+        Preloads all loaded layers into GPU memory to enable instant switching.
+        Shows a progress dialog.
+        """
+        if self.full_data is None:
+            return
+            
+        # Determine number of layers to process
+        # If it's a single 2D image, nothing extra to do really, but let's handle consistent logic
+        task_count = 0
+        if self.full_data.ndim == 2 or (self.full_data.ndim == 3 and self.full_data.shape[-1] in (3,4)):
+            task_count = 1
+        elif self.full_data.ndim == 3: # (Z, H, W)
+            task_count = self.full_data.shape[0]
+        elif self.full_data.ndim == 4: # (Z, H, W, C)
+            task_count = self.full_data.shape[0]
+            
+        if task_count <= 1:
+            return
+
+        print(f"Preloading {task_count} layers to VRAM...")
+        
+        progress = QProgressDialog("Preloading layers to GPU...", "Cancel", 0, task_count, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.resize(400, 100)
+        progress.show()
+        
+        # We need a GL context active to upload textures.
+        # GLImageWidget.makeCurrent() is called inside set_tiled_image -> upload_all
+        # But here we want to upload without setting it as CURRENT display image immediately.
+        # We can manually create TiledImage and call upload().
+        # Note: TiledImage.upload() does NOT require the widget to be the *current* widget for painting,
+        # but it DOES require a valid OpenGL context to be current on the thread.
+        # Since we are in the main thread and the widget is initialized, we can use it.
+        
+        self.glw.makeCurrent()
+        
+        try:
+            for i in range(task_count):
+                if progress.wasCanceled():
+                    print("Preloading canceled.")
+                    break
+                    
+                progress.setValue(i)
+                # progress.setLabelText(f"Uploading Layer {i+1}/{task_count}...") # Optional update
+                QApplication.processEvents() 
+                
+                # Check if already cached (e.g. if we reload or something)
+                if i in self.layer_cache:
+                    continue
+                    
+                # Create TiledImage
+                img_2d = to_gray2d_uint16(self.full_data, i)
+                tiled = TiledImage(img_2d)
+                
+                # Upload
+                # TiledImage.upload() makes GL calls. Context must be current.
+                # We made it current above.
+                tiled.upload_all()
+                
+                self.layer_cache[i] = tiled
+                
+            progress.setValue(task_count)
+            
+        finally:
+            self.glw.doneCurrent()
 
     def load_layer(self, z_index):
         if self.full_data is None:
             return
             
-        print(f"Processing Layer {z_index}...")
-        img_2d = to_gray2d_uint16(self.full_data, z_index)
+        tiled = None
+        # Check Cache
+        if z_index in self.layer_cache:
+            # print(f"Cache Hit for Layer {z_index}")
+            tiled = self.layer_cache[z_index]
+        else:
+            print(f"Processing Layer {z_index}...")
+            img_2d = to_gray2d_uint16(self.full_data, z_index)
+            print("Creating tiles...")
+            tiled = TiledImage(img_2d)
+            self.layer_cache[z_index] = tiled
+            print("Uploading to GPU...")
+
+        # Set Image
+        self.glw.set_tiled_image(tiled, cleanup_old=False)
         
-        print("Creating tiles...")
-        tiled = TiledImage(img_2d)
+        # Update Calibration Texture for this layer
+        calib = self.layer_calib_data.get(z_index, None)
+        self.glw.update_calib_texture(calib)
         
-        print("Uploading to GPU...")
-        self.glw.set_tiled_image(tiled)
-        
-        # Reset view if first load?
-        # self.glw.zoom = 1.0 ... maybe preserve view across layers
+        self.update()
 
     def on_layer_changed(self, val):
         self.current_z = val
+        
+        # Update label to show absolute index
+        # Assuming we have access to the label widget? 
+        # We constructed it in __init__ locally. 
+        # Can't easily access. Let's just print or update window title?
+        # Better: Update the spinbox suffix or prefix or tooltip
+        
+        abs_layer = self.layer_offset + val
+        self.spin_layer.setSuffix(f" (Abs: {abs_layer})")
+        
         self.load_layer(val)
 
     def on_window_changed(self):
-        lo = self.slider_lo.value()
-        hi = self.slider_hi.value()
-        if hi <= lo: hi = lo + 1
+        self.glw.win_lo = self.slider_lo.value()
+        self.glw.win_hi = self.slider_hi.value()
+        self.glw.update()
         
-        self.glw.set_window_level(lo / 65535.0, hi / 65535.0)
+    def toggle_calib(self, checked):
+        self.chk_use_calib.setText(f"Enable Auto-Calib: {'ON' if checked else 'OFF'}")
+        self.glw.grid_cfg.use_calib = checked
+        if checked:
+            self.calculate_calibration()
+        else:
+            self.glw.update()
+
+    def calculate_calibration(self):
+        if self.full_data is None: return
+        
+        # Determine layers to calculate
+        layers_to_calc = [self.current_z]
+        if self.chk_calib_all.isChecked():
+            # Calc for all available layers
+             if self.full_data.ndim > 2 and (not (self.full_data.ndim==3 and self.full_data.shape[-1] in [3,4])):
+                 layers_to_calc = list(range(self.full_data.shape[0]))
+        
+        # Progress Dialog if multiple
+        progress = None
+        if len(layers_to_calc) > 1:
+            progress = QProgressDialog("Calibrating all layers...", "Cancel", 0, len(layers_to_calc), self)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.show()
+            
+        cfg = self.glw.grid_cfg
+        target_mean = self.sb_target_mean.value()
+        target_std = self.sb_target_std.value()
+        win_lo = self.glw.win_lo
+        
+        # Loop layers
+        for i, z_idx in enumerate(layers_to_calc):
+            if progress:
+                if progress.wasCanceled(): break
+                progress.setValue(i)
+                QApplication.processEvents()
+                
+            img = to_gray2d_uint16(self.full_data, z_idx)
+            if img is None: continue
+            
+            h, w = img.shape
+            
+            # Grid Loop
+            start_x = cfg.start_x
+            start_y = cfg.start_y
+            pitch_x = cfg.pitch_x
+            pitch_y = cfg.pitch_y
+            rows = cfg.rows
+            cols = cfg.cols
+            
+            # Win Lo/Hi for normalization
+            # Note: win_lo/hi might be shared or per layer?
+            # Typically shared global slider.
+            win_lo = self.glw.win_lo
+            win_hi = self.glw.win_hi
+            win_range = win_hi - win_lo
+            if win_range < 1: win_range = 1
+            
+            calib_data = np.zeros((rows, cols, 2), dtype=np.float32)
+            
+            # Rotation pre-calc
+            rad = np.radians(cfg.angle)
+            sin_a = np.sin(rad)
+            cos_a = np.cos(rad)
+            
+            for r in range(rows):
+                # Optimization? No, need per-cell center
+                
+                for c in range(cols):
+                    # Calculate Rotated Center
+                    cx_rel = (c + 0.5) * pitch_x
+                    cy_rel = (r + 0.5) * pitch_y
+                    
+                    rot_x = cx_rel * cos_a - cy_rel * sin_a
+                    rot_y = cx_rel * sin_a + cy_rel * cos_a
+                    
+                    center_x = start_x + rot_x
+                    center_y = start_y + rot_y
+                    
+                    x0 = int(center_x - pitch_x/2)
+                    y0 = int(center_y - pitch_y/2)
+                    x1 = int(center_x + pitch_x/2)
+                    y1 = int(center_y + pitch_y/2)
+                    
+                    # Clip
+                    y0_c = max(0, min(h, y0))
+                    y1_c = max(0, min(h, y1))
+                    x0_c = max(0, min(w, x0))
+                    x1_c = max(0, min(w, x1))
+                    
+                    if x1_c <= x0_c or y1_c <= y0_c:
+                        calib_data[r, c, 0] = 1.0 # Scale
+                        calib_data[r, c, 1] = 0.0 # Offset
+                        continue
+                        
+                    # Check Bonding Map (Selective Calibration)
+                    if self.glw.bonding_map:
+                        key = self.glw.bonding_map.get_key(r, c)
+                        if not key:
+                            # Not bonded -> Skip calibration
+                            calib_data[r, c, 0] = 1.0
+                            calib_data[r, c, 1] = 0.0
+                            continue
+                            
+                    roi = img[y0_c:y1_c, x0_c:x1_c]
+                    
+                    # Performance optimization
+                    if roi.size > 10000:
+                        step = int(np.sqrt(roi.size / 10000))
+                        roi_stats = roi[::step, ::step]
+                    else:
+                        roi_stats = roi
+                    
+                    if self.chk_calib_robust.isChecked():
+                        mean = np.median(roi_stats)
+                        q75, q25 = np.percentile(roi_stats, [75, 25])
+                        iqr = q75 - q25
+                        std = iqr / 1.35 
+                    else:
+                        mean = np.mean(roi_stats)
+                        std = np.std(roi_stats)
+                    
+                    if std < 1.0: std = 1.0 
+                    
+                    scale = target_std / std
+                    offset = (target_mean - win_lo - scale * (mean - win_lo)) / win_range
+                    
+                    calib_data[r, c, 0] = scale
+                    calib_data[r, c, 1] = offset
+            
+            # Store in cache
+            self.layer_calib_data[z_idx] = calib_data
+            
+        if progress:
+            progress.setValue(len(layers_to_calc))
+            
+        # Update current layer View
+        if self.current_z in self.layer_calib_data:
+            self.glw.update_calib_texture(self.layer_calib_data[self.current_z])
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
