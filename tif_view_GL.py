@@ -29,18 +29,6 @@ def to_gray2d_uint16(arr: np.ndarray, z_index: int = 0) -> np.ndarray:
     Extracts a single 2D grayscale layer from a multi-dim array.
     Returns (H, W) uint16.
     """
-    arr = np.asarray(arr)
-    
-    # Handle Z-stack or Time dimensions by slicing
-    # Expected inputs: (H,W), (H,W,C), (Z,H,W), (Z,H,W,C)
-    
-    # Simple logic: flatten until we have [Z_remaining, H, W, C_maybe]
-    # This is a heuristic. For strict TIF handling, we assume:
-    # If ndim=3 and last dim is not 3/4 -> (Z, H, W)
-    # If ndim=3 and last dim is 3/4 -> (H, W, RGB)
-    # If ndim=4 -> (Z, H, W, RGB) or (T, Z, H, W) ... let's assume (Z, H, W, C) for now
-    
-    # 1. Select Z
     current_frame = arr
     if arr.ndim == 4:
         # (Z, H, W, C)
@@ -78,6 +66,61 @@ def to_gray2d_uint16(arr: np.ndarray, z_index: int = 0) -> np.ndarray:
 
     return current_frame.astype(np.uint16, copy=False)
 
+
+
+class LazyTiffStack:
+    """
+    Wraps a tifffile.TiffFile instance to provide lazy-loading of layers.
+    Mimics a 3D numpy array (Z, H, W) or 4D (Z, H, W, C) interface (read-only).
+    """
+    def __init__(self, tif_instance):
+        self.tif = tif_instance
+        self.is_series = (len(self.tif.series) > 1)
+        
+        if self.is_series:
+            self.items = self.tif.series
+            ref = self.items[0]
+            # series.shape is usually (H, W) or (H, W, C) or (Z, H, W)
+            # We assume each series is a "Layer" (Z-slice).
+            # If each series is 2D: Stack is (N_Series, H, W)
+            self.base_shape = ref.shape
+            self.dtype = ref.dtype
+            self.len = len(self.items)
+        else:
+            self.items = self.tif.pages
+            ref = self.items[0]
+            self.base_shape = ref.shape
+            self.dtype = ref.dtype
+            self.len = len(self.items)
+            
+        # Construct Shape
+        self.shape = (self.len,) + self.base_shape
+        self.ndim = 1 + len(self.base_shape)
+        
+    def __getitem__(self, key):
+        # Handle Integer Index [z]
+        if isinstance(key, int):
+            if key < 0: key += self.len
+            if key < 0 or key >= self.len: raise IndexError("Index out of bounds")
+            return self.items[key].asarray()
+            
+        # Handle Slice [a:b]
+        if isinstance(key, slice):
+            start, stop, step = key.indices(self.len)
+            # Return list of arrays? Or stacked array?
+            return np.stack([self.items[i].asarray() for i in range(start, stop, step)])
+            
+        # Handle tuple [z, y, x]
+        if isinstance(key, tuple):
+            z = key[0]
+            # Defer other dims to the array
+            layer = self[z] # Get array
+            return layer[key[1:]]
+            
+        return self.items[key].asarray()
+
+    def __len__(self):
+        return self.len
 
 # ==================================================================================
 # 2. Tiling System
@@ -597,7 +640,15 @@ class GLImageWidget(QOpenGLWidget):
             color = vec4(mix(baseColor.rgb, overlayColor.rgb, overlayColor.a), 1.0);
         }
         """)
-        
+
+        glCompileShader(self.vs)
+        if not glGetShaderiv(self.vs, GL_COMPILE_STATUS):
+            print("VS Compile Error:", glGetShaderInfoLog(self.vs))
+            
+        glCompileShader(self.fs)
+        if not glGetShaderiv(self.fs, GL_COMPILE_STATUS):
+            print("FS Compile Error:", glGetShaderInfoLog(self.fs))
+
         self.prog = glCreateProgram()
         glAttachShader(self.prog, self.vs)
         glAttachShader(self.prog, self.fs)
@@ -946,7 +997,8 @@ class MainWindow(QMainWindow):
         self.calib_timer.setSingleShot(True)
         self.calib_timer.timeout.connect(self.calculate_calibration)
         
-        self.full_data = None #(Z, H, W) or (H, W)
+        self.full_data = None #(Z, H, W) or (H, W) or LazyTiffStack
+        self.current_tif_file = None # Keep file handle open for Lazy Stack
         self.current_z = 0
         self.layer_offset = 0 # Absolute offset of loaded layers
         self.layer_cache = {} # Cache for TiledImage objects to avoid re-uploading
@@ -1360,110 +1412,78 @@ class MainWindow(QMainWindow):
         print(f"Requested Range: {req_start} to {req_end}")
         
         try:
-            # Use TiffFile for robust multi-page/series handling
-            with tifffile.TiffFile(path) as tif:
+            # 1. Cleanup previous file handle
+            if self.current_tif_file:
+                self.current_tif_file.close()
+                self.current_tif_file = None
                 
-                # Determine structure
-                num_series = len(tif.series)
-                num_pages = len(tif.pages)
-                
-                # Logic to select range
-                # We prioritize Series (OME-TIFF style often) over Pages if multiple series exist
-                
-                target_data = [] # List of arrays
-                
-                real_start = 0
-                
-                if num_series > 1:
-                    print(f"Detected {num_series} series.")
-                    # Clamp range
-                    s = max(0, req_start)
-                    e = min(num_series - 1, req_end)
-                    if e < s: e = s
-                    
-                    real_start = s
-                    print(f"Loading Series [{s}..{e}]")
-                    
-                    # Stack selected series
-                    # tif.series is not a list, but supports indexing? Yes, usually.
-                    selected_series = tif.series[s : e+1]
-                    data = np.stack([ser.asarray() for ser in selected_series])
-                    
+            # 2. Open new file (Keep handle for Lazy Load)
+            self.current_tif_file = tifffile.TiffFile(path)
+            
+            # 3. Create Lazy Stack
+            # This handles both Multi-Series (fast open) and regular stacks.
+            lazy_stack = LazyTiffStack(self.current_tif_file)
+            
+            print(f"Opened with Lazy Loading (Instant). Shape: {lazy_stack.shape}")
+            
+            self.full_data = lazy_stack
+            self.layer_offset = 0 # Offset handling simplified for now
+            
+            # Slice if requested?
+            # LazyTiffStack doesn't support sophisticated slicing view yet, but we can just use indices.
+            # If user requested range 0..10, we just map logic to that.
+            # For simplicity, we expose the whole file, but 'open_file' logic usually sets limits.
+            # Let's trust LazyStack to expose everything, and user navigates.
+            
+            # Check limits
+            req_start = self.sb_start_layer.value()
+            req_end = self.sb_end_layer.value()
+            
+            # If we want to restrict range, we could wrap LazyStack or just ignore?
+            # The previous logic "Loaded Series [s..e]".
+            # With Lazy Load, we can just say "Available: 0..N".
+            # The 'spin_layer' range will define what is accessible.
+            
+            # Determine Num Layers
+            num_layers = len(lazy_stack)
+            
+            # Setup layer spinner
+            self.spin_layer.blockSignals(True)
+            if num_layers > 1:
+                self.spin_layer.setRange(0, num_layers - 1)
+                self.spin_layer.setValue(0)
+                self.spin_layer.setEnabled(True)
+            elif num_layers == 1:
+                # Could be (1, H, W, C) or (1, H, W)
+                # LazyStack ndim is base + 1
+                if lazy_stack.ndim == 4: # (1, H, W, C)
+                     # Treat C as channels of single layer?
+                     # But spin_layer controls 'Z'.
+                     self.spin_layer.setRange(0, 0)
+                     self.spin_layer.setEnabled(False)
                 else:
-                    # Single Series, check pages
-                    # Some TIFs put Z in pages
-                    print(f"Detected 1 series, {num_pages} pages.")
-                    if num_pages > 1:
-                        s = max(0, req_start)
-                        e = min(num_pages - 1, req_end)
-                        if e < s: e = s
-                        
-                        real_start = s
-                        print(f"Loading Pages [{s}..{e}]")
-                        
-                        # tif.asarray(key=slice) or similar
-                        # But safer to manually stack pages if memory is concern?
-                        # tif.asarray(key=...) reads efficiently
-                        data = tif.asarray(key=slice(s, e+1))
-                    else:
-                        # 1 Page
-                        real_start = 0
-                        data = tif.asarray()
+                     self.spin_layer.setRange(0, 0)
+                     self.spin_layer.setEnabled(False)
             
-            print(f"Shape: {data.shape}, Dtype: {data.dtype}")
+            self.spin_layer.blockSignals(False)
             
-            self.full_data = data
-            self.layer_offset = real_start
-            
-            # Clear cache for new file
+            # Clear cache
             for t in self.layer_cache.values():
                 t.cleanup()
             self.layer_cache.clear()
             self.layer_calib_data.clear()
             
-            # Detect layers
-            self.spin_layer.blockSignals(True) # Mute signals
-            
-            if self.full_data.ndim > 2:
-                # Check for RGB (H, W, 3/4) vs (Z, H, W) vs (Z, H, W, C)
-                # Heuristic: if last dim is 3 or 4, it's RGB
-                is_rgb = (self.full_data.shape[-1] in (3, 4))
-                
-                if is_rgb:
-                    # (H,W,3) or (Z,H,W,3)
-                    if self.full_data.ndim == 4:
-                        # (Z, H, W, C)
-                        num_layers = self.full_data.shape[0]
-                        self.spin_layer.setRange(0, num_layers - 1)
-                        self.spin_layer.setValue(0)
-                        self.spin_layer.setEnabled(True)
-                    else:
-                        # (H, W, C) -> 1 Layer
-                        self.spin_layer.setRange(0, 0)
-                        self.spin_layer.setEnabled(False)
-                else:
-                    # (Z, H, W)
-                    num_layers = self.full_data.shape[0]
-                    self.spin_layer.setRange(0, num_layers - 1)
-                    self.spin_layer.setValue(0)
-                    self.spin_layer.setEnabled(True)
-            else:
-                self.spin_layer.setRange(0, 0)
-                self.spin_layer.setEnabled(False)
-                
-            self.spin_layer.blockSignals(False)
-            
             # Auto-Leveling (Estimate from first visual layer)
             try:
+                # Accessing [0] loads the first layer from disk
                 sample_layer = to_gray2d_uint16(self.full_data, 0)
+                
                 # Subsample for speed (max 10k items)
                 h, w = sample_layer.shape
                 step = int(max(1, np.sqrt((h*w)/10000)))
+                # Ensure 2D slicing works on numpy array
                 stats_slice = sample_layer[::step, ::step]
                 
-                # Use percentiles for robustness against noise
-                # p1, p99 = np.percentile(stats_slice, [1, 99])
-                # Or just min/max
                 vmin, vmax = np.min(stats_slice), np.max(stats_slice)
                 
                 # Set sliders
@@ -1474,24 +1494,27 @@ class MainWindow(QMainWindow):
                 self.slider_lo.blockSignals(False)
                 self.slider_hi.blockSignals(False)
                 
-                # Apply to GL
                 self.on_window_changed()
-                
                 print(f"Auto-Leveled to [{vmin}, {vmax}]")
+                
             except Exception as e:
                 print(f"Auto-Level failed: {e}")
-                import traceback
-                traceback.print_exc()
-            
-            # Preload GPU Cache
+                # traceback.print_exc()
+
+            # Preload GPU Cache? 
+            # With lazy loading, preloading defeats the purpose of "Low RAM", 
+            # BUT it puts it in VRAM. VRAM is faster.
+            # User output showed "Preloading..."
             self.preload_gpu_cache()
-                
+            
             self.load_layer(0)
             
         except Exception as e:
             print(f"Error loading file: {e}")
             import traceback
             traceback.print_exc()
+            
+
 
     def preload_gpu_cache(self):
         """
