@@ -1,21 +1,21 @@
 import sys
+import os
+import json
+import time
 import numpy as np
 import tifffile
+import re
+
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QFileDialog,
-    QSlider, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QToolBar,
-    QSpinBox, QSplitter
+    QApplication, QMainWindow, QFileDialog, QSlider, QLabel, QWidget, 
+    QVBoxLayout, QHBoxLayout, QToolBar, QSpinBox, QSplitter, 
+    QDockWidget, QPlainTextEdit, QPushButton, QGroupBox, QFormLayout, 
+    QDoubleSpinBox, QProgressDialog, QScrollArea, QSizePolicy, QCheckBox,
+    QComboBox, QListWidgetItem, QListWidget, QRadioButton, QButtonGroup
 )
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtGui import QSurfaceFormat, QAction
-from PySide6.QtCore import Qt, Signal, QRectF, QTimer
 from PySide6.QtGui import QSurfaceFormat, QAction, QColor, QImage, QPainter
-from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QFileDialog,
-    QSlider, QLabel, QWidget, QVBoxLayout, QHBoxLayout, QToolBar,
-    QSpinBox, QSplitter, QDockWidget, QPlainTextEdit, QPushButton,
-    QGroupBox, QFormLayout, QDoubleSpinBox, QProgressDialog
-)
+from PySide6.QtCore import Qt, Signal, QRectF, QTimer, QPointF
 import re
 
 from OpenGL.GL import *
@@ -212,11 +212,346 @@ class TiledImage:
 
 
 # ==================================================================================
-# 2.1 Bonding Map & Grid System
+# 2.2 Void Data Manager
 # ==================================================================================
-class BondingMap:
+class VoidManager:
     """
-    Parses and stores the bonding map data (keys/labels in a grid).
+    Manages void markings for all layers.
+    Stores data in Global Coordinates (truth).
+    Handles saving/loading relative to Chip Coordinates.
+    """
+    def __init__(self):
+        self.voids = {} # Dict[layer_index: int, List[dict]]
+        
+        # Void Types
+        # ID -> {name, color: (r,g,b)}
+        self.types = {
+            0: {"name": "Defect", "color": (255, 0, 0)}, # Red
+            1: {"name": "Warning", "color": (255, 165, 0)}, # Orange
+            2: {"name": "Safe", "color": (0, 255, 0)}, # Green
+            3: {"name": "Check", "color": (0, 255, 255)} # Cyan
+        }
+        self.next_type_id = 4
+
+    def add_type(self, name, color):
+        tid = self.next_type_id
+        self.types[tid] = {"name": name, "color": color}
+        self.next_type_id += 1
+        return tid
+
+    def update_type(self, tid, name, color):
+        if tid in self.types:
+            self.types[tid] = {"name": name, "color": color}
+
+    def remove_type(self, tid):
+        if tid in self.types and len(self.types) > 1:
+            del self.types[tid]
+            # Remap existing voids to default 0?
+            for layer in self.voids:
+                for v in self.voids[layer]:
+                    if v.get("type_id") == tid:
+                        v["type_id"] = 0 # Default
+
+    def add_void(self, layer, gx, gy, radius, type_id=0):
+        if layer not in self.voids:
+            self.voids[layer] = []
+            
+        new_void = {
+            "globalCX": gx,
+            "globalCY": gy,
+            "radius": radius,
+            "layer": layer,
+            "type_id": type_id,
+            "createdAt": int(time.time() * 1000),
+            "voidIndex": 0
+        }
+        self.voids[layer].append(new_void)
+        return new_void
+
+    def delete_void_at(self, layer, gx, gy, hit_radius=10.0):
+        """
+        Deletes the first void overlapping the point (Simple Hit Test).
+        Returns True if deleted.
+        """
+        if layer not in self.voids: return False
+        
+        target = None
+        for v in self.voids[layer]:
+            # Distance check
+            dx = gx - v["globalCX"]
+            dy = gy - v["globalCY"]
+            dist_sq = dx*dx + dy*dy
+            
+            rad = v["radius"]
+            if dist_sq <= rad*rad:
+                target = v
+                break
+                
+        if target:
+            self.voids[layer].remove(target)
+            return True
+        return False
+
+    def hit_test(self, layer, gx, gy, margin=5.0):
+        """
+        Returns (void_obj, type_str)
+        type_str: 'center' (move), 'edge' (resize), None
+        """
+        if layer not in self.voids: return None, None
+        
+        for v in reversed(self.voids[layer]): # Top-most first
+            dx = gx - v["globalCX"]
+            dy = gy - v["globalCY"]
+            dist = np.sqrt(dx*dx + dy*dy)
+            rad = v["radius"]
+            
+            if abs(dist - rad) <= margin:
+                return v, 'edge'
+            
+            if dist < rad:
+                return v, 'center'
+                
+        return None, None
+
+    def clear_layer(self, layer):
+        if layer in self.voids:
+            self.voids[layer] = []
+
+    def save_to_file(self, path, grid_cfg):
+        """
+        Converts Global -> Chip Relative using current Grid Config.
+        Saves as Dict with 'types' and 'voids'.
+        "type" field uses Type Name (User Request).
+        """
+        data = {
+            "version": 2,
+            "types": self.types, # ID -> {name, color}
+            "voids": []
+        }
+        
+        # Flatten all layers
+        for layer, v_list in self.voids.items():
+            for v in v_list:
+                col = int(np.floor((v["globalCX"] - grid_cfg.start_x) / grid_cfg.pitch_x))
+                row = int(np.floor((v["globalCY"] - grid_cfg.start_y) / grid_cfg.pitch_y))
+                
+                chip_x0 = grid_cfg.start_x + col * grid_cfg.pitch_x
+                chip_y0 = grid_cfg.start_y + row * grid_cfg.pitch_y
+                
+                rel_cx = v["globalCX"] - chip_x0
+                rel_cy = v["globalCY"] - chip_y0
+                
+                rad = v["radius"]
+                key_str = f"{col},{row},{layer},0"
+                
+                # Resolve Type Name
+                tid = v.get("type_id", 0)
+                type_name = "bbox"
+                if tid in self.types:
+                    type_name = self.types[tid]["name"]
+                
+                item = {
+                    "key": key_str,
+                    "x": col, "y": row, "layer": layer, "voidIndex": 0,
+                    "type": type_name, # Use Name as requested
+                    "type_id": tid, # Keep ID for backup
+                    "centerX": rel_cx,
+                    "centerY": rel_cy,
+                    "radiusX": rad,
+                    "radiusY": rad,
+                    "createdAt": v.get("createdAt", 0),
+                    "patchLabel": f"X{col:02d}_Y{row:02d}_L{layer:02d}_void"
+                }
+                data["voids"].append(item)
+                
+        try:
+            with open(path, 'w') as f:
+                json.dump(data, f, indent=2)
+            print(f"Saved {len(data['voids'])} voids and {len(self.types)} types to {path}")
+        except Exception as e:
+            print(f"Save failed: {e}")
+
+    def load_from_file(self, path, grid_cfg):
+        """
+        Reads JSON -> Calculates Global using Grid Config.
+        Handles V1 (list) and V2 (dict) formats.
+        Resolves 'type' string back to ID.
+        """
+        try:
+            with open(path, 'r') as f:
+                raw_data = json.load(f)
+                
+            self.voids.clear()
+            count = 0
+            
+            # Determine format
+            if isinstance(raw_data, list):
+                # V1 Format
+                void_list = raw_data
+            elif isinstance(raw_data, dict):
+                # V2 Format
+                if "types" in raw_data:
+                    self.types = {int(k): v for k, v in raw_data["types"].items()}
+                    if self.types:
+                        self.next_type_id = max(self.types.keys()) + 1
+                    else:
+                         self.next_type_id = 0
+                void_list = raw_data.get("voids", [])
+            else:
+                print("Unknown JSON format")
+                return
+
+            # Build Name -> ID map for resolution
+            name_to_id = {v["name"]: k for k, v in self.types.items()}
+
+            for item in void_list:
+                layer = item.get("layer", 0)
+                col = item.get("x", 0)
+                row = item.get("y", 0)
+                rel_cx = item.get("centerX", 0)
+                rel_cy = item.get("centerY", 0)
+                rad = item.get("radiusX", 10.0)
+                
+                # Resolve Type
+                tid = 0
+                t_str = item.get("type", None)
+                if t_str and t_str in name_to_id:
+                    tid = name_to_id[t_str]
+                elif "type_id" in item:
+                    tid = item["type_id"]
+                    
+                # If Type ID not in current types (e.g. from V1 file or mismatch), fallback to 0
+                if tid not in self.types:
+                    tid = 0
+                
+                # Calc Global
+                chip_x0 = grid_cfg.start_x + col * grid_cfg.pitch_x
+                chip_y0 = grid_cfg.start_y + row * grid_cfg.pitch_y
+                
+                gx = chip_x0 + rel_cx
+                gy = chip_y0 + rel_cy
+                
+                if layer not in self.voids: self.voids[layer] = []
+                
+                v_obj = {
+                    "globalCX": gx,
+                    "globalCY": gy,
+                    "radius": rad,
+                    "layer": layer,
+                    "type_id": tid,
+                    "createdAt": item.get("createdAt", 0),
+                    "voidIndex": item.get("voidIndex", 0)
+                }
+                self.voids[layer].append(v_obj)
+                count += 1
+            
+            print(f"Loaded {count} voids from {path}")
+            
+        except Exception as e:
+            print(f"Load failed: {e}")
+
+# ==================================================================================
+# 2.3 Bonding Map & Grid System
+# ==================================================================================
+class VoidTypeDialog(QWidget):
+    """
+    Dialog to manage Void Types (Add, Remove, Color).
+    Embeds in a QDialog usually, but here inheriting QWidget for simplicity if docked,
+    or better just QDialog.
+    """
+    def __init__(self, void_manager, parent=None):
+        from PySide6.QtWidgets import QDialog, QListWidget, QListWidgetItem, QColorDialog
+        # Dynamic import to avoid top-level circular deps if any, though top level is fine
+        super().__init__(parent)
+        self.setWindowTitle("Manage Void Types")
+        self.resize(300, 400)
+        self.setWindowModality(Qt.ApplicationModal)
+        
+        self.vm = void_manager
+        
+        layout = QVBoxLayout(self)
+        
+        self.list_widget = QListWidget()
+        layout.addWidget(self.list_widget)
+        
+        h = QHBoxLayout()
+        btn_add = QPushButton("Add")
+        btn_remove = QPushButton("Remove")
+        btn_color = QPushButton("Color")
+        btn_rename = QPushButton("Rename")
+        
+        h.addWidget(btn_add)
+        h.addWidget(btn_remove)
+        h.addWidget(btn_color)
+        h.addWidget(btn_rename)
+        layout.addLayout(h)
+        
+        btn_add.clicked.connect(self.add_type)
+        btn_remove.clicked.connect(self.remove_type)
+        btn_color.clicked.connect(self.change_color)
+        btn_rename.clicked.connect(self.rename_type)
+        
+        self.refresh()
+        
+    def refresh(self):
+        self.list_widget.clear()
+        for tid, data in self.vm.types.items():
+            name = data["name"]
+            color = data["color"] # (r, g, b)
+            item = QListWidgetItem(f"{name}")
+            # Set background color
+            c = QColor(color[0], color[1], color[2])
+            item.setBackground(c)
+            # Text color contrast?
+            if (c.red()*0.299 + c.green()*0.587 + c.blue()*0.114) < 128:
+                item.setForeground(Qt.white)
+            else:
+                item.setForeground(Qt.black)
+                
+            item.setData(Qt.UserRole, tid)
+            self.list_widget.addItem(item)
+            
+    def add_type(self):
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "New Type", "Type Name:")
+        if ok and name:
+            self.vm.add_type(name, (255, 255, 0)) # Default Yellow
+            self.refresh()
+            
+    def remove_type(self):
+        row = self.list_widget.currentRow()
+        if row < 0: return
+        tid = self.list_widget.item(row).data(Qt.UserRole)
+        self.vm.remove_type(tid)
+        self.refresh()
+        
+    def change_color(self):
+        row = self.list_widget.currentRow()
+        if row < 0: return
+        tid = self.list_widget.item(row).data(Qt.UserRole)
+        
+        curr_c = self.vm.types[tid]["color"]
+        c = QColorDialog.getColor(QColor(curr_c[0], curr_c[1], curr_c[2]), self)
+        
+        if c.isValid():
+            self.vm.types[tid]["color"] = (c.red(), c.green(), c.blue())
+            self.refresh()
+
+    def rename_type(self):
+        row = self.list_widget.currentRow()
+        if row < 0: return
+        tid = self.list_widget.item(row).data(Qt.UserRole)
+        old_name = self.vm.types[tid]["name"]
+        
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self, "Rename Type", "New Name:", text=old_name)
+        if ok and name:
+            self.vm.types[tid]["name"] = name
+            self.refresh()
+
+
+class BondingMap:
+    """Parses and stores the bonding map data (keys/labels in a grid).
     Assigns colors to unique keys.
     """
     def __init__(self):
@@ -372,6 +707,12 @@ class GLImageWidget(QOpenGLWidget):
         self.grid_cfg = GridConfig()
         self.bonding_map = None # Single BondingMap Instance
         self.map_tex = None
+        
+        # Void Marking
+        self.void_manager = None
+        self.void_mode = False # "DRAW" | "EDIT" | "ERASE" | False (Off)
+        self.active_type_id = 0
+        self.current_layer = 0
         
         # Auto-Calibration
         self.calib_tex = None # GL Texture for (Scale, Offset) per cell
@@ -566,8 +907,8 @@ class GLImageWidget(QOpenGLWidget):
             
             vec2 rel = pixelPos - vec2(grid_x, grid_y);
             // Rotate by -angle (World to Grid)
-            // x' = x*cos(-a) - y*sin(-a) = x*c + y*s
-            // y' = x*sin(-a) + y*cos(-a) = -x*s + y*c
+            // x_rot = x*cos(-a) - y*sin(-a) = x*c + y*s
+            // y_rot = x*sin(-a) + y*cos(-a) = -x*s + y*c
             vec2 rotPos;
             rotPos.x = rel.x * c + rel.y * s;
             rotPos.y = -rel.x * s + rel.y * c;
@@ -623,7 +964,7 @@ class GLImageWidget(QOpenGLWidget):
                             if (c >= 0 && c < grid_cols && r >= 0 && r < grid_rows) {
                                   // Map Lookup: Flip Y for texture lookup?
                                   // We previously handled map vertically?
-                                  // Let's assume (row, col) matches Map Texture (row, col) with V inverted?
+                                  // Lets assume (row, col) matches Map Texture (row, col) with V inverted?
                                   // Re-use logic: map is uploaded row-by-row. R=0 at V=0?
                                   // If BondingMap.data_map[0] is R=0.
                                   // If we upload it, Row 0 goes to V=0 (Bottom).
@@ -919,10 +1260,137 @@ class GLImageWidget(QOpenGLWidget):
         
         self.update()
 
+    # -----------------------------------------------
+    # Overlay Rendering (QPainter)
+    # -----------------------------------------------
+    def paintEvent(self, e):
+        # 1. Draw OpenGL content
+        super().paintEvent(e)
+        
+        # 2. Draw 2D Overlay (Voids)
+        if self.void_manager and self.tiled_image:
+             painter = QPainter(self)
+             painter.setRenderHint(QPainter.Antialiasing)
+             
+             # Current Layer Voids
+             layer_voids = self.void_manager.voids.get(self.current_layer, [])
+             
+             # Draw Helper
+             def to_screen(gx, gy):
+                 # Inverse of get_image_coords
+                 view_w = self.width()
+                 view_h = self.height()
+                 cx = view_w / 2
+                 cy = view_h / 2
+                 
+                 if self.tiled_image:
+                     img_w = self.tiled_image.w
+                     img_h = self.tiled_image.h
+                 else:
+                     img_w = 1000
+                     img_h = 1000
+                 
+                 img_cx = img_w / 2
+                 img_cy = img_h / 2
+                 
+                 screen_x = (gx - img_cx + self.pan_x) * self.zoom + cx
+                 screen_y = (gy - img_cy + self.pan_y) * self.zoom + cy
+                 return screen_x, screen_y
+
+             # Iterate Voids
+             for v in layer_voids:
+                 sx, sy = to_screen(v["globalCX"], v["globalCY"])
+                 sr = v["radius"] * self.zoom
+                 
+                 # Determine Color
+                 tid = v.get("type_id", 0)
+                 # Safety check
+                 if tid not in self.void_manager.types: tid = 0
+                 type_data = self.void_manager.types.get(tid, {"color": (255, 255, 0)})
+                 col_rgb = type_data["color"]
+                 
+                 if v == getattr(self, 'active_void', None):
+                     # Active: Red border, Type fill
+                     painter.setPen(QColor(255, 0, 0, 255)) 
+                     painter.setBrush(QColor(col_rgb[0], col_rgb[1], col_rgb[2], 100))
+                 else:
+                     # Normal: Type border, no fill
+                     painter.setPen(QColor(col_rgb[0], col_rgb[1], col_rgb[2], 200)) 
+                     painter.setBrush(Qt.NoBrush)
+                     
+                 # Draw Circle
+                 painter.drawEllipse(QPointF(sx, sy), sr, sr)
+
+             painter.end()
+
+    # -----------------------------------------------
+    # Mouse Interaction
+    # -----------------------------------------------
+    def get_image_coords(self, pos):
+        # Converts screen position to Global Image Coordinates
+        mx = pos.x()
+        my = pos.y()
+        
+        view_w = self.width()
+        view_h = self.height()
+        cx = view_w / 2
+        cy = view_h / 2
+        
+        dx = mx - cx
+        dy = my - cy
+        
+        if self.tiled_image:
+             img_w = self.tiled_image.w
+             img_h = self.tiled_image.h
+        else:
+             img_w = 1000
+             img_h = 1000
+             
+        img_cx = img_w / 2
+        img_cy = img_h / 2
+        
+        view_center_x = img_cx - self.pan_x
+        view_center_y = img_cy - self.pan_y
+        
+        gx = view_center_x + dx / self.zoom
+        gy = view_center_y + dy / self.zoom
+        
+        return gx, gy
+
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
             self._last_mouse = e.position()
-            self.setFocus() # Ensure we get keyboard focus
+            self.setFocus()
+            
+            # Void Interaction
+            if self.void_mode and self.void_manager and self.tiled_image:
+                gx, gy = self.get_image_coords(e.position())
+                
+                if self.void_mode == "DRAW":
+                    # Start New Void
+                    r = 50.0 / self.zoom # Default radius visual
+                    self.active_void = self.void_manager.add_void(self.current_layer, gx, gy, 10.0, self.active_type_id) # Start small
+                    self.active_void_action = 'sizing'
+                    self.update()
+                    return # Consume event
+                    
+                elif self.void_mode == "EDIT":
+                    # Hit Test
+                    v, action = self.void_manager.hit_test(self.current_layer, gx, gy, margin=10.0/self.zoom)
+                    if v:
+                        self.active_void = v
+                        self.active_void_action = action # 'center' or 'edge'
+                        self.update()
+                        return
+                        
+                elif self.void_mode == "ERASE":
+                    # Delete on click
+                    deleted = self.void_manager.delete_void_at(self.current_layer, gx, gy)
+                    if deleted:
+                        self.update()
+                        # If drag-erase is desired, set flag?
+                        self.active_void_action = 'erasing'
+                        return
 
     def mouseMoveEvent(self, e):
         if self._last_mouse is None:
@@ -931,7 +1399,47 @@ class GLImageWidget(QOpenGLWidget):
         dx = e.position().x() - self._last_mouse.x()
         dy = e.position().y() - self._last_mouse.y()
         
+        # Void Interaction
+        if self.void_mode and getattr(self, 'active_void_action', None):
+             # Handle Drag
+             gx, gy = self.get_image_coords(e.position())
+             
+             if self.active_void_action == 'sizing' and self.active_void:
+                 # Dist from center
+                 dcx = gx - self.active_void["globalCX"]
+                 dcy = gy - self.active_void["globalCY"]
+                 dist = np.sqrt(dcx*dcx + dcy*dcy)
+                 self.active_void["radius"] = dist
+                 self.update()
+                 
+             elif self.active_void_action == 'center' and self.active_void:
+                 # Move Center
+                 # Simple delta
+                 img_dx = dx / self.zoom
+                 img_dy = dy / self.zoom
+                 self.active_void["globalCX"] += img_dx
+                 self.active_void["globalCY"] += img_dy
+                 self.update()
+                 
+             elif self.active_void_action == 'edge' and self.active_void:
+                 # Resize (Symetric)
+                 # Dist from center
+                 dcx = gx - self.active_void["globalCX"]
+                 dcy = gy - self.active_void["globalCY"]
+                 dist = np.sqrt(dcx*dcx + dcy*dcy)
+                 self.active_void["radius"] = dist
+                 self.update()
+                 
+             elif self.active_void_action == 'erasing':
+                 # Continuous erase?
+                 self.void_manager.delete_void_at(self.current_layer, gx, gy)
+                 self.update()
+                 
+             self._last_mouse = e.position()
+             return
+
         # Check modifiers
+
         modifiers = QApplication.keyboardModifiers()
         
         if modifiers == Qt.ControlModifier and self.grid_cfg.visible:
@@ -958,6 +1466,15 @@ class GLImageWidget(QOpenGLWidget):
         
         self._last_mouse = e.position()
         self.update()
+
+    def mouseReleaseEvent(self, e):
+        # Clear interaction state
+        self._last_mouse = None
+        
+        if self.void_mode:
+            self.active_void = None
+            self.active_void_action = None
+            self.update()
         
     def keyPressEvent(self, e):
         if not self.grid_cfg.visible:
@@ -1138,6 +1655,92 @@ class MainWindow(QMainWindow):
         v_ext.addWidget(btn_extract)
         v_ext.addWidget(btn_extract)
         dock_layout.addWidget(gb_extract)
+        
+        # 3.5 Void Marking Control
+        self.void_manager = VoidManager()
+        self.glw.void_manager = self.void_manager
+        
+        self.gb_void = QGroupBox("Void Marking")
+        v_layout_void = QVBoxLayout(self.gb_void)
+        
+        # Toggle Mode
+        self.chk_void_mode = QCheckBox("Enable Void Mode (M)")
+        self.chk_void_mode.toggled.connect(self.on_void_mode_toggled)
+        
+        # Mode Selection (Draw/Edit/Erase)
+        h_modes = QHBoxLayout()
+        self.rb_draw = QRadioButton("Draw")
+        self.rb_edit = QRadioButton("Edit")
+        self.rb_erase = QRadioButton("Erase")
+        self.rb_draw.setChecked(True)
+        
+        self.mode_group = QButtonGroup(self)
+        self.mode_group.addButton(self.rb_draw)
+        self.mode_group.addButton(self.rb_edit)
+        self.mode_group.addButton(self.rb_erase)
+        
+        # Use buttonClicked (pointer to button) or standard signals
+        self.mode_group.buttonClicked.connect(self.on_void_mode_changed)
+        
+        h_modes.addWidget(self.rb_draw)
+        h_modes.addWidget(self.rb_edit)
+        h_modes.addWidget(self.rb_erase)
+        
+        # Type Selector
+        h_type = QHBoxLayout()
+        self.cb_void_type = QComboBox()
+        self.cb_void_type.currentIndexChanged.connect(self.on_void_type_changed)
+        self.btn_edit_types = QPushButton("Types...")
+        self.btn_edit_types.clicked.connect(self.open_type_manager)
+        h_type.addWidget(QLabel("Type:"))
+        h_type.addWidget(self.cb_void_type, 1)
+        h_type.addWidget(self.btn_edit_types)
+
+        
+        # Info
+        self.lbl_void_count = QLabel("Voids: 0")
+        
+        # Buttons
+        h_layout_void_btns = QHBoxLayout()
+        self.btn_load_voids = QPushButton("Load JSON")
+        self.btn_save_voids = QPushButton("Save JSON")
+        self.btn_clear_voids = QPushButton("Clear Layer")
+        
+        self.btn_load_voids.clicked.connect(self.load_voids)
+        self.btn_save_voids.clicked.connect(self.save_voids)
+        self.btn_clear_voids.clicked.connect(self.clear_voids)
+        
+        h_layout_void_btns.addWidget(self.btn_load_voids)
+        h_layout_void_btns.addWidget(self.btn_save_voids)
+        
+        v_layout_void.addWidget(self.chk_void_mode)
+        v_layout_void.addLayout(h_modes)
+        v_layout_void.addLayout(h_type)
+        v_layout_void.addWidget(self.lbl_void_count)
+        v_layout_void.addLayout(h_layout_void_btns)
+        v_layout_void.addWidget(self.btn_clear_voids)
+        
+        dock_layout.addWidget(self.gb_void)
+        
+        # Init Types
+        self.populate_void_types()
+        
+        # Shortcuts for Void Mode
+        self.action_toggle_void = QAction("Toggle Void Mode", self)
+        self.action_toggle_void.setShortcut("m")
+        self.action_toggle_void.triggered.connect(self.toggle_void_mode_action)
+        self.addAction(self.action_toggle_void)
+        
+        self.action_void_edit = QAction("Void Edit Mode", self)
+        self.action_void_edit.setShortcut("e")
+        self.action_void_edit.triggered.connect(self.set_void_mode_edit)
+        self.addAction(self.action_void_edit)
+        
+        self.action_void_erase = QAction("Void Erase Mode", self)
+        self.action_void_erase.setShortcut("d")
+        self.action_void_erase.triggered.connect(self.set_void_mode_erase)
+        self.addAction(self.action_void_erase)
+
         
         # 4. Auto Calibration
         gb_calib = QGroupBox("Auto Calibration")
@@ -1404,6 +2007,99 @@ class MainWindow(QMainWindow):
         progress.setValue(len(layers))
         print(f"Extraction Complete. Total {total_extracted} patches.")
 
+    def toggle_void_mode_action(self):
+        self.chk_void_mode.setChecked(not self.chk_void_mode.isChecked())
+
+    def set_void_mode_edit(self):
+        self.chk_void_mode.setChecked(True)
+        self.rb_edit.setChecked(True)
+        self.on_void_mode_changed()
+
+    def set_void_mode_erase(self):
+        self.chk_void_mode.setChecked(True)
+        self.rb_erase.setChecked(True)
+        self.on_void_mode_changed()
+
+    def on_void_mode_changed(self):
+        # Called when Radio Button changes
+        if not self.chk_void_mode.isChecked():
+            return
+            
+        if self.rb_draw.isChecked():
+            self.glw.void_mode = "DRAW"
+            print("Void Mode: DRAW")
+        elif self.rb_edit.isChecked():
+            self.glw.void_mode = "EDIT"
+            print("Void Mode: EDIT")
+        elif self.rb_erase.isChecked():
+            self.glw.void_mode = "ERASE"
+            print("Void Mode: ERASE")
+            
+        self.glw.setFocus()
+        self.glw.update()
+
+    def on_void_mode_toggled(self, checked):
+        if checked:
+            # Re-apply current radio selection
+            self.on_void_mode_changed()
+        else:
+            self.glw.void_mode = False
+            print("Void Mode: OFF")
+        self.glw.setFocus()
+        
+    def load_voids(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Load Voids JSON", "", "JSON (*.json)")
+        if path:
+            self.void_manager.load_from_file(path, self.glw.grid_cfg)
+            self.populate_void_types() # Refresh types
+            self.update_void_ui()
+            self.glw.update()
+            
+    def populate_void_types(self):
+        self.cb_void_type.blockSignals(True)
+        self.cb_void_type.clear()
+        
+        # Sort by ID
+        for tid, data in sorted(self.void_manager.types.items()):
+            self.cb_void_type.addItem(data["name"], tid)
+            
+        self.cb_void_type.blockSignals(False)
+        
+        # Set first as default if available
+        if self.cb_void_type.count() > 0:
+            self.cb_void_type.setCurrentIndex(0)
+            self.on_void_type_changed(0)
+            
+    def on_void_type_changed(self, idx):
+        if idx < 0: return
+        tid = self.cb_void_type.currentData()
+        self.glw.active_type_id = tid
+        print(f"Active Void Type: {self.void_manager.types[tid]['name']}")
+        
+    def open_type_manager(self):
+        dlg = VoidTypeDialog(self.void_manager, self)
+        dlg.exec()
+        self.populate_void_types()
+        self.glw.update()
+
+    def save_voids(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Save Voids JSON", "voids.json", "JSON (*.json)")
+        if path:
+            self.void_manager.save_to_file(path, self.glw.grid_cfg)
+            
+    def clear_voids(self):
+        self.void_manager.clear_layer(self.current_z) # Use current Z
+        self.update_void_ui()
+        self.glw.update()
+        
+    def update_void_ui(self):
+        # Update label count
+        if self.current_z in self.void_manager.voids:
+            count = len(self.void_manager.voids[self.current_z])
+        else:
+            count = 0
+        self.lbl_void_count.setText(f"Voids: {count}")
+
     def open_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open", "", "TIFF (*.tif *.tiff)")
         if not path:
@@ -1522,10 +2218,7 @@ class MainWindow(QMainWindow):
 
 
     def preload_gpu_cache(self):
-        """
-        Preloads all loaded layers into GPU memory to enable instant switching.
-        Shows a progress dialog.
-        """
+        # Preloads all loaded layers into GPU memory to enable instant switching.
         if self.full_data is None:
             return
             
