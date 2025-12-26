@@ -165,11 +165,16 @@ class Tile:
         
         self.is_uploaded = True
         
+        # MEMORY OPTIMIZATION: Release CPU copy immediately
+        # We don't need it after upload. If context is lost, we reload from disk (LazyStack).
+        self.data = None
+
     def cleanup(self):
         if self.tex_id:
             glDeleteTextures([self.tex_id])
             self.tex_id = None
         self.is_uploaded = False
+        self.data = None # Ensure clear
 
 class TiledImage:
     """
