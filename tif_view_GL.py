@@ -1730,7 +1730,12 @@ class MainWindow(QMainWindow):
         self.action_toggle_void.setShortcut("m")
         self.action_toggle_void.triggered.connect(self.toggle_void_mode_action)
         self.addAction(self.action_toggle_void)
-        
+    
+        self.action_void_draw = QAction("Void Draw Mode", self)
+        self.action_void_draw.setShortcut("w")
+        self.action_void_draw.triggered.connect(self.set_void_mode_draw)
+        self.addAction(self.action_void_draw)
+
         self.action_void_edit = QAction("Void Edit Mode", self)
         self.action_void_edit.setShortcut("e")
         self.action_void_edit.triggered.connect(self.set_void_mode_edit)
