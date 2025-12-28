@@ -387,7 +387,7 @@ class GLImageWidget(QOpenGLWidget):
                                   vec4 mapCol = texture(map_tex, mapUV);
                                   if (mapCol.a > 0.0) {
                                       // Blend map color
-                                      overlayColor = mix(overlayColor, mapCol, 0.3); // Tint
+                                      overlayColor = mix(overlayColor, mapCol, 0.5); // Tint
                                   }
                             }
                     }
@@ -664,29 +664,10 @@ class GLImageWidget(QOpenGLWidget):
     # -----------------------------------------------
     # Overlay Rendering (QPainter)
     # -----------------------------------------------
-    def paintEvent(self, e):
-        # 1. Draw OpenGL content
-        super().paintEvent(e)
-        
-        # 2. Draw 2D Overlay (Voids)
-        if self.void_manager and self.tiled_image:
-             painter = QPainter(self)
-             painter.setRenderHint(QPainter.Antialiasing)
-             
-             # Draw Voids
-             # ... (existing drawing code) ...
-             
-             # First Pass: Ghost Voids ...
-             for layer_idx, v_list in self.void_manager.voids.items():
-                 # ... (existing code) ...
-                 pass # Placeholder for existing code block - DO NOT REPLACE WITH EMPTY IF NOT MATCHING EXACTLY. 
-                 # WAIT, I cannot replace the whole paintEvent easily.
-                 # I should insert the helper methods and signal definition elsewhere.
-                 # Let's insert them before the Key Events.
-                 
+
     # Signal for shortcuts
     void_type_shortcut_triggered = Signal(int) # Type ID
-
+    
     def create_colored_cross_cursor(self, color_tuple):
         """
         Creates a Crosshair cursor with the specified RGB color.
@@ -1053,10 +1034,7 @@ class GLImageWidget(QOpenGLWidget):
              self.void_mode = tool_name
              
              # Update Cursor
-             if self.void_mode == "DRAW" or self.void_mode == "ERASE":
-                 self.setCursor(Qt.CrossCursor)
-             elif self.void_mode == "EDIT":
-                 self.setCursor(Qt.SizeAllCursor)
+             self.update_cursor_style()
                  
              self.update()
 
@@ -1067,11 +1045,8 @@ class GLImageWidget(QOpenGLWidget):
                 print(f"Void Mode Active: {self.void_mode}")
                 
                 # Cursor Logic
-                if self.void_mode == "DRAW" or self.void_mode == "ERASE":
-                    self.setCursor(Qt.CrossCursor)
-                elif self.void_mode == "EDIT":
-                    self.setCursor(Qt.SizeAllCursor)
-                    
+                self.update_cursor_style()
+                     
                 self.update()
             super().keyPressEvent(e)
             return
