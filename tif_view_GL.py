@@ -200,6 +200,7 @@ class MainWindow(QMainWindow):
         # 3.5 Void Marking Control
         self.void_manager = VoidManager()
         self.glw.void_manager = self.void_manager
+        self.glw.void_type_shortcut_triggered.connect(self.on_void_type_shortcut)
         
         self.gb_void = QGroupBox("Void Marking")
         v_layout_void = QVBoxLayout(self.gb_void)
@@ -638,6 +639,20 @@ class MainWindow(QMainWindow):
         tid = self.cb_void_type.currentData()
         self.glw.active_type_id = tid
         print(f"Active Void Type: {self.void_manager.types[tid]['name']}")
+        
+        # Update cursor style if void mode is active
+        if self.glw.void_mode:
+            self.glw.update_cursor_style()
+
+    def on_void_type_shortcut(self, type_id):
+        """
+        Called when GLWidget detects a shortcut key (1-9, 0).
+        Sync the ComboBox.
+        """
+        # Find index for this type_id
+        idx = self.cb_void_type.findData(type_id)
+        if idx >= 0:
+            self.cb_void_type.setCurrentIndex(idx)
         
     def open_type_manager(self):
         dlg = VoidTypeDialog(self.void_manager, self)

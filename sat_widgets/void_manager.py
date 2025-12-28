@@ -20,32 +20,76 @@ class VoidManager:
     Stores data in Global Coordinates (truth).
     Handles saving/loading relative to Chip Coordinates.
     """
-    def __init__(self):
+    def __init__(self, config_path="config.json"):
         self.voids = {} # Dict[layer_index: int, List[dict]]
+        self.config_path = config_path
         
-        # Void Types
-        # ID -> {name, color: (r,g,b)}
+        # Default Types
         self.types = {
-            0: {"name": "Defect", "color": (255, 0, 0)}, # Red
-            1: {"name": "Warning", "color": (255, 165, 0)}, # Orange
-            2: {"name": "Safe", "color": (0, 255, 0)}, # Green
-            3: {"name": "Check", "color": (0, 255, 255)} # Cyan
+            0: {"name": "Defect", "color": (255, 0, 0)}, 
+            1: {"name": "Warning", "color": (255, 165, 0)}, 
+            2: {"name": "Safe", "color": (0, 255, 0)}, 
+            3: {"name": "Check", "color": (0, 255, 255)} 
         }
         self.next_type_id = 4
+        
+        # Load from config
+        self.load_config()
+
+    def load_config(self):
+        try:
+            with open(self.config_path, 'r') as f:
+                data = json.load(f)
+                if "void_types" in data:
+                    self.types = {}
+                    max_id = 0
+                    for tid_str, tdata in data["void_types"].items():
+                        tid = int(tid_str)
+                        self.types[tid] = {
+                            "name": tdata["name"],
+                            "color": tuple(tdata["color"])
+                        }
+                        if tid > max_id: max_id = tid
+                    self.next_type_id = max_id + 1
+                    print(f"Loaded {len(self.types)} void types from {self.config_path}")
+        except FileNotFoundError:
+            print("Config file not found, using defaults.")
+        except Exception as e:
+            print(f"Error loading config: {e}")
+
+    def save_config(self):
+        data = {
+            "void_types": {}
+        }
+        for tid, tdata in self.types.items():
+            data["void_types"][str(tid)] = {
+                "name": tdata["name"],
+                "color": tdata["color"]
+            }
+            
+        try:
+            with open(self.config_path, 'w') as f:
+                json.dump(data, f, indent=4)
+            print(f"Saved config to {self.config_path}")
+        except Exception as e:
+            print(f"Error saving config: {e}")
 
     def add_type(self, name, color):
         tid = self.next_type_id
         self.types[tid] = {"name": name, "color": color}
         self.next_type_id += 1
+        self.save_config()
         return tid
 
     def update_type(self, tid, name, color):
         if tid in self.types:
             self.types[tid] = {"name": name, "color": color}
+            self.save_config()
 
     def remove_type(self, tid):
         if tid in self.types and len(self.types) > 1:
             del self.types[tid]
+            self.save_config()
             # Remap existing voids to default 0?
             for layer in self.voids:
                 for v in self.voids[layer]:

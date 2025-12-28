@@ -6,7 +6,7 @@ from OpenGL.GL import *
 from OpenGL.GL import shaders
 
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtGui import QSurfaceFormat, QAction, QColor, QImage, QPainter, QPen
+from PySide6.QtGui import QSurfaceFormat, QAction, QColor, QImage, QPainter, QPen, QCursor, QPixmap
 from PySide6.QtCore import Qt, Signal, QRectF, QTimer, QPointF
 from PySide6.QtWidgets import QApplication
 
@@ -533,12 +533,19 @@ class GLImageWidget(QOpenGLWidget):
         delta = e.angleDelta().y()
         modifiers = e.modifiers()
         
-        # Swap Logic (User Request 2025-12-28)
-        # Ctrl + Wheel: Zoom
-        # Wheel: Layer Change
+        # Reconfiguration (User Request 2025-12-28)
+        # No Modifier: Zoom
+        # Ctrl or Shift: Layer Change
         
-        if modifiers & Qt.ControlModifier:
-            # Zoom Logic
+        if modifiers & (Qt.ControlModifier | Qt.ShiftModifier):
+            # Layer Change
+            # Wheel Down (delta < 0) -> Increase Layer Index -> Next Layer (steps=1)
+            # Wheel Up (delta > 0) -> Decrease Layer Index -> Prev Layer (steps=-1)
+            steps = 1 if delta < 0 else -1
+            self.layer_wheel_changed.emit(steps)
+            
+        else:
+            # Zoom Logic (Default)
             mx = e.position().x()
             my = e.position().y()
             
@@ -568,11 +575,6 @@ class GLImageWidget(QOpenGLWidget):
             
             self.zoom = new_zoom
             self.update()
-            
-        else:
-            # Layer Change
-            steps = 1 if delta > 0 else -1
-            self.layer_wheel_changed.emit(steps)
 
     def mouseDoubleClickEvent(self, e):
         if not self.grid_cfg.visible or self.tiled_image is None:
@@ -667,6 +669,73 @@ class GLImageWidget(QOpenGLWidget):
         super().paintEvent(e)
         
         # 2. Draw 2D Overlay (Voids)
+        if self.void_manager and self.tiled_image:
+             painter = QPainter(self)
+             painter.setRenderHint(QPainter.Antialiasing)
+             
+             # Draw Voids
+             # ... (existing drawing code) ...
+             
+             # First Pass: Ghost Voids ...
+             for layer_idx, v_list in self.void_manager.voids.items():
+                 # ... (existing code) ...
+                 pass # Placeholder for existing code block - DO NOT REPLACE WITH EMPTY IF NOT MATCHING EXACTLY. 
+                 # WAIT, I cannot replace the whole paintEvent easily.
+                 # I should insert the helper methods and signal definition elsewhere.
+                 # Let's insert them before the Key Events.
+                 
+    # Signal for shortcuts
+    void_type_shortcut_triggered = Signal(int) # Type ID
+
+    def create_colored_cross_cursor(self, color_tuple):
+        """
+        Creates a Crosshair cursor with the specified RGB color.
+        """
+        size = 32
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+        
+        painter = QPainter(pixmap)
+        col = QColor(color_tuple[0], color_tuple[1], color_tuple[2])
+        pen = QPen(col)
+        pen.setWidth(2)
+        painter.setPen(pen)
+        
+        center = size // 2
+        # Horizontal
+        painter.drawLine(0, center, size, center)
+        # Vertical
+        painter.drawLine(center, 0, center, size)
+        
+        # Optional: Add white outline for contrast?
+        # Maybe complex to draw properly on 1px width.
+        # Let's stick to simple colored cross first.
+        
+        painter.end()
+        
+        return QCursor(pixmap, center, center)
+
+    def update_cursor_style(self):
+        """
+        Updates the cursor based on current Void Mode and Type.
+        """
+        if not self.void_mode:
+            self.setCursor(Qt.ArrowCursor)
+            return
+
+        if self.void_mode == "DRAW" or self.void_mode == "ERASE":
+            # Use Colored Crosshair
+            tid = self.active_type_id
+            if self.void_manager and tid in self.void_manager.types:
+                col = self.void_manager.types[tid]["color"]
+                cursor = self.create_colored_cross_cursor(col)
+                self.setCursor(cursor)
+            else:
+                self.setCursor(Qt.CrossCursor)
+                
+        elif self.void_mode == "EDIT":
+            self.setCursor(Qt.SizeAllCursor)
+
     view_center_changed = Signal(int, int) # Col, Row
 
     def update_view_center_info(self):
@@ -982,6 +1051,13 @@ class GLImageWidget(QOpenGLWidget):
         # If currently active (Shift held), update immediate mode
         if self.void_mode:
              self.void_mode = tool_name
+             
+             # Update Cursor
+             if self.void_mode == "DRAW" or self.void_mode == "ERASE":
+                 self.setCursor(Qt.CrossCursor)
+             elif self.void_mode == "EDIT":
+                 self.setCursor(Qt.SizeAllCursor)
+                 
              self.update()
 
     def keyPressEvent(self, e):
@@ -989,6 +1065,13 @@ class GLImageWidget(QOpenGLWidget):
             if not self.void_mode:
                 self.void_mode = self.selected_void_tool
                 print(f"Void Mode Active: {self.void_mode}")
+                
+                # Cursor Logic
+                if self.void_mode == "DRAW" or self.void_mode == "ERASE":
+                    self.setCursor(Qt.CrossCursor)
+                elif self.void_mode == "EDIT":
+                    self.setCursor(Qt.SizeAllCursor)
+                    
                 self.update()
             super().keyPressEvent(e)
             return
@@ -1023,6 +1106,34 @@ class GLImageWidget(QOpenGLWidget):
                 self.grid_params_changed.emit()
                 self.update()
                 return
+        
+        # Shortcuts for Void Types (No Modifier or Shift is OK)
+        # 1-9 -> Index 0-8
+        # 0 -> Index 9
+        key = e.key()
+        if Qt.Key_0 <= key <= Qt.Key_9:
+             idx = -1
+             if key == Qt.Key_0: idx = 9
+             else: idx = key - Qt.Key_1
+             
+             if idx >= 0 and self.void_manager:
+                 types = sorted(self.void_manager.types.keys())
+                 if idx < len(types):
+                     new_id = types[idx]
+                     self.active_type_id = new_id
+                     print(f"Shortcut: Switch to Void Type ID {new_id}")
+                     
+                     # Emit Signal to sync UI
+                     self.void_type_shortcut_triggered.emit(new_id)
+                     
+                     # Update Cursor if needed
+                     if self.void_mode:
+                         self.update_cursor_style()
+                     
+                     self.update()
+                     
+             # Don't return, allow other handlers (though digits usually don't do nav)
+             return
         
         # 2. Plain Arrows
         # Left/Right: Navigate Patch
@@ -1126,6 +1237,7 @@ class GLImageWidget(QOpenGLWidget):
             if self.void_mode:
                 self.void_mode = False
                 print("Void Mode Deactivated")
+                self.setCursor(Qt.ArrowCursor)
                 self.update()
         super().keyReleaseEvent(e)
 
