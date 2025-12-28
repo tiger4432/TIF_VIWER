@@ -47,7 +47,10 @@ class VoidManager:
                         tid = int(tid_str)
                         self.types[tid] = {
                             "name": tdata["name"],
-                            "color": tuple(tdata["color"])
+                            "color": tuple(tdata["color"]),
+                            "shape": tdata.get("shape", "ellipse"),
+                            "def_w": tdata.get("def_w", 0.0),
+                            "def_h": tdata.get("def_h", 0.0)
                         }
                         if tid > max_id: max_id = tid
                     self.next_type_id = max_id + 1
@@ -64,7 +67,10 @@ class VoidManager:
         for tid, tdata in self.types.items():
             data["void_types"][str(tid)] = {
                 "name": tdata["name"],
-                "color": tdata["color"]
+                "color": tdata["color"],
+                "shape": tdata.get("shape", "ellipse"),
+                "def_w": tdata.get("def_w", 0.0),
+                "def_h": tdata.get("def_h", 0.0)
             }
             
         try:
@@ -74,16 +80,28 @@ class VoidManager:
         except Exception as e:
             print(f"Error saving config: {e}")
 
-    def add_type(self, name, color):
+    def add_type(self, name, color, shape="ellipse", def_w=0.0, def_h=0.0):
         tid = self.next_type_id
-        self.types[tid] = {"name": name, "color": color}
+        self.types[tid] = {
+            "name": name, 
+            "color": color, 
+            "shape": shape,
+            "def_w": def_w,
+            "def_h": def_h
+        }
         self.next_type_id += 1
         self.save_config()
         return tid
 
-    def update_type(self, tid, name, color):
+    def update_type(self, tid, name, color, shape="ellipse", def_w=0.0, def_h=0.0):
         if tid in self.types:
-            self.types[tid] = {"name": name, "color": color}
+            self.types[tid] = {
+                "name": name, 
+                "color": color, 
+                "shape": shape,
+                "def_w": def_w,
+                "def_h": def_h
+            }
             self.save_config()
 
     def remove_type(self, tid):
@@ -134,29 +152,61 @@ class VoidManager:
         if layer not in self.voids: return None, None
         
         for v in reversed(self.voids[layer]): # Top-most first
+            tid = v.get("type_id", 0)
+            shape = self.types.get(tid, {}).get("shape", "ellipse")
+            
             dx = gx - v["globalCX"]
             dy = gy - v["globalCY"]
             rx = v["radiusX"]
             ry = v["radiusY"]
             
-            # Normalized distance
-            # dist = sqrt((dx/rx)^2 + (dy/ry)^2)
-            # Boundary is dist=1.0
-            
-            dist_sq = (dx*dx)/(rx*rx) + (dy*dy)/(ry*ry)
-            dist = np.sqrt(dist_sq)
-            
-            # Margin check is tricky for ellipse. 
-            # Approximate: if dist is close to 1.0 (edge)
-            # Use 'effective radius' for margin? 
-            # Or just check if 0.8 < dist < 1.2?
-            # Let's say edge is if dist is between 0.8 and 1.2 (visual approx)
-            
-            if 0.8 <= dist <= 1.2:
-                return v, 'edge'
-            
-            if dist < 0.8:
-                return v, 'center'
+            if shape == "rectangle":
+                # Schema: globalCX=Left, globalCY=Top, radiusX=Width, radiusY=Height
+                x, y, w, h = v["globalCX"], v["globalCY"], v["radiusX"], v["radiusY"]
+                
+                # Check if point is inside
+                # Using rx as Width, ry as Height
+                if x <= gx <= x + w and y <= gy <= y + h:
+                    # Edge check?
+                    # Simple margin check: Distance to any of the 4 edges
+                    # But simpler: if strictly inside but close to border?
+                    d_left = abs(gx - x)
+                    d_right = abs(gx - (x + w))
+                    d_top = abs(gy - y)
+                    d_bottom = abs(gy - (y + h))
+                    
+                    min_dist = min(d_left, d_right, d_top, d_bottom)
+                    
+                    # Margin scaling?
+                    # For ellipse we used normalized distance.
+                    # Here direct distance.
+                    # Let's say 10% of size or fixed pixels?
+                    # Logic passed margin as fixed pixels usually.
+                    
+                    # Use a heuristic for edge: min_dist < margin?
+                    # The `hit_test` calls usually pass margin in image coords.
+                    
+                    if min_dist < margin:
+                        return v, 'edge'
+                    else:
+                        return v, 'center'
+                        
+            else:
+                # Ellipse Schema: Center/Radius
+                dist_sq = (dx*dx)/(rx*rx) + (dy*dy)/(ry*ry)
+                dist = np.sqrt(dist_sq)
+                
+                # Margin check
+                # 0.8 <= dist <= 1.2 is roughly edge
+                # But 'margin' arg is passed but unused in previous logic?
+                # Previous logic was hardcoded 0.8-1.2 normalized.
+                # Let's keep it for compatibility or improve.
+                
+                if 0.8 <= dist <= 1.2:
+                    return v, 'edge'
+                
+                if dist < 0.8:
+                    return v, 'center'
                 
         return None, None
 
@@ -380,17 +430,25 @@ class VoidTypeDialog(QDialog):
         btn_remove = QPushButton("Remove")
         btn_color = QPushButton("Color")
         btn_rename = QPushButton("Rename")
+        btn_shape = QPushButton("Shape (E/R)")
         
         h.addWidget(btn_add)
         h.addWidget(btn_remove)
         h.addWidget(btn_color)
         h.addWidget(btn_rename)
+        h.addWidget(btn_shape)
         layout.addLayout(h)
         
         btn_add.clicked.connect(self.add_type)
         btn_remove.clicked.connect(self.remove_type)
         btn_color.clicked.connect(self.change_color)
         btn_rename.clicked.connect(self.rename_type)
+        btn_rename.clicked.connect(self.rename_type)
+        btn_shape.clicked.connect(self.toggle_shape)
+        
+        btn_def = QPushButton("Default Size")
+        h.addWidget(btn_def)
+        btn_def.clicked.connect(self.set_default_size)
         
         self.refresh()
         
@@ -399,7 +457,18 @@ class VoidTypeDialog(QDialog):
         for tid, data in self.vm.types.items():
             name = data["name"]
             color = data["color"] # (r, g, b)
-            item = QListWidgetItem(f"{name}")
+            name = data["name"]
+            color = data["color"] # (r, g, b)
+            shape = data.get("shape", "ellipse")
+            def_w = data.get("def_w", 0.0)
+            def_h = data.get("def_h", 0.0)
+            
+            s_code = "E" if shape == "ellipse" else "R"
+            size_code = ""
+            if def_w > 0 or def_h > 0:
+                 size_code = f" [{def_w:.1f}x{def_h:.1f}]"
+            
+            item = QListWidgetItem(f"[{s_code}] {name}{size_code}")
             # Set background color
             c = QColor(color[0], color[1], color[2])
             item.setBackground(c)
@@ -446,4 +515,60 @@ class VoidTypeDialog(QDialog):
         name, ok = QInputDialog.getText(self, "Rename Type", "New Name:", text=old_name)
         if ok and name:
             self.vm.types[tid]["name"] = name
+            self.vm.save_config() # Save changes
+            self.refresh()
+
+    def toggle_shape(self):
+        row = self.list_widget.currentRow()
+        if row < 0: return
+        tid = self.list_widget.item(row).data(Qt.UserRole)
+        
+        curr_shape = self.vm.types[tid].get("shape", "ellipse")
+        new_shape = "rectangle" if curr_shape == "ellipse" else "ellipse"
+        
+        self.vm.types[tid]["shape"] = new_shape
+        self.vm.save_config()
+        self.refresh()
+
+    def set_default_size(self):
+        row = self.list_widget.currentRow()
+        if row < 0: return
+        tid = self.list_widget.item(row).data(Qt.UserRole)
+        
+        data = self.vm.types[tid]
+        curr_w = data.get("def_w", 0.0)
+        curr_h = data.get("def_h", 0.0)
+        
+        # simple dialog
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Set Default Size")
+        l = QVBoxLayout(dlg)
+        
+        from PySide6.QtWidgets import QDoubleSpinBox, QLabel, QDialogButtonBox
+        
+        l.addWidget(QLabel("Default Width (0 = Manual):"))
+        sb_w = QDoubleSpinBox()
+        sb_w.setRange(0.0, 99999.0)
+        sb_w.setValue(curr_w)
+        l.addWidget(sb_w)
+        
+        l.addWidget(QLabel("Default Height (0 = Manual):"))
+        sb_h = QDoubleSpinBox()
+        sb_h.setRange(0.0, 99999.0)
+        sb_h.setValue(curr_h)
+        l.addWidget(sb_h)
+        
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(dlg.accept)
+        btns.rejected.connect(dlg.reject)
+        l.addWidget(btns)
+        
+        if dlg.exec():
+            # Update
+            new_w = sb_w.value()
+            new_h = sb_h.value()
+            
+            self.vm.types[tid]["def_w"] = new_w
+            self.vm.types[tid]["def_h"] = new_h
+            self.vm.save_config()
             self.refresh()

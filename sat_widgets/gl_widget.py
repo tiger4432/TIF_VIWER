@@ -809,7 +809,16 @@ class GLImageWidget(QOpenGLWidget):
                      painter.setPen(pen)
                      painter.setBrush(Qt.NoBrush)
                      
-                     painter.drawEllipse(QPointF(sx, sy), srx, sry)
+                     painter.setBrush(Qt.NoBrush)
+                     
+                     shape = self.void_manager.types.get(tid, {}).get("shape", "ellipse")
+                     if shape == "rectangle":
+                         # rx, ry are half-width, half-height? Or radius? 
+                         # Usually radius implies from center to edge.
+                         # drawRect(x, y, w, h) -> x = cx - rx, y = cy - ry, w = 2*rx, h = 2*ry
+                         painter.drawRect(QRectF(sx - srx, sy - sry, srx * 2, sry * 2))
+                     else:
+                         painter.drawEllipse(QPointF(sx, sy), srx, sry)
 
              # Second Pass: Current Layer Voids (On Top)
              layer_voids = self.void_manager.voids.get(self.current_layer, [])
@@ -839,8 +848,28 @@ class GLImageWidget(QOpenGLWidget):
                      painter.setPen(pen)
                      painter.setBrush(Qt.NoBrush)
                      
-                 # Draw Ellipse
-                 painter.drawEllipse(QPointF(sx, sy), srx, sry)
+                 # Draw Shape
+                 shape = self.void_manager.types.get(tid, {}).get("shape", "ellipse")
+                 if shape == "rectangle":
+                      # Schema: globalCX=Left, globalCY=Top, radiusX=Width, radiusY=Height
+                      # Directly use these values
+                      painter.drawRect(QRectF(v["globalCX"], v["globalCY"], v["radiusX"], v["radiusY"]))
+                      
+                      # Wait, screen transforms?
+                      # v coordinates are Global Image Coords.
+                      # We need to transform them to Screen Coords first.
+                      # Existing logic: sx, sy = to_screen(v["globalCX"], v["globalCY"])
+                      # For Ellipse: sx, sy is center.
+                      # For Rectangle: sx, sy is Left, Top (because globalCX is Left).
+                      # srx, sry: v["radiusX"] * zoom -> Width * zoom
+                      
+                      # So:
+                      # sx, sy = to_screen(Left, Top) -> Screen Left, Screen Top
+                      # srx = Width * zoom
+                      # sry = Height * zoom
+                      painter.drawRect(QRectF(sx, sy, srx, sry))
+                 else:
+                      painter.drawEllipse(QPointF(sx, sy), srx, sry)
 
              painter.end()
 
@@ -894,8 +923,46 @@ class GLImageWidget(QOpenGLWidget):
                     self.drag_start_void_pos = (gx, gy)
                     
                     # Create void initially at anchor with 1.0 radius (tiny)
-                    self.active_void = self.void_manager.add_void(self.current_layer, gx, gy, 1.0, 1.0, self.active_type_id)
-                    self.active_void_action = 'sizing'
+                    # Create void initially
+                    type_data = self.void_manager.types.get(self.active_type_id, {})
+                    shape = type_data.get("shape", "ellipse")
+                    def_w = type_data.get("def_w", 0.0)
+                    def_h = type_data.get("def_h", 0.0)
+                    
+                    if def_w > 0 and def_h > 0:
+                        # Fixed Size Creation (Click-to-Draw)
+                        if shape == "rectangle":
+                            # Rectangle: Schema Left, Top, W, H
+                            # Click Point = Top-Left
+                            w = def_w
+                            h = def_h
+                            x = gx 
+                            y = gy
+                            self.active_void = self.void_manager.add_void(self.current_layer, x, y, w, h, self.active_type_id)
+                        else:
+                            # Ellipse: Schema Center, Radius
+                            # Click Point = Top-Left of Bounding Box
+                            # Center = Click + Radius
+                            rx = def_w / 2.0
+                            ry = def_h / 2.0
+                            cx = gx + rx
+                            cy = gy + ry
+                            self.active_void = self.void_manager.add_void(self.current_layer, cx, cy, rx, ry, self.active_type_id)
+                            
+                        # Switch to Move mode immediately allowing adjustment while holding
+                        self.active_void_action = 'center'
+                        
+                    else:
+                        # Drag-to-Size Creation (Legacy)
+                        if shape == "rectangle":
+                             # Init at (gx, gy) with small size
+                             self.active_void = self.void_manager.add_void(self.current_layer, gx, gy, 1.0, 1.0, self.active_type_id)
+                        else:
+                             # Init Center at (gx, gy)
+                             self.active_void = self.void_manager.add_void(self.current_layer, gx, gy, 1.0, 1.0, self.active_type_id)
+                             
+                        self.active_void_action = 'sizing'
+
                     self.update()
                     return # Consume event
                     
@@ -948,25 +1015,42 @@ class GLImageWidget(QOpenGLWidget):
                  # Corner-to-Corner Logic
                  start_x, start_y = getattr(self, 'drag_start_void_pos', (gx, gy))
                  
-                 # Current is gx, gy
-                 min_x = min(start_x, gx)
-                 max_x = max(start_x, gx)
-                 min_y = min(start_y, gy)
-                 max_y = max(start_y, gy)
+                 shape = self.void_manager.types.get(self.active_void.get("type_id", 0), {}).get("shape", "ellipse")
                  
-                 # Center
-                 cx = (min_x + max_x) / 2.0
-                 cy = (min_y + max_y) / 2.0
+                 if shape == "rectangle":
+                     # Rectangle Sizing: Defined by Top-Left and W, H
+                     # Start and Current define the bbox
+                     min_x = min(start_x, gx)
+                     max_x = max(start_x, gx)
+                     min_y = min(start_y, gy)
+                     max_y = max(start_y, gy)
+                     
+                     self.active_void["globalCX"] = min_x # Left
+                     self.active_void["globalCY"] = min_y # Top
+                     self.active_void["radiusX"] = max(1.0, max_x - min_x) # Width
+                     self.active_void["radiusY"] = max(1.0, max_y - min_y) # Height
+                     
+                 else:
+                     # Ellipse Sizing (Center/Radius)
+                     # Start and Current define bbox
+                     min_x = min(start_x, gx)
+                     max_x = max(start_x, gx)
+                     min_y = min(start_y, gy)
+                     max_y = max(start_y, gy)
+                     
+                     # Center
+                     cx = (min_x + max_x) / 2.0
+                     cy = (min_y + max_y) / 2.0
+                     
+                     # Radii
+                     rx = (max_x - min_x) / 2.0
+                     ry = (max_y - min_y) / 2.0
+                     
+                     self.active_void["globalCX"] = cx
+                     self.active_void["globalCY"] = cy
+                     self.active_void["radiusX"] = max(1.0, rx)
+                     self.active_void["radiusY"] = max(1.0, ry)
                  
-                 # Radii
-                 rx = (max_x - min_x) / 2.0
-                 ry = (max_y - min_y) / 2.0
-                 
-                 # Update Active
-                 self.active_void["globalCX"] = cx
-                 self.active_void["globalCY"] = cy
-                 self.active_void["radiusX"] = max(1.0, rx)
-                 self.active_void["radiusY"] = max(1.0, ry)
                  self.update()
                  
              elif self.active_void_action == 'center' and self.active_void:
@@ -979,11 +1063,31 @@ class GLImageWidget(QOpenGLWidget):
                  self.update()
                  
              elif self.active_void_action == 'edge' and self.active_void:
-                 # Resize (Independent Axes)
-                 dcx = abs(gx - self.active_void["globalCX"])
-                 dcy = abs(gy - self.active_void["globalCY"])
-                 self.active_void["radiusX"] = max(1.0, dcx)
-                 self.active_void["radiusY"] = max(1.0, dcy)
+                 shape = self.void_manager.types.get(self.active_void.get("type_id", 0), {}).get("shape", "ellipse")
+                 
+                 if shape == "rectangle":
+                     # Resize for Rectangle (Simplified: Assume dragging bottom-right relative to top-left)
+                     # Or logic: new width = gx - Left
+                     # If gx < Left, what do we do? 
+                     # For full robustness, we'd need to know WHICH edge was grabbed.
+                     # 'hit_test' doesn't return that detail appropriately yet.
+                     # Assuming simple positive resize for now (like expanding)
+                     # Or: W = abs(gx - Left), H = abs(gy - Top).
+                     # This effectively anchors at Top-Left.
+                     
+                     new_w = max(1.0, abs(gx - self.active_void["globalCX"]))
+                     new_h = max(1.0, abs(gy - self.active_void["globalCY"]))
+                     
+                     self.active_void["radiusX"] = new_w
+                     self.active_void["radiusY"] = new_h
+                     
+                 else:
+                     # Ellipse Resize (Symmetric)
+                     dcx = abs(gx - self.active_void["globalCX"])
+                     dcy = abs(gy - self.active_void["globalCY"])
+                     self.active_void["radiusX"] = max(1.0, dcx)
+                     self.active_void["radiusY"] = max(1.0, dcy)
+                 
                  self.update()
                  
              elif self.active_void_action == 'erasing':

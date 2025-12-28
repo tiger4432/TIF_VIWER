@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QSlider, QLabel, QToolBar, QDockWidget, QGroupBox, 
     QFormLayout, QPushButton, QDoubleSpinBox, QPlainTextEdit, 
     QFileDialog, QProgressDialog, QCheckBox, QRadioButton, 
-    QButtonGroup, QComboBox
+    QButtonGroup, QComboBox, QDialog 
 )
 from PySide6.QtGui import QSurfaceFormat, QAction, QImage, QPainter
 from PySide6.QtCore import Qt, QTimer
@@ -22,6 +22,7 @@ from PySide6.QtCore import Qt, QTimer
 from sat_widgets.core_data import LazyTiffStack, GridConfig, BondingMap, to_gray2d_uint16
 from sat_widgets.void_manager import VoidManager, VoidTypeDialog
 from sat_widgets.gl_widget import GLImageWidget, TiledImage
+from sat_widgets.exporter import ExportManager
 
 # ==================================================================================
 # 4. Main Window
@@ -103,13 +104,13 @@ class MainWindow(QMainWindow):
         self.chk_grid_show.toggled.connect(self.toggle_grid)
         form.addRow(self.chk_grid_show)
         
-        self.sb_grid_x = QDoubleSpinBox(); self.sb_grid_x.setRange(-10000, 50000); self.sb_grid_x.setValue(100)
-        self.sb_grid_y = QDoubleSpinBox(); self.sb_grid_y.setRange(-10000, 50000); self.sb_grid_y.setValue(100)
+        self.sb_grid_x = QDoubleSpinBox(); self.sb_grid_x.setRange(-10000, 50000); self.sb_grid_x.setValue(5000)
+        self.sb_grid_y = QDoubleSpinBox(); self.sb_grid_y.setRange(-10000, 50000); self.sb_grid_y.setValue(5000)
         form.addRow("Origin X:", self.sb_grid_x)
         form.addRow("Origin Y:", self.sb_grid_y)
         
-        self.sb_pitch_x = QDoubleSpinBox(); self.sb_pitch_x.setRange(1, 10000); self.sb_pitch_x.setValue(200)
-        self.sb_pitch_y = QDoubleSpinBox(); self.sb_pitch_y.setRange(1, 10000); self.sb_pitch_y.setValue(200)
+        self.sb_pitch_x = QDoubleSpinBox(); self.sb_pitch_x.setRange(1, 10000); self.sb_pitch_x.setValue(500)
+        self.sb_pitch_y = QDoubleSpinBox(); self.sb_pitch_y.setRange(1, 10000); self.sb_pitch_y.setValue(500)
         form.addRow("Pitch X:", self.sb_pitch_x)
         form.addRow("Pitch Y:", self.sb_pitch_y)
         
@@ -167,9 +168,13 @@ class MainWindow(QMainWindow):
         # 3. Extraction
         gb_extract = QGroupBox("Extraction")
         v_ext = QVBoxLayout(gb_extract)
-        btn_extract = QPushButton("Extract Patches")
+        btn_extract = QPushButton("Extract Patches (Simple)")
         btn_extract.clicked.connect(self.extract_patches)
         v_ext.addWidget(btn_extract)
+        
+        btn_adv_export = QPushButton("Advanced Export...")
+        btn_adv_export.clicked.connect(self.open_advanced_export)
+        v_ext.addWidget(btn_adv_export)
         # v_ext.addWidget(btn_extract) # Duplicate in original?
         dock_layout.addWidget(gb_extract)
         
@@ -1033,7 +1038,7 @@ class MainWindow(QMainWindow):
                     else:
                         mean = np.mean(roi_stats)
                         std = np.std(roi_stats)
-                    
+                        
                     if std < 1.0: std = 1.0 
                     
                     scale = target_std / std
@@ -1051,6 +1056,122 @@ class MainWindow(QMainWindow):
         # Update current layer View
         if self.current_z in self.layer_calib_data:
             self.glw.update_calib_texture(self.layer_calib_data[self.current_z])
+
+    def open_advanced_export(self):
+        if not self.full_data and not self.glw.tiled_image:
+            print("No image loaded.")
+            return
+
+        dlg = ExportDialog(self)
+        if dlg.exec():
+            # Run Export
+            out_dir = dlg.output_dir
+            opts = dlg.get_options()
+            
+            if not out_dir:
+                print("No output directory selected.")
+                return
+                
+            print(f"Starting Export to {out_dir} with opts: {opts}")
+            
+            # Setup Progress Dialog
+            self.pd = QProgressDialog("Exporting...", "Cancel", 0, 100, self)
+            self.pd.setWindowModality(Qt.WindowModal)
+            self.pd.show()
+            
+            # Create Manager
+            # Using self.full_data (LazyStack) allows accessing logic for all layers
+            data_source = self.full_data
+            
+            if data_source is None:
+                print("No Data Source loaded.")
+                return
+                
+            exporter = ExportManager(data_source, self.void_manager, self.glw.grid_cfg, self.glw.bonding_map)
+            
+            # Connect
+            exporter.progress_update.connect(lambda p, msg: (self.pd.setValue(p), self.pd.setLabelText(msg), QApplication.processEvents()))
+            
+            # Run
+            try:
+                exporter.run_export(out_dir, opts)
+            except Exception as e:
+                print(f"Export Error: {e}")
+                
+            self.pd.close()
+            print("Export Finished.")
+
+class ExportDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Advanced Export")
+        self.resize(400, 300)
+        
+        self.layout = QVBoxLayout(self)
+        
+        # 1. Output Options
+        gb_opt = QGroupBox("Export Artifacts")
+        v_opt = QVBoxLayout(gb_opt)
+        
+        self.chk_raw = QCheckBox("Raw Patches (/raw)")
+        self.chk_overlay = QCheckBox("Overlay Patches (/overlay)")
+        self.chk_mask = QCheckBox("Mask Patches (/mask)")
+        self.chk_merged = QCheckBox("Merged Patches (/merged)")
+        self.chk_json = QCheckBox("Metadata JSON (voids.json)")
+        self.chk_csv = QCheckBox("Metadata CSV (voids.csv)")
+        
+        # Defaults
+        self.chk_raw.setChecked(False)
+        self.chk_overlay.setChecked(True)
+        self.chk_mask.setChecked(False)
+        self.chk_merged.setChecked(False)
+        self.chk_json.setChecked(True)
+        self.chk_csv.setChecked(True)
+        
+        v_opt.addWidget(self.chk_raw)
+        v_opt.addWidget(self.chk_overlay)
+        v_opt.addWidget(self.chk_mask)
+        v_opt.addWidget(self.chk_merged)
+        v_opt.addWidget(self.chk_json)
+        v_opt.addWidget(self.chk_csv)
+        self.layout.addWidget(gb_opt)
+        
+        # 2. Directory
+        h_dir = QHBoxLayout()
+        self.lbl_dir = QLabel("Out Dir: -")
+        self.output_dir = ""
+        btn_dir = QPushButton("Browse...")
+        btn_dir.clicked.connect(self.browse_dir)
+        h_dir.addWidget(self.lbl_dir, 1)
+        h_dir.addWidget(btn_dir)
+        self.layout.addLayout(h_dir)
+        
+        # 3. Actions
+        h_btns = QHBoxLayout()
+        self.btn_export = QPushButton("Start Export")
+        self.btn_export.clicked.connect(self.accept) # We'll handle logic in Main
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.clicked.connect(self.reject)
+        
+        h_btns.addWidget(self.btn_export)
+        h_btns.addWidget(self.btn_cancel)
+        self.layout.addLayout(h_btns)
+        
+    def browse_dir(self):
+        d = QFileDialog.getExistingDirectory(self, "Select Output Directory")
+        if d:
+            self.output_dir = d
+            self.lbl_dir.setText(f"Out: {d}")
+
+    def get_options(self):
+        return {
+            'raw': self.chk_raw.isChecked(),
+            'overlay': self.chk_overlay.isChecked(),
+            'mask': self.chk_mask.isChecked(),
+            'merged': self.chk_merged.isChecked(),
+            'json': self.chk_json.isChecked(),
+            'csv': self.chk_csv.isChecked()
+        }
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

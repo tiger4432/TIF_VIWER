@@ -1,0 +1,59 @@
+{
+    "void_types": {
+        "0": {
+            "name": "Randomo",
+            "color": [
+                255,
+                125,
+                0
+            ],
+            "shape": "ellipse",
+            "def_w": 0.0,
+            "def_h": 0.0
+        },
+        "1": {
+            "name": "Edge",
+            "color": [
+                0,
+                255,
+                125
+            ],
+            "shape": "ellipse",
+            "def_w": 0.0,
+            "def_h": 0.0
+        },
+        "2": {
+            "name": "void39",
+            "color": [
+                0,
+                255,
+                0
+            ],
+            "shape": "ellipse",
+            "def_w": 0.0,
+            "def_h": 0.0
+        },
+        "3": {
+            "name": "Signal",
+            "color": [
+                255,
+                0,
+                0
+            ],
+            "shape": "ellipse",
+            "def_w": 0.0,
+            "def_h": 0.0
+        },
+        "4": {
+            "name": "BBOX",
+            "color": [
+                255,
+                255,
+                0
+            ],
+            "shape": "rectangle",
+            "def_w": 480.0,
+            "def_h": 480.0
+        }
+    }
+}
