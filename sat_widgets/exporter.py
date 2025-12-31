@@ -2,6 +2,7 @@ import os
 import csv
 import json
 import numpy as np
+import math
 from datetime import datetime
 
 from PySide6.QtCore import QObject, Signal, Qt, QRectF, QPointF
@@ -346,9 +347,18 @@ class ExportManager(QObject):
         pcx = target_img.width() / 2
         pcy = target_img.height() / 2
         
-        painter.translate(pcx, pcy)
-        painter.rotate(angle) 
-        painter.translate(-cx, -cy) 
+        # Coordinate Transform Setup
+        # We transform Raw (Global) -> Patch (Upright/Deskewed)
+        # Patch is rotated by '-angle' relative to Raw.
+        rad = math.radians(-angle)
+        cos_a = math.cos(rad)
+        sin_a = math.sin(rad)
+        
+        # painter.translate(pcx, pcy)
+        # painter.rotate(angle) 
+        # painter.translate(-cx, -cy) 
+        # REPLACED WITH MANUAL TRANSFORM PER VOID
+        # to ensure Upright Shapes stay Upright. 
         
         # Decide which layers to draw
         # If Overlay: Draw ALL layers (Current=Solid, Others=Dot)
@@ -375,6 +385,19 @@ class ExportManager(QObject):
                 ry = v["radiusY"]
                 tid = v.get("type_id", 0)
                 
+                # Transform Coordinates Manually
+                # Raw Delta from Patch Center (Source Image Center)
+                dx = vx - cx
+                dy = vy - cy
+                
+                # Rotate Delta (Raw -> Upright)
+                rot_x = dx * cos_a - dy * sin_a
+                rot_y = dx * sin_a + dy * cos_a
+                
+                # Patch Coordinates (relative to Patch Center pcx, pcy)
+                px = pcx + rot_x
+                py = pcy + rot_y
+                
                 type_data = self.void_manager.types.get(tid, {"color": (255, 0, 0)})
                 col_rgb = type_data["color"]
                 color = QColor(col_rgb[0], col_rgb[1], col_rgb[2])
@@ -386,9 +409,7 @@ class ExportManager(QObject):
                     if is_active_layer:
                         pen.setStyle(Qt.SolidLine)
                     else:
-                        pen.setStyle(Qt.DotLine) # Dotted for other layers
-                        # Optional: Reduce opacity for other layers?
-                        # color.setAlpha(150); pen.setColor(color)
+                        pen.setStyle(Qt.DotLine) 
                         
                     painter.setPen(pen)
                     painter.setBrush(Qt.NoBrush)
@@ -402,10 +423,15 @@ class ExportManager(QObject):
                 shape = type_data.get("shape", "ellipse")
                 if shape == "rectangle":
                      # Schema: globalCX=Left, globalCY=Top, radiusX=Width, radiusY=Height
-                     # drawRect(x, y, w, h)
-                     painter.drawRect(QRectF(vx, vy, rx, ry))
+                     # px, py is transformed Left/Top
+                     painter.drawRect(QRectF(px, py, rx, ry))
                 else:
-                     painter.drawEllipse(QPointF(vx, vy), rx, ry)
+                     # Ellipse: Center, Radius
+                     # Logic check: 'vx, vy' in Ellipse means Center?
+                     # Let's check 'add_void' logic.
+                     # Yes, for Ellipse, globalCX/CY is Center.
+                     # So px, py is Center.
+                     painter.drawEllipse(QPointF(px, py), rx, ry)
             
         painter.end()
 

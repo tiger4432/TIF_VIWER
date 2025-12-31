@@ -131,94 +131,78 @@ class VoidManager:
         self.voids[layer].append(new_void)
         return new_void
 
-    def delete_void_at(self, layer, gx, gy, hit_radius=10.0):
+    def delete_void_at(self, layer, gx, gy, hit_radius=10.0, coord_transform=None):
         """
         Deletes the first void overlapping the point (Simple Ellipse Test).
         Returns True if deleted.
         """
         if layer not in self.voids: return False
         
-        target, _ = self.hit_test(layer, gx, gy, hit_radius)
+        target, _ = self.hit_test(layer, gx, gy, hit_radius, coord_transform)
         if target:
             self.voids[layer].remove(target)
             return True
         return False
-
-    def hit_test(self, layer, gx, gy, margin=5.0):
+        
+    def hit_test(self, layer, gx, gy, margin=5.0, coord_transform=None):
         """
+        gx, gy: Query Point (usually Mouse in Screen/Deskewed Space)
+        coord_transform: Function(cx, cy) -> (tx, ty) to transform Stored Coords to Query Space.
         Returns (void_obj, type_str)
         type_str: 'center' (move), 'edge' (resize), None
         """
         if layer not in self.voids: return None, None
         
-        for v in reversed(self.voids[layer]): # Top-most first
-            tid = v.get("type_id", 0)
-            shape = self.types.get(tid, {}).get("shape", "ellipse")
+        # Check reverse order (Top to Bottom visually)
+        for v in reversed(self.voids[layer]):
+            cx, cy = v["globalCX"], v["globalCY"]
             
-            dx = gx - v["globalCX"]
-            dy = gy - v["globalCY"]
+            # Apply Transform if provided (Raw -> Deskewed)
+            if coord_transform:
+                 cx, cy = coord_transform(cx, cy)
+            
             rx = v["radiusX"]
             ry = v["radiusY"]
             
+            tid = v.get("type_id", 0)
+            shape = self.types.get(tid, {}).get("shape", "ellipse")
+            
+            dx = abs(gx - cx)
+            dy = abs(gy - cy)
+            
             if shape == "rectangle":
-                # Schema: globalCX=Left, globalCY=Top, radiusX=Width, radiusY=Height
-                x, y, w, h = v["globalCX"], v["globalCY"], v["radiusX"], v["radiusY"]
-                
-                # Check if point is inside
-                # Using rx as Width, ry as Height
-                if x <= gx <= x + w and y <= gy <= y + h:
-                    # Edge check?
-                    # Simple margin check: Distance to any of the 4 edges
-                    # But simpler: if strictly inside but close to border?
-                    d_left = abs(gx - x)
-                    d_right = abs(gx - (x + w))
-                    d_top = abs(gy - y)
-                    d_bottom = abs(gy - (y + h))
-                    
-                    min_dist = min(d_left, d_right, d_top, d_bottom)
-                    
-                    # Margin scaling?
-                    # For ellipse we used normalized distance.
-                    # Here direct distance.
-                    # Let's say 10% of size or fixed pixels?
-                    # Logic passed margin as fixed pixels usually.
-                    
-                    # Use a heuristic for edge: min_dist < margin?
-                    # The `hit_test` calls usually pass margin in image coords.
-                    
-                    if min_dist < margin:
-                        return v, 'edge'
-                    else:
-                        return v, 'center'
-                        
+                # Rectangle Test (Axis Aligned in Query Space)
+                if dx <= rx + margin and dy <= ry + margin:
+                     on_edge = (dx > rx - margin) or (dy > ry - margin)
+                     return v, ('edge' if on_edge else 'center')
             else:
-                # Ellipse Schema: Center/Radius
-                dist_sq = (dx*dx)/(rx*rx) + (dy*dy)/(ry*ry)
-                dist = np.sqrt(dist_sq)
+                # Ellipse Test
+                # Normalized distance
+                ndx = dx / (rx + margin)
+                ndy = dy / (ry + margin)
+                dist_sq = ndx*ndx + ndy*ndy
                 
-                # Margin check
-                # 0.8 <= dist <= 1.2 is roughly edge
-                # But 'margin' arg is passed but unused in previous logic?
-                # Previous logic was hardcoded 0.8-1.2 normalized.
-                # Let's keep it for compatibility or improve.
-                
-                if 0.8 <= dist <= 1.2:
-                    return v, 'edge'
-                
-                if dist < 0.8:
+                if dist_sq <= 1.0:
+                    # Edge check?
+                    # Inner radius
+                    ndx_in = dx / max(0.1, rx - margin)
+                    ndy_in = dy / max(0.1, ry - margin)
+                    if ndx_in*ndx_in + ndy_in*ndy_in > 1.0:
+                         return v, 'edge'
                     return v, 'center'
-                
+                    
         return None, None
 
-    def hit_test_all(self, gx, gy, margin=1.0, priority_layer=None):
+    def hit_test_all(self, gx, gy, margin=1.0, priority_layer=None, coord_transform=None):
         """
         Searches ALL layers for a hit.
         Returns (void_dict, action, layer_index) or (None, None, None).
         Checks priority_layer first.
+        coord_transform: Passed to hit_test
         """
         # 1. Check Priority Layer
         if priority_layer is not None:
-             v, action = self.hit_test(priority_layer, gx, gy, margin)
+             v, action = self.hit_test(priority_layer, gx, gy, margin, coord_transform)
              if v:
                  return v, action, priority_layer
                  
@@ -226,7 +210,7 @@ class VoidManager:
         for layer_idx in self.voids.keys():
             if layer_idx == priority_layer: continue
             
-            v, action = self.hit_test(layer_idx, gx, gy, margin)
+            v, action = self.hit_test(layer_idx, gx, gy, margin, coord_transform)
             if v:
                 return v, action, layer_idx
                 

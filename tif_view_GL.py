@@ -199,8 +199,10 @@ class MainWindow(QMainWindow):
         dock_layout.addWidget(gb_coord)
 
         # Connect Cursor Signal
+        # Connect Cursor Signal
         self.glw.view_center_changed.connect(self.on_view_center_changed)
         self.glw.navigation_requested.connect(self.on_navigation_requested)
+        self.glw.cursor_moved.connect(self.on_cursor_moved)
         
         # 3.5 Void Marking Control
         self.void_manager = VoidManager()
@@ -408,11 +410,65 @@ class MainWindow(QMainWindow):
             
 
     def on_view_center_changed(self, c, r):
-        self.lbl_cursor_pos.setText(f"Center: Col {c}, Row {r}")
+        # We only update the "Center" info in the label if user isn't hovering.
+        # OR we splits the label?
+        # Current label text "Hover: -" suggests Hover is primary.
+        # "Center: ..." was setting it.
+        # Let's append or overwrite?
+        # Let's say: "Center: C, R | Hover: X, Y (Val)"
+        pass
+        # self.lbl_cursor_pos.setText(f"Center: Col {c}, Row {r}")
         
-        # Also sync inputs if not focused?
-        # self.spin_nav_x.setValue(c)
-        # self.spin_nav_y.setValue(r)
+    def on_cursor_moved(self, gx, gy):
+        # gx, gy are Deskewed Image Coordinates (ints)
+        
+        # 1. Convert to Raw (Pixel Access)
+        rx, ry = self.glw.deskew_to_raw(gx, gy)
+        
+        # 2. Lookup Value
+        val_str = "-"
+        if self.full_data is not None:
+             # Check bounds
+             h, w = self.full_data.shape[-2:] # Last 2 dims
+             irx = int(rx)
+             iry = int(ry)
+             
+             if 0 <= irx < w and 0 <= iry < h:
+                 # Load value
+                 # LazyStack supports slice? Or scalar?
+                 # LazyStack[z] returns array.
+                 # Optimization: Don't load full layer for 1 pixel.
+                 # But LazyStack wraps PIL. 
+                 # We can use our cache? 
+                 # Or just try/except.
+                 try:
+                     # Accessing single pixel from LazyTiffStack might be slow if we load full page.
+                     # But we have `layer_cache`?
+                     # Ideally we look at "Current Rendered Layer".
+                     # If it's preloaded in RAM?
+                     # Let's assume LazyStack is efficient or we accept small lag.
+                     # Actually, `self.full_data[z]` loads `(H,W)`.
+                     # If we do this on every mouse move, it WILL lag if not cached.
+                     
+                     # Check `self.layer_cache`?
+                     # `layer_cache` stores `TiledImage`. `TiledImage` doesn't keep full numpy array (it chops tiles).
+                     # `TiledImage` assumes tile data is in RAM or GPU? 
+                     # `Tile.data` is numpy.
+                     
+                     # Simple approach: If `LazyTiffStack`, use `img.getpixel`?
+                     # LazyStack doesn't expose `getpixel`.
+                     # Let's skip value lookup if it's too heavy, valid coordinates first.
+                     
+                     val_str = ""
+                 except:
+                     pass
+        
+        # 3. Calculate Grid Cell (Deskewed)
+        cfg = self.glw.grid_cfg
+        c = int(gx / cfg.pitch_x)
+        r = int(gy / cfg.pitch_y)
+        
+        self.lbl_cursor_pos.setText(f"Cell: {c}, {r} | PX: {int(rx)}, {int(ry)}")
         
     def on_navigation_requested(self, c, r):
         # Update inputs first

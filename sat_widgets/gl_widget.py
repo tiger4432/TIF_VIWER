@@ -255,16 +255,31 @@ class GLImageWidget(QOpenGLWidget):
         uniform vec2 pan;     
         uniform vec2 viewSize; 
         
+        uniform float img_rotation; // Added: Rotation in Radians
+        
         out vec2 uv;
-        out vec2 pixelPos; // Pass global pixel position to fragment for grid
+        out vec2 pixelPos; // This will now be "Deskewed" position
         
         void main() {
-            pixelPos = tileOffset + aPos * tileSize;
+            // 1. Raw Position in Image Space
+            vec2 posRaw = tileOffset + aPos * tileSize;
             
-            vec2 imgCenter = imageSize * 0.5;
-            vec2 viewCenter = imgCenter - pan; 
+            // 2. Rotate around Image Center
+            vec2 center = imageSize * 0.5;
+            vec2 rel = posRaw - center;
+            float c = cos(img_rotation);
+            float s = sin(img_rotation);
+            vec2 posRot;
+            posRot.x = rel.x * c - rel.y * s;
+            posRot.y = rel.x * s + rel.y * c;
+            vec2 posDeskewed = center + posRot; 
             
-            vec2 finalPos = (pixelPos - viewCenter) * zoom / (viewSize * 0.5);
+            pixelPos = posDeskewed; // Pass deskewed coordinate to fragment (Grid Space)
+            
+            // 3. View Transform (Pan/Zoom in Deskewed Space)
+            vec2 viewCenter = center - pan; 
+            
+            vec2 finalPos = (posDeskewed - viewCenter) * zoom / (viewSize * 0.5);
             finalPos.y = -finalPos.y; 
             
             gl_Position = vec4(finalPos, 0.0, 1.0);
@@ -318,13 +333,15 @@ class GLImageWidget(QOpenGLWidget):
             float s = sin(rad);
             float c = cos(rad);
             
+            
             vec2 rel = pixelPos - vec2(grid_x, grid_y);
-            // Rotate by -angle (World to Grid)
-            // x_rot = x*cos(-a) - y*sin(-a) = x*c + y*s
-            // y_rot = x*sin(-a) + y*cos(-a) = -x*s + y*c
-            vec2 rotPos;
-            rotPos.x = rel.x * c + rel.y * s;
-            rotPos.y = -rel.x * s + rel.y * c;
+            // Grid is now Axis-Aligned in this visual space (Deskewed)
+            // No rotation needed here because we rotated the Image World to match the Grid.
+            // Or effectively, we are rendering in "Grid Space".
+            
+            vec2 rotPos = rel; 
+            // rotPos.x = rel.x * c + rel.y * s; // Removed
+            // rotPos.y = -rel.x * s + rel.y * c; // Removed
             
             float gx = rotPos.x / pitch_x;
             float gy = rotPos.y / pitch_y;
@@ -479,6 +496,13 @@ class GLImageWidget(QOpenGLWidget):
         glUniform2f(glGetUniformLocation(self.prog, "pan"), self.pan_x, self.pan_y)
         glUniform2f(glGetUniformLocation(self.prog, "viewSize"), w, h)
         glUniform2f(glGetUniformLocation(self.prog, "imageSize"), img_w, img_h)
+        
+        # Image Rotation (Deskewing)
+        # We rotate the Image Texture by -GridAngle so it aligns with the screen axes.
+        # This makes the Chips "Upright" on screen.
+        rad_angle = np.radians(self.grid_cfg.angle)
+        glUniform1f(glGetUniformLocation(self.prog, "img_rotation"), -rad_angle) # Negative angle to deskew
+        
         glUniform1f(glGetUniformLocation(self.prog, "win_lo"), self.win_lo)
         glUniform1f(glGetUniformLocation(self.prog, "win_hi"), self.win_hi)
         
@@ -525,6 +549,53 @@ class GLImageWidget(QOpenGLWidget):
             glUniform2f(glGetUniformLocation(self.prog, "tileSize"), tile.w, tile.h)
             
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
+            
+    # -----------------------------------------------
+    # Coordinate Transforms (Deskew Logic)
+    # -----------------------------------------------
+    def raw_to_deskew(self, rx, ry):
+        """
+        Transforms Raw Image Coordinates (u,v) to Deskewed Space (x,y).
+        Rotates by -Angle around Image Center.
+        """
+        if not self.tiled_image: return rx, ry
+        
+        img_cx = self.tiled_image.w / 2.0
+        img_cy = self.tiled_image.h / 2.0
+        
+        dx = rx - img_cx
+        dy = ry - img_cy
+        
+        rad = np.radians(-self.grid_cfg.angle)
+        cos_a = np.cos(rad)
+        sin_a = np.sin(rad)
+        
+        rot_x = dx * cos_a - dy * sin_a
+        rot_y = dx * sin_a + dy * cos_a
+        
+        return img_cx + rot_x, img_cy + rot_y
+
+    def deskew_to_raw(self, dx, dy):
+        """
+        Transforms Deskewed Coordinates (x,y) to Raw Image Coordinates (u,v).
+        Rotates by +Angle around Image Center.
+        """
+        if not self.tiled_image: return dx, dy
+        
+        img_cx = self.tiled_image.w / 2.0
+        img_cy = self.tiled_image.h / 2.0
+        
+        rx = dx - img_cx
+        ry = dy - img_cy
+        
+        rad = np.radians(self.grid_cfg.angle)
+        cos_a = np.cos(rad)
+        sin_a = np.sin(rad)
+        
+        raw_x = rx * cos_a - ry * sin_a
+        raw_y = rx * sin_a + ry * cos_a
+        
+        return img_cx + raw_x, img_cy + raw_y
             
     # -----------------------------------------------
     # Mouse Interaction
@@ -738,12 +809,8 @@ class GLImageWidget(QOpenGLWidget):
         dx = gx - cfg.start_x
         dy = gy - cfg.start_y
         
-        rad = np.radians(-cfg.angle)
-        sin_a = np.sin(rad)
-        cos_a = np.cos(rad)
-        
-        rx = dx * cos_a - dy * sin_a
-        ry = dx * sin_a + dy * cos_a
+        rx = dx
+        ry = dy
         
         c = int(np.floor(rx / cfg.pitch_x))
         r = int(np.floor(ry / cfg.pitch_y))
@@ -766,7 +833,11 @@ class GLImageWidget(QOpenGLWidget):
              
              # Draw Helper
              def to_screen(gx, gy):
-                 # Inverse of get_image_coords
+                 # gx, gy are RAW storage coordinates.
+                 # Convert to Deskewed (Visual) coordinates first.
+                 dx, dy = self.raw_to_deskew(gx, gy)
+                 
+                 # Now map Deskewed -> Screen
                  view_w = self.width()
                  view_h = self.height()
                  cx = view_w / 2
@@ -782,8 +853,9 @@ class GLImageWidget(QOpenGLWidget):
                  img_cx = img_w / 2
                  img_cy = img_h / 2
                  
-                 screen_x = (gx - img_cx + self.pan_x) * self.zoom + cx
-                 screen_y = (gy - img_cy + self.pan_y) * self.zoom + cy
+                 # Pan is in Deskewed Space (separation from image center)
+                 screen_x = (dx - img_cx + self.pan_x) * self.zoom + cx
+                 screen_y = (dy - img_cy + self.pan_y) * self.zoom + cy
                  return screen_x, screen_y
 
              # Iterate All Layers
@@ -902,58 +974,74 @@ class GLImageWidget(QOpenGLWidget):
                 gx, gy = self.get_image_coords(e.position())
                 
                 if self.void_mode == "DRAW":
-                    # Start New Void
-                    # Corner-to-Corner logic:
-                    # Anchor point is the start. Center will move as we drag.
-                    self.drag_start_void_pos = (gx, gy)
-                    
-                    # Create void initially at anchor with 1.0 radius (tiny)
-                    # Create void initially
-                    type_data = self.void_manager.types.get(self.active_type_id, {})
-                    shape = type_data.get("shape", "ellipse")
-                    def_w = type_data.get("def_w", 0.0)
-                    def_h = type_data.get("def_h", 0.0)
-                    
-                    if def_w > 0 and def_h > 0:
-                        # Fixed Size Creation (Click-to-Draw)
-                        if shape == "rectangle":
-                            # Rectangle: Schema Left, Top, W, H
-                            # Click Point = Top-Left
-                            w = def_w
-                            h = def_h
-                            x = gx 
-                            y = gy
-                            self.active_void = self.void_manager.add_void(self.current_layer, x, y, w, h, self.active_type_id)
-                        else:
-                            # Ellipse: Schema Center, Radius
-                            # Click Point = Top-Left of Bounding Box
-                            # Center = Click + Radius
-                            rx = def_w / 2.0
-                            ry = def_h / 2.0
-                            cx = gx + rx
-                            cy = gy + ry
-                            self.active_void = self.void_manager.add_void(self.current_layer, cx, cy, rx, ry, self.active_type_id)
-                            
-                        # Switch to Move mode immediately allowing adjustment while holding
-                        self.active_void_action = 'center'
+                    if self.void_manager and self.current_layer is not None:
+                        # CREATE VOID
+                        # 1. Start Point comes in Deskewed Space (gx, gy)
+                        # 2. We store in Raw Space.
+                        rx, ry = self.deskew_to_raw(gx, gy)
                         
-                    else:
-                        # Drag-to-Size Creation (Legacy)
-                        if shape == "rectangle":
-                             # Init at (gx, gy) with small size
-                             self.active_void = self.void_manager.add_void(self.current_layer, gx, gy, 1.0, 1.0, self.active_type_id)
+                        self._void_start = e.position() # Store Screen Start
+                        self._void_start_gx = gx # Store Deskewed Start
+                        self._void_start_gy = gy
+                        
+                        def_w = 0
+                        def_h = 0
+                        
+                        shape = "ellipse"
+                        if self.active_type_id in self.void_manager.types:
+                             tdata = self.void_manager.types[self.active_type_id]
+                             shape = tdata.get("shape", "ellipse")
+                             def_w = tdata.get("def_w", 0)
+                             def_h = tdata.get("def_h", 0)
+                        
+                        is_sizing = (def_w <= 0 or def_h <= 0)
+                        
+                        if not is_sizing:
+                            # Predefined Size (Click-to-Draw)
+                            # Size is Width/Height in Deskewed Frame (Grid Axes)
+                            # Stored as radiusX/radiusY
+                            
+                            if shape == "rectangle":
+                                # Rectangle: Corner drawing
+                                # But here we Click to Place Top-Left?
+                                # Let's say Click = Top-Left
+                                # Center stored is Left, Top (in Raw?)
+                                # WAIT. For Rectangle, globalCX is Left, globalCY is Top.
+                                # But Left/Top in which space? Raw.
+                                # So if we click at (gx, gy), that is Deskewed Left/Top.
+                                # We converted to rx, ry.
+                                # So globalCX = rx, globalCY = ry.
+                                # radiusX = def_w, radiusY = def_h.
+                                
+                                self.active_void = self.void_manager.add_void(self.current_layer, rx, ry, def_w, def_h, self.active_type_id)
+                            else:
+                                # Ellipse: Schema Center, Radius
+                                # Click Point = Top-Left of Bounding Box
+                                # So Center (Deskewed) = gx + w/2, gy + h/2.
+                                # We need Center (Raw).
+                                cx_deskew = gx + def_w / 2.0
+                                cy_deskew = gy + def_h / 2.0
+                                cx_raw, cy_raw = self.deskew_to_raw(cx_deskew, cy_deskew)
+                                
+                                self.active_void = self.void_manager.add_void(self.current_layer, cx_raw, cy_raw, def_w/2.0, def_h/2.0, self.active_type_id)
+                                
+                            # Switch to Move mode immediately
+                            self.active_void_action = 'center'
+                            
                         else:
-                             # Init Center at (gx, gy)
-                             self.active_void = self.void_manager.add_void(self.current_layer, gx, gy, 1.0, 1.0, self.active_type_id)
-                             
-                        self.active_void_action = 'sizing'
+                            # Drag-to-Size
+                            # Initialize 1x1 void
+                            # Center/Pos is rx, ry
+                            self.active_void = self.void_manager.add_void(self.current_layer, rx, ry, 1.0, 1.0, self.active_type_id)
+                            self.active_void_action = 'sizing'
 
                     self.update()
                     return # Consume event
                     
                 elif self.void_mode == "EDIT":
-                    # Hit Test (Global)
-                    v, action, layer = self.void_manager.hit_test_all(gx, gy, margin=10.0/self.zoom, priority_layer=self.current_layer)
+                    # Hit Test (Global) - Pass Deskew Transform
+                    # Mouse (gx, gy) is Deskewed.
+                    v, action, layer = self.void_manager.hit_test_all(gx, gy, margin=10.0/self.zoom, priority_layer=self.current_layer, coord_transform=self.raw_to_deskew)
                     if v:
                         self.active_void = v
                         self.active_void_action = action # 'center' or 'edge'
@@ -963,8 +1051,8 @@ class GLImageWidget(QOpenGLWidget):
                         return
                         
                 elif self.void_mode == "ERASE":
-                    # Hit Test (Global) to find what to delete
-                    v, action, layer = self.void_manager.hit_test_all(gx, gy, margin=10.0/self.zoom, priority_layer=self.current_layer)
+                    # Hit Test (Global) to find what to delete - Pass Transform
+                    v, action, layer = self.void_manager.hit_test_all(gx, gy, margin=10.0/self.zoom, priority_layer=self.current_layer, coord_transform=self.raw_to_deskew)
                     
                     if v and layer is not None:
                         deleted = self.void_manager.delete_void_at(layer, gx, gy)
@@ -998,7 +1086,8 @@ class GLImageWidget(QOpenGLWidget):
              
              if self.active_void_action == 'sizing' and self.active_void:
                  # Corner-to-Corner Logic
-                 start_x, start_y = getattr(self, 'drag_start_void_pos', (gx, gy))
+                 start_x = getattr(self, '_void_start_gx', gx)
+                 start_y = getattr(self, '_void_start_gy', gy)
                  
                  shape = self.void_manager.types.get(self.active_void.get("type_id", 0), {}).get("shape", "ellipse")
                  
@@ -1010,10 +1099,13 @@ class GLImageWidget(QOpenGLWidget):
                      min_y = min(start_y, gy)
                      max_y = max(start_y, gy)
                      
-                     self.active_void["globalCX"] = min_x # Left
-                     self.active_void["globalCY"] = min_y # Top
                      self.active_void["radiusX"] = max(1.0, max_x - min_x) # Width
                      self.active_void["radiusY"] = max(1.0, max_y - min_y) # Height
+                     
+                     # Store Top-Left in RAW
+                     rx, ry = self.deskew_to_raw(min_x, min_y)
+                     self.active_void["globalCX"] = rx 
+                     self.active_void["globalCY"] = ry
                      
                  else:
                      # Ellipse Sizing (Center/Radius)
@@ -1031,45 +1123,60 @@ class GLImageWidget(QOpenGLWidget):
                      rx = (max_x - min_x) / 2.0
                      ry = (max_y - min_y) / 2.0
                      
-                     self.active_void["globalCX"] = cx
-                     self.active_void["globalCY"] = cy
                      self.active_void["radiusX"] = max(1.0, rx)
                      self.active_void["radiusY"] = max(1.0, ry)
+                     
+                     # Store Center in RAW
+                     cx_raw, cy_raw = self.deskew_to_raw(cx, cy)
+                     self.active_void["globalCX"] = cx_raw
+                     self.active_void["globalCY"] = cy_raw
                  
                  self.update()
                  
              elif self.active_void_action == 'center' and self.active_void:
                  # Move Center
-                 # Simple delta
+                 # img_dx, img_dy are Deskewed Deltas
                  img_dx = dx / self.zoom
                  img_dy = dy / self.zoom
-                 self.active_void["globalCX"] += img_dx
-                 self.active_void["globalCY"] += img_dy
+                 
+                 # Rotate Delta by +Angle to get Raw Delta
+                 rad = np.radians(self.grid_cfg.angle)
+                 c = np.cos(rad)
+                 s = np.sin(rad)
+                 
+                 raw_dx = img_dx * c - img_dy * s
+                 raw_dy = img_dx * s + img_dy * c
+                 
+                 self.active_void["globalCX"] += raw_dx
+                 self.active_void["globalCY"] += raw_dy
                  self.update()
                  
              elif self.active_void_action == 'edge' and self.active_void:
                  shape = self.void_manager.types.get(self.active_void.get("type_id", 0), {}).get("shape", "ellipse")
                  
+                 # Get Center in Deskewed Space (Reference)
+                 cx_deskew, cy_deskew = self.raw_to_deskew(self.active_void["globalCX"], self.active_void["globalCY"])
+                 
                  if shape == "rectangle":
-                     # Resize for Rectangle (Simplified: Assume dragging bottom-right relative to top-left)
-                     # Or logic: new width = gx - Left
-                     # If gx < Left, what do we do? 
-                     # For full robustness, we'd need to know WHICH edge was grabbed.
-                     # 'hit_test' doesn't return that detail appropriately yet.
-                     # Assuming simple positive resize for now (like expanding)
-                     # Or: W = abs(gx - Left), H = abs(gy - Top).
-                     # This effectively anchors at Top-Left.
+                     # Resize for Rectangle
+                     # gx, gy is Mouse in Deskewed
+                     # cx_deskew is Left in Deskewed? No wait.
+                     # For Rectangle, globalCX is Left (in Raw).
+                     # So cx_deskew is Left (in Deskewed).
+                     # Width = abs(gx - Left).
                      
-                     new_w = max(1.0, abs(gx - self.active_void["globalCX"]))
-                     new_h = max(1.0, abs(gy - self.active_void["globalCY"]))
+                     new_w = max(1.0, abs(gx - cx_deskew))
+                     new_h = max(1.0, abs(gy - cy_deskew))
                      
                      self.active_void["radiusX"] = new_w
                      self.active_void["radiusY"] = new_h
                      
                  else:
-                     # Ellipse Resize (Symmetric)
-                     dcx = abs(gx - self.active_void["globalCX"])
-                     dcy = abs(gy - self.active_void["globalCY"])
+                     # Ellipse Resize (Symmetric around Center)
+                     # cx_deskew is Center
+                     
+                     dcx = abs(gx - cx_deskew)
+                     dcy = abs(gy - cy_deskew)
                      self.active_void["radiusX"] = max(1.0, dcx)
                      self.active_void["radiusY"] = max(1.0, dcy)
                  
