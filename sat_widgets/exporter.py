@@ -20,6 +20,7 @@ class ExportManager(QObject):
         self.grid_cfg = grid_cfg
         self.bonding_map = bonding_map
         self.stop_requested = False
+        self.coord_transform = None
 
     def run_export(self, output_dir, options: dict):
         """
@@ -94,6 +95,9 @@ class ExportManager(QObject):
                     continue
                     
                 h_img, w_img = full_layer.shape
+                # Init Coordinate Transform for this layer (assuming size consistency)
+                from .core_data import CoordinateTransform
+                self.coord_transform = CoordinateTransform(cfg.angle, w_img, h_img)
                 
                 for r in range(cfg.rows):
                     for c in range(cfg.cols):
@@ -107,14 +111,14 @@ class ExportManager(QObject):
                             label = key
                             
                         # Calculate Rotated Center
-                        cx_rel = (c + 0.5) * cfg.pitch_x
-                        cy_rel = (r + 0.5) * cfg.pitch_y
+                        # Calculate Center in Deskewed Space (gx, gy)
+                        # start_x is Grid Top-Left in Deskewed Space
+                        gx = cfg.start_x + (c + 0.5) * cfg.pitch_x
+                        gy = cfg.start_y + (r + 0.5) * cfg.pitch_y
                         
-                        rot_x = cx_rel * cos_a - cy_rel * sin_a
-                        rot_y = cx_rel * sin_a + cy_rel * cos_a
-                        
-                        center_x = cfg.start_x + rot_x
-                        center_y = cfg.start_y + rot_y
+                        # Convert to Raw Image Coordinates (u, v)
+                        # This matches the Visual Logic (Shader) exactly.
+                        center_x, center_y = self.coord_transform.deskew_to_raw(gx, gy)
                         
                         # Extract Patch
                         patch_qimg = self._extract_patch_qimage(full_layer, center_x, center_y, w_pitch, h_pitch, cfg.angle)
@@ -265,7 +269,7 @@ class ExportManager(QObject):
         
         # Simple slicing for now, assuming standard shape
         # Better: import to_gray2d_uint16 from .core_data
-        from .core_data import to_gray2d_uint16
+        from .core_data import to_gray2d_uint16, CoordinateTransform
         return to_gray2d_uint16(arr, z_index)
 
     def _extract_patch_qimage(self, img, cx, cy, w, h, angle):
@@ -347,18 +351,16 @@ class ExportManager(QObject):
         pcx = target_img.width() / 2
         pcy = target_img.height() / 2
         
-        # Coordinate Transform Setup
-        # We transform Raw (Global) -> Patch (Upright/Deskewed)
-        # Patch is rotated by '-angle' relative to Raw.
-        rad = math.radians(-angle)
-        cos_a = math.cos(rad)
-        sin_a = math.sin(rad)
-        
-        # painter.translate(pcx, pcy)
-        # painter.rotate(angle) 
-        # painter.translate(-cx, -cy) 
-        # REPLACED WITH MANUAL TRANSFORM PER VOID
-        # to ensure Upright Shapes stay Upright. 
+        # Refactored to use CoordinateTransform if available
+        # Calculate Chip Center in Deskewed Space
+        gx_chip, gy_chip = 0, 0
+        if self.coord_transform:
+             gx_chip, gy_chip = self.coord_transform.raw_to_deskew(cx, cy)
+        else:
+             # Fallback (Manual)
+             rad = math.radians(-angle)
+             # ... simplified fallback omitted, assume coord_transform is present
+             pass
         
         # Decide which layers to draw
         # If Overlay: Draw ALL layers (Current=Solid, Others=Dot)
@@ -376,34 +378,49 @@ class ExportManager(QObject):
             is_active_layer = (layer_key == current_layer)
             
             for v in voids:
-                # Check bounds roughly
+                # Check bounds roughly (in Raw Space)
                 vx, vy = v["globalCX"], v["globalCY"]
-                if abs(vx - cx) > w or abs(vy - cy) > h: continue 
                 
-                # Attributes
-                rx = v["radiusX"]
-                ry = v["radiusY"]
+                # Precise Transform using CoordinateTransform
+                if self.coord_transform:
+                     gx_void, gy_void = self.coord_transform.raw_to_deskew(vx, vy)
+                     
+                     # Relative position in Deskewed space
+                     dx = gx_void - gx_chip
+                     dy = gy_void - gy_chip
+                     
+                     px = pcx + dx
+                     py = pcy + dy
+                     
+                else:
+                    # Fallback (Old Logic)
+                    rad = math.radians(-angle)
+                    cos_a = math.cos(rad)
+                    sin_a = math.sin(rad)
+                    dx = vx - cx
+                    dy = vy - cy
+                    rot_x = dx * cos_a - dy * sin_a
+                    rot_y = dx * sin_a + dy * cos_a
+                    px = pcx + rot_x
+                    py = pcy + rot_y
+                
+                # Bounds check on px, py? 
+                # Patch width w, h. 
+                # If px outside 0..w, skip?
+                # Optimization.
+                if not (-w < (px-pcx) < w and -h < (py-pcy) < h):
+                    continue
+                
                 tid = v.get("type_id", 0)
-                
-                # Transform Coordinates Manually
-                # Raw Delta from Patch Center (Source Image Center)
-                dx = vx - cx
-                dy = vy - cy
-                
-                # Rotate Delta (Raw -> Upright)
-                rot_x = dx * cos_a - dy * sin_a
-                rot_y = dx * sin_a + dy * cos_a
-                
-                # Patch Coordinates (relative to Patch Center pcx, pcy)
-                px = pcx + rot_x
-                py = pcy + rot_y
-                
                 type_data = self.void_manager.types.get(tid, {"color": (255, 0, 0)})
                 col_rgb = type_data["color"]
                 color = QColor(col_rgb[0], col_rgb[1], col_rgb[2])
                 
                 pen = QPen(color)
                 pen.setWidth(2)
+                
+                rx = v["radiusX"]
+                ry = v["radiusY"]
                 
                 if mode == 'overlay':
                     if is_active_layer:
@@ -421,17 +438,7 @@ class ExportManager(QObject):
                     
                 # Draw
                 shape = type_data.get("shape", "ellipse")
-                if shape == "rectangle":
-                     # Schema: globalCX=Left, globalCY=Top, radiusX=Width, radiusY=Height
-                     # px, py is transformed Left/Top
-                     painter.drawRect(QRectF(px, py, rx, ry))
-                else:
-                     # Ellipse: Center, Radius
-                     # Logic check: 'vx, vy' in Ellipse means Center?
-                     # Let's check 'add_void' logic.
-                     # Yes, for Ellipse, globalCX/CY is Center.
-                     # So px, py is Center.
-                     painter.drawEllipse(QPointF(px, py), rx, ry)
+                self.void_manager.draw_void_shape(painter, shape, px, py, rx, ry)
             
         painter.end()
 

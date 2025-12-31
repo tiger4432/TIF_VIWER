@@ -7,8 +7,8 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QColorDialog, QInputDialog,
     QDialog
 )
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, Signal, QRectF, QPointF
+from PySide6.QtGui import QColor, QPainter
 
 # ==================================================================================
 # Void Data Manager
@@ -20,6 +20,23 @@ class VoidManager:
     Stores data in Global Coordinates (truth).
     Handles saving/loading relative to Chip Coordinates.
     """
+    @staticmethod
+    def draw_void_shape(painter: QPainter, shape: str, cx: float, cy: float, rx: float, ry: float):
+        """
+        Unified drawing logic for Voids.
+        All Voids are defined by Center (cx, cy) and Radii (rx, ry).
+        - Ellipse: Drawn using Center, Radius.
+        - Rectangle: Drawn using Top-Left calculated from Center - Radius.
+        """
+        if shape == "rectangle":
+            # Rectangle: Center/Radius schema
+            # cx, cy is Center
+            # rx, ry is Radius (Half-Width/Height)
+            painter.drawRect(QRectF(cx - rx, cy - ry, rx * 2, ry * 2))
+        else:
+            # Ellipse: Center, Radius
+            painter.drawEllipse(QPointF(cx, cy), rx, ry)
+
     def __init__(self, config_path="config.json"):
         self.voids = {} # Dict[layer_index: int, List[dict]]
         self.config_path = config_path
@@ -239,7 +256,7 @@ class VoidManager:
             
         return len(to_delete)
 
-    def save_to_file(self, path, grid_cfg, bonding_map=None):
+    def save_to_file(self, path, grid_cfg, bonding_map=None, coord_transform=None):
         """
         Converts Global -> Chip Relative using current Grid Config.
         Saves as Dict with 'types' and 'voids'.
@@ -255,14 +272,24 @@ class VoidManager:
         # Flatten all layers
         for layer, v_list in self.voids.items():
             for v in v_list:
-                col = int(np.floor((v["globalCX"] - grid_cfg.start_x) / grid_cfg.pitch_x))
-                row = int(np.floor((v["globalCY"] - grid_cfg.start_y) / grid_cfg.pitch_y))
+                # 1. Convert Raw (globalCX) to Deskewed (gx)
+                gx, gy = v["globalCX"], v["globalCY"]
+                if coord_transform:
+                    gx, gy = coord_transform.raw_to_deskew(gx, gy)
+                else:
+                    # Fallback (Assume 0 angle or simple translation?)
+                    # Without image size, we can't rotate around center.
+                    # Best effort: assume no rotation if transform missing.
+                    pass
+                
+                col = int(np.floor((gx - grid_cfg.start_x) / grid_cfg.pitch_x))
+                row = int(np.floor((gy - grid_cfg.start_y) / grid_cfg.pitch_y))
                 
                 chip_x0 = grid_cfg.start_x + col * grid_cfg.pitch_x
                 chip_y0 = grid_cfg.start_y + row * grid_cfg.pitch_y
                 
-                rel_cx = v["globalCX"] - chip_x0
-                rel_cy = v["globalCY"] - chip_y0
+                rel_cx = gx - chip_x0
+                rel_cy = gy - chip_y0
                 
                 rx = v["radiusX"]
                 ry = v["radiusY"]
@@ -304,7 +331,7 @@ class VoidManager:
         except Exception as e:
             print(f"Save failed: {e}")
 
-    def load_from_file(self, path, grid_cfg):
+    def load_from_file(self, path, grid_cfg, coord_transform=None):
         """
         Reads JSON -> Calculates Global using Grid Config.
         Handles V1 (list) and V2 (dict) formats.
@@ -369,6 +396,15 @@ class VoidManager:
                     
                     gx = chip_x0 + rel_cx
                     gy = chip_y0 + rel_cy
+                    
+                    # Convert Deskewed (gx) -> Raw (rx) if transform available
+                    # Because storage expects Raw.
+                    if coord_transform:
+                         rx, ry = coord_transform.deskew_to_raw(gx, gy)
+                         gx, gy = rx, ry
+                    else:
+                         # Fallback if no transform (Assume 0 angle)
+                         pass
                 
                 if layer not in self.voids: self.voids[layer] = []
                 

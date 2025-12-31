@@ -7,10 +7,11 @@ from OpenGL.GL import shaders
 
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtGui import QSurfaceFormat, QAction, QColor, QImage, QPainter, QPen, QCursor, QPixmap
-from PySide6.QtCore import Qt, Signal, QRectF, QTimer, QPointF
+from PySide6.QtCore import Qt, Signal, QRectF, QTimer, QPointF, Slot
 from PySide6.QtWidgets import QApplication
 
-from .core_data import GridConfig, BondingMap
+from .core_data import GridConfig, BondingMap, CoordinateTransform
+
 
 # ==================================================================================
 # 2. Tiling System
@@ -145,6 +146,11 @@ class GLImageWidget(QOpenGLWidget):
         
         # Shader vars
         self.prog = None
+        
+        # Coordinate Transform Logic
+        self.coord_transform = None
+
+        
         
     def update_map_texture(self):
         """Creates/Updates the texture for the bonding map labels"""
@@ -466,6 +472,12 @@ class GLImageWidget(QOpenGLWidget):
         
         self.tiled_image = tiled_img
         
+        # Init Transform (Only if changed)
+        if self.coord_transform is None or \
+           self.coord_transform.img_w != self.tiled_image.w or \
+           self.coord_transform.img_h != self.tiled_image.h:
+               self.coord_transform = CoordinateTransform(self.grid_cfg.angle, self.tiled_image.w, self.tiled_image.h)
+        
         # Context must be current for upload
         self.makeCurrent()
         self.tiled_image.upload_all()
@@ -555,47 +567,21 @@ class GLImageWidget(QOpenGLWidget):
     # -----------------------------------------------
     def raw_to_deskew(self, rx, ry):
         """
-        Transforms Raw Image Coordinates (u,v) to Deskewed Space (x,y).
-        Rotates by -Angle around Image Center.
+        Transforms Raw Image Coordinates (u, v) -> Deskewed Space (x, y)
+        Delegates to CoordinateTransform
         """
-        if not self.tiled_image: return rx, ry
-        
-        img_cx = self.tiled_image.w / 2.0
-        img_cy = self.tiled_image.h / 2.0
-        
-        dx = rx - img_cx
-        dy = ry - img_cy
-        
-        rad = np.radians(-self.grid_cfg.angle)
-        cos_a = np.cos(rad)
-        sin_a = np.sin(rad)
-        
-        rot_x = dx * cos_a - dy * sin_a
-        rot_y = dx * sin_a + dy * cos_a
-        
-        return img_cx + rot_x, img_cy + rot_y
+        if self.coord_transform:
+            return self.coord_transform.raw_to_deskew(rx, ry)
+        return rx, ry
 
-    def deskew_to_raw(self, dx, dy):
+    def deskew_to_raw(self, gx, gy):
         """
-        Transforms Deskewed Coordinates (x,y) to Raw Image Coordinates (u,v).
-        Rotates by +Angle around Image Center.
+        Transforms Deskewed/Screen Coordinates (x, y) -> Raw Image Coordinates (u, v)
+        Delegates to CoordinateTransform
         """
-        if not self.tiled_image: return dx, dy
-        
-        img_cx = self.tiled_image.w / 2.0
-        img_cy = self.tiled_image.h / 2.0
-        
-        rx = dx - img_cx
-        ry = dy - img_cy
-        
-        rad = np.radians(self.grid_cfg.angle)
-        cos_a = np.cos(rad)
-        sin_a = np.sin(rad)
-        
-        raw_x = rx * cos_a - ry * sin_a
-        raw_y = rx * sin_a + ry * cos_a
-        
-        return img_cx + raw_x, img_cy + raw_y
+        if self.coord_transform:
+            return self.coord_transform.deskew_to_raw(gx, gy)
+        return gx, gy
             
     # -----------------------------------------------
     # Mouse Interaction
@@ -715,6 +701,8 @@ class GLImageWidget(QOpenGLWidget):
         img_cx = img_w / 2
         img_cy = img_h / 2
         
+        self.coord_transform = CoordinateTransform(self.grid_cfg.angle, img_w, img_h)
+        
         # 1. Calculate Zoom to fit Pitch in View
         view_w = self.width()
         view_h = self.height()
@@ -797,10 +785,14 @@ class GLImageWidget(QOpenGLWidget):
              img_h = self.tiled_image.h
         else:
              img_w = 1000
-             img_h = 1000
-             
-        img_cx = img_w / 2
-        img_cy = img_h / 2
+    def update_view_center_info(self):
+        # Calculate Center (Col, Row) and emit
+        if self.coord_transform:
+             img_cx = self.coord_transform.img_cx
+             img_cy = self.coord_transform.img_cy
+        else:
+             img_cx = 500
+             img_cy = 500
         
         gx = img_cx - self.pan_x
         gy = img_cy - self.pan_y
@@ -816,6 +808,13 @@ class GLImageWidget(QOpenGLWidget):
         r = int(np.floor(ry / cfg.pitch_y))
         
         self.view_center_changed.emit(c, r)
+        
+    @Slot()
+    def update_grid_params(self):
+        # Update transform when grid changes
+        if self.tiled_image:
+             self.coord_transform = CoordinateTransform(self.grid_cfg.angle, self.tiled_image.w, self.tiled_image.h)
+        self.update()
 
     def paintEvent(self, e):
         # 1. Draw OpenGL content
@@ -834,7 +833,8 @@ class GLImageWidget(QOpenGLWidget):
              # Draw Helper
              def to_screen(gx, gy):
                  # gx, gy are RAW storage coordinates.
-                 # Convert to Deskewed (Visual) coordinates first.
+                 # 1. Convert to Deskewed (Visual) coordinates.
+                 #    This step APPLIES the Grid Angle Rotation.
                  dx, dy = self.raw_to_deskew(gx, gy)
                  
                  # Now map Deskewed -> Screen
@@ -843,15 +843,12 @@ class GLImageWidget(QOpenGLWidget):
                  cx = view_w / 2
                  cy = view_h / 2
                  
-                 if self.tiled_image:
-                     img_w = self.tiled_image.w
-                     img_h = self.tiled_image.h
+                 if self.coord_transform:
+                     img_cx = self.coord_transform.img_cx
+                     img_cy = self.coord_transform.img_cy
                  else:
-                     img_w = 1000
-                     img_h = 1000
-                 
-                 img_cx = img_w / 2
-                 img_cy = img_h / 2
+                     img_cx = 500
+                     img_cy = 500
                  
                  # Pan is in Deskewed Space (separation from image center)
                  screen_x = (dx - img_cx + self.pan_x) * self.zoom + cx
@@ -884,13 +881,7 @@ class GLImageWidget(QOpenGLWidget):
                      painter.setBrush(Qt.NoBrush)
                      
                      shape = self.void_manager.types.get(tid, {}).get("shape", "ellipse")
-                     if shape == "rectangle":
-                         # Rectangle: Schema Left, Top, W, H
-                         # sx, sy = Screen Left, Screen Top
-                         # srx, sry = Screen Width, Screen Height
-                         painter.drawRect(QRectF(sx, sy, srx, sry))
-                     else:
-                         painter.drawEllipse(QPointF(sx, sy), srx, sry)
+                     self.void_manager.draw_void_shape(painter, shape, sx, sy, srx, sry)
 
              # Second Pass: Current Layer Voids (On Top)
              layer_voids = self.void_manager.voids.get(self.current_layer, [])
@@ -922,11 +913,7 @@ class GLImageWidget(QOpenGLWidget):
                      
                  # Draw Shape
                  shape = self.void_manager.types.get(tid, {}).get("shape", "ellipse")
-                 if shape == "rectangle":
-                      # Rectangle: Schema Left, Top, W, H
-                      painter.drawRect(QRectF(sx, sy, srx, sry))
-                 else:
-                      painter.drawEllipse(QPointF(sx, sy), srx, sry)
+                 self.void_manager.draw_void_shape(painter, shape, sx, sy, srx, sry)
 
              painter.end()
 
@@ -946,15 +933,12 @@ class GLImageWidget(QOpenGLWidget):
         dx = mx - cx
         dy = my - cy
         
-        if self.tiled_image:
-             img_w = self.tiled_image.w
-             img_h = self.tiled_image.h
+        if self.coord_transform:
+             img_cx = self.coord_transform.img_cx
+             img_cy = self.coord_transform.img_cy
         else:
-             img_w = 1000
-             img_h = 1000
-             
-        img_cx = img_w / 2
-        img_cy = img_h / 2
+             img_cx = 500
+             img_cy = 500
         
         view_center_x = img_cx - self.pan_x
         view_center_y = img_cy - self.pan_y
@@ -1002,18 +986,14 @@ class GLImageWidget(QOpenGLWidget):
                             # Stored as radiusX/radiusY
                             
                             if shape == "rectangle":
-                                # Rectangle: Corner drawing
-                                # But here we Click to Place Top-Left?
-                                # Let's say Click = Top-Left
-                                # Center stored is Left, Top (in Raw?)
-                                # WAIT. For Rectangle, globalCX is Left, globalCY is Top.
-                                # But Left/Top in which space? Raw.
-                                # So if we click at (gx, gy), that is Deskewed Left/Top.
-                                # We converted to rx, ry.
-                                # So globalCX = rx, globalCY = ry.
-                                # radiusX = def_w, radiusY = def_h.
+                                # Rectangle: Center/Radius Logic (Unified)
+                                # Click Point = Top-Left of Box -> Calculate Center
+                                cx_deskew = gx + def_w / 2.0
+                                cy_deskew = gy + def_h / 2.0
+                                cx_raw, cy_raw = self.deskew_to_raw(cx_deskew, cy_deskew)
                                 
-                                self.active_void = self.void_manager.add_void(self.current_layer, rx, ry, def_w, def_h, self.active_type_id)
+                                # Store Center. radiusX = Half-Width
+                                self.active_void = self.void_manager.add_void(self.current_layer, cx_raw, cy_raw, def_w/2.0, def_h/2.0, self.active_type_id)
                             else:
                                 # Ellipse: Schema Center, Radius
                                 # Click Point = Top-Left of Bounding Box
@@ -1092,20 +1072,28 @@ class GLImageWidget(QOpenGLWidget):
                  shape = self.void_manager.types.get(self.active_void.get("type_id", 0), {}).get("shape", "ellipse")
                  
                  if shape == "rectangle":
-                     # Rectangle Sizing: Defined by Top-Left and W, H
-                     # Start and Current define the bbox
+                     # Rectangle Sizing: Defined by Center and Radii
+                     # Start and Current define bbox
                      min_x = min(start_x, gx)
                      max_x = max(start_x, gx)
                      min_y = min(start_y, gy)
                      max_y = max(start_y, gy)
                      
-                     self.active_void["radiusX"] = max(1.0, max_x - min_x) # Width
-                     self.active_void["radiusY"] = max(1.0, max_y - min_y) # Height
+                     # Center
+                     cx = (min_x + max_x) / 2.0
+                     cy = (min_y + max_y) / 2.0
                      
-                     # Store Top-Left in RAW
-                     rx, ry = self.deskew_to_raw(min_x, min_y)
-                     self.active_void["globalCX"] = rx 
-                     self.active_void["globalCY"] = ry
+                     # Radii (Half-Dims)
+                     rx = (max_x - min_x) / 2.0
+                     ry = (max_y - min_y) / 2.0
+                     
+                     self.active_void["radiusX"] = max(1.0, rx) # Half-Width
+                     self.active_void["radiusY"] = max(1.0, ry) # Half-Height
+                     
+                     # Store Center in RAW
+                     cx_raw, cy_raw = self.deskew_to_raw(cx, cy)
+                     self.active_void["globalCX"] = cx_raw
+                     self.active_void["globalCY"] = cy_raw
                      
                  else:
                      # Ellipse Sizing (Center/Radius)
@@ -1157,28 +1145,14 @@ class GLImageWidget(QOpenGLWidget):
                  # Get Center in Deskewed Space (Reference)
                  cx_deskew, cy_deskew = self.raw_to_deskew(self.active_void["globalCX"], self.active_void["globalCY"])
                  
-                 if shape == "rectangle":
-                     # Resize for Rectangle
-                     # gx, gy is Mouse in Deskewed
-                     # cx_deskew is Left in Deskewed? No wait.
-                     # For Rectangle, globalCX is Left (in Raw).
-                     # So cx_deskew is Left (in Deskewed).
-                     # Width = abs(gx - Left).
-                     
-                     new_w = max(1.0, abs(gx - cx_deskew))
-                     new_h = max(1.0, abs(gy - cy_deskew))
-                     
-                     self.active_void["radiusX"] = new_w
-                     self.active_void["radiusY"] = new_h
-                     
-                 else:
-                     # Ellipse Resize (Symmetric around Center)
-                     # cx_deskew is Center
-                     
-                     dcx = abs(gx - cx_deskew)
-                     dcy = abs(gy - cy_deskew)
-                     self.active_void["radiusX"] = max(1.0, dcx)
-                     self.active_void["radiusY"] = max(1.0, dcy)
+                 # Unified Resize (Center-to-Edge)
+                 # Works for both Ellipse (Radius) and Rectangle (Half-Width/Height)
+                 # calculated from Center.
+                 new_rx = max(1.0, abs(gx - cx_deskew))
+                 new_ry = max(1.0, abs(gy - cy_deskew))
+                 
+                 self.active_void["radiusX"] = new_rx
+                 self.active_void["radiusY"] = new_ry
                  
                  self.update()
                  
@@ -1419,15 +1393,13 @@ class GLImageWidget(QOpenGLWidget):
         if not self.void_manager: return
         
         # 1. Get View Center in Global Coords
-        if self.tiled_image:
-             img_w = self.tiled_image.w
-             img_h = self.tiled_image.h
+        # 1. Get View Center in Global Coords
+        if self.coord_transform:
+             img_cx = self.coord_transform.img_cx
+             img_cy = self.coord_transform.img_cy
         else:
-             img_w = 1000
-             img_h = 1000
-             
-        img_cx = img_w / 2
-        img_cy = img_h / 2
+             img_cx = 500
+             img_cy = 500
         
         # View Center in Global Space
         gx = img_cx - self.pan_x

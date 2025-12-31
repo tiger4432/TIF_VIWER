@@ -146,7 +146,7 @@ class MainWindow(QMainWindow):
         form_load = QFormLayout(gb_load)
         
         self.sb_start_layer = QSpinBox(); self.sb_start_layer.setRange(0, 100); self.sb_start_layer.setValue(0)
-        self.sb_end_layer = QSpinBox(); self.sb_end_layer.setRange(0, 100); self.sb_end_layer.setValue(10)
+        self.sb_end_layer = QSpinBox(); self.sb_end_layer.setRange(0, 100); self.sb_end_layer.setValue(1)
         form_load.addRow("Start Limit:", self.sb_start_layer)
         form_load.addRow("End Limit:", self.sb_end_layer)
         
@@ -354,7 +354,9 @@ class MainWindow(QMainWindow):
         cfg.cols = self.sb_cols.value()
         cfg.angle = self.sb_angle.value()
         cfg.opacity = self.slider_opacity.value() / 100.0
-        self.glw.update()
+        
+        # CRITICAL: Notify GLWidget to rebuild CoordinateTransform
+        self.glw.update_grid_params()
 
     def on_grid_moved_by_input(self):
         # Update spinboxes without triggering recursive updates
@@ -562,18 +564,13 @@ class MainWindow(QMainWindow):
                              continue # Skip unbonded
                          label = key
                     
-                    # Calculate Rotated Center
-                    # Unrotated Center relative to Grid Origin
-                    cx_rel = (c + 0.5) * cfg.pitch_x
-                    cy_rel = (r + 0.5) * cfg.pitch_y
+                    # Calculate Center in Deskewed Space (gx, gy)
+                    gx = cfg.start_x + (c + 0.5) * cfg.pitch_x
+                    gy = cfg.start_y + (r + 0.5) * cfg.pitch_y
                     
-                    # Rotate (Grid Angle)
-                    rot_x = cx_rel * cos_a - cy_rel * sin_a
-                    rot_y = cx_rel * sin_a + cy_rel * cos_a
-                    
-                    # Absolute Center
-                    center_x = cfg.start_x + rot_x
-                    center_y = cfg.start_y + rot_y
+                    # Convert to Raw (Image) Coordinates
+                    # Delegates to self.glw which uses CoordinateTransform
+                    center_x, center_y = self.glw.deskew_to_raw(gx, gy)
                     
                     # Extract Upright Patch using QPainter (Large Crop + Rotate)
                     # 1. Determine safe bounding box for rotation
@@ -675,7 +672,7 @@ class MainWindow(QMainWindow):
     def load_voids(self):
         path, _ = QFileDialog.getOpenFileName(self, "Load Voids JSON", "", "JSON (*.json)")
         if path:
-            self.void_manager.load_from_file(path, self.glw.grid_cfg)
+            self.void_manager.load_from_file(path, self.glw.grid_cfg, self.glw.coord_transform)
             self.populate_void_types() # Refresh types
             self.update_void_ui()
             self.glw.update()
@@ -724,7 +721,7 @@ class MainWindow(QMainWindow):
     def save_voids(self):
         path, _ = QFileDialog.getSaveFileName(self, "Save Voids JSON", "voids.json", "JSON (*.json)")
         if path:
-            self.void_manager.save_to_file(path, self.glw.grid_cfg, self.glw.bonding_map)
+            self.void_manager.save_to_file(path, self.glw.grid_cfg, self.glw.bonding_map, self.glw.coord_transform)
             
     def clear_voids(self):
         # Clear CURRENT LAYER Only

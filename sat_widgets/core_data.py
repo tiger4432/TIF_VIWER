@@ -280,3 +280,65 @@ class BondingMap:
         row = self.data_map[r]
         if c < 0 or c >= len(row): return ""
         return row[c]
+
+# ==================================================================================
+# Coordinate Transform Logic
+# ==================================================================================
+class CoordinateTransform:
+    """
+    Central Logic for transforming coordinates between:
+    1. Raw Image Space (Pixel Coordinates, u, v) - Where data is stored.
+    2. Deskewed Space (Grid Coordinates, x, y) - Where data is visualized/aligned.
+    
+    Transformation:
+    - Raw -> Deskewed: Rotate by -Angle around Image Center.
+    - Deskewed -> Raw: Rotate by +Angle around Image Center.
+    """
+    def __init__(self, angle_deg, img_w, img_h):
+        self.angle = angle_deg
+        self.img_w = img_w
+        self.img_h = img_h
+        self.img_cx = img_w / 2.0
+        self.img_cy = img_h / 2.0
+        
+        # Precompute for Deskew (-Angle)
+        rad_deskew = np.radians(-self.angle)
+        self.cos_inv = np.cos(rad_deskew)
+        self.sin_inv = np.sin(rad_deskew)
+        
+        # Precompute for Raw (+Angle)
+        rad_raw = np.radians(self.angle)
+        self.cos_raw = np.cos(rad_raw)
+        self.sin_raw = np.sin(rad_raw)
+
+    def raw_to_deskew(self, rx, ry):
+        """
+        Transforms Raw Coordinates (rx, ry) to Deskewed Space (gx, gy).
+        Formula:
+        1. Translate to Center
+        2. Rotate by -Angle
+        3. Translate back
+        """
+        dx = rx - self.img_cx
+        dy = ry - self.img_cy
+        
+        rot_x = dx * self.cos_inv - dy * self.sin_inv
+        rot_y = dx * self.sin_inv + dy * self.cos_inv
+        
+        return self.img_cx + rot_x, self.img_cy + rot_y
+
+    def deskew_to_raw(self, gx, gy):
+        """
+        Transforms Deskewed Coordinates (gx, gy) to Raw Space (rx, ry).
+        Formula:
+        1. Translate to Center
+        2. Rotate by +Angle
+        3. Translate back
+        """
+        dx = gx - self.img_cx
+        dy = gy - self.img_cy
+        
+        rot_x = dx * self.cos_raw - dy * self.sin_raw
+        rot_y = dx * self.sin_raw + dy * self.cos_raw
+        
+        return self.img_cx + rot_x, self.img_cy + rot_y
