@@ -813,10 +813,10 @@ class GLImageWidget(QOpenGLWidget):
                      
                      shape = self.void_manager.types.get(tid, {}).get("shape", "ellipse")
                      if shape == "rectangle":
-                         # rx, ry are half-width, half-height? Or radius? 
-                         # Usually radius implies from center to edge.
-                         # drawRect(x, y, w, h) -> x = cx - rx, y = cy - ry, w = 2*rx, h = 2*ry
-                         painter.drawRect(QRectF(sx - srx, sy - sry, srx * 2, sry * 2))
+                         # Rectangle: Schema Left, Top, W, H
+                         # sx, sy = Screen Left, Screen Top
+                         # srx, sry = Screen Width, Screen Height
+                         painter.drawRect(QRectF(sx, sy, srx, sry))
                      else:
                          painter.drawEllipse(QPointF(sx, sy), srx, sry)
 
@@ -851,22 +851,7 @@ class GLImageWidget(QOpenGLWidget):
                  # Draw Shape
                  shape = self.void_manager.types.get(tid, {}).get("shape", "ellipse")
                  if shape == "rectangle":
-                      # Schema: globalCX=Left, globalCY=Top, radiusX=Width, radiusY=Height
-                      # Directly use these values
-                      painter.drawRect(QRectF(v["globalCX"], v["globalCY"], v["radiusX"], v["radiusY"]))
-                      
-                      # Wait, screen transforms?
-                      # v coordinates are Global Image Coords.
-                      # We need to transform them to Screen Coords first.
-                      # Existing logic: sx, sy = to_screen(v["globalCX"], v["globalCY"])
-                      # For Ellipse: sx, sy is center.
-                      # For Rectangle: sx, sy is Left, Top (because globalCX is Left).
-                      # srx, sry: v["radiusX"] * zoom -> Width * zoom
-                      
-                      # So:
-                      # sx, sy = to_screen(Left, Top) -> Screen Left, Screen Top
-                      # srx = Width * zoom
-                      # sry = Height * zoom
+                      # Rectangle: Schema Left, Top, W, H
                       painter.drawRect(QRectF(sx, sy, srx, sry))
                  else:
                       painter.drawEllipse(QPointF(sx, sy), srx, sry)

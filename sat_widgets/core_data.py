@@ -1,5 +1,8 @@
 import numpy as np
-import tifffile
+import numpy as np
+from PIL import Image
+Image.MAX_IMAGE_PIXELS = None # Disable limit for large satellite images
+from PySide6.QtGui import QColor
 from PySide6.QtGui import QColor
 import colorsys
 
@@ -51,54 +54,97 @@ def to_gray2d_uint16(arr: np.ndarray, z_index: int = 0) -> np.ndarray:
 
 class LazyTiffStack:
     """
-    Wraps a tifffile.TiffFile instance to provide lazy-loading of layers.
-    Mimics a 3D numpy array (Z, H, W) or 4D (Z, H, W, C) interface (read-only).
+    Wraps a PIL.Image instance to provide lazy-loading of layers.
+    Mimics a 3D numpy array (Z, H, W).
     """
-    def __init__(self, tif_instance):
-        self.tif = tif_instance
-        self.is_series = (len(self.tif.series) > 1)
-        
-        if self.is_series:
-            self.items = self.tif.series
-            ref = self.items[0]
-            # series.shape is usually (H, W) or (H, W, C) or (Z, H, W)
-            # We assume each series is a "Layer" (Z-slice).
-            self.base_shape = ref.shape
-            self.dtype = ref.dtype
-            self.len = len(self.items)
+    def __init__(self, source):
+        if isinstance(source, str):
+            self.img = Image.open(source)
+            self.owned = True
+        elif isinstance(source, Image.Image):
+            self.img = source
+            self.owned = False
         else:
-            self.items = self.tif.pages
-            ref = self.items[0]
-            self.base_shape = ref.shape
-            self.dtype = ref.dtype
-            self.len = len(self.items)
+            raise ValueError("Source must be a file path or PIL Image object")
             
-        # Construct Shape
-        self.shape = (self.len,) + self.base_shape
-        self.ndim = 1 + len(self.base_shape)
+        self.n_frames = getattr(self.img, 'n_frames', 1)
+        self.width, self.height = self.img.size
         
+        # Limit Logic
+        self.frame_start = 0
+        self.frame_count = self.n_frames
+        
+        # Determine dtype/shape helper
+        self.shape = (self.frame_count, self.height, self.width)
+        self.ndim = 3
+        
+    def set_range(self, start, count):
+        self.frame_start = max(0, start)
+        self.frame_count = min(count, self.n_frames - self.frame_start)
+        self.shape = (self.frame_count, self.height, self.width)
+        
+        # Check mode for dtype
+        # Common modes: 'L' (8-bit), 'I;16' (16-bit unsigned), 'I' (32-bit signed), 'F' (32-bit float)
+        if self.img.mode == 'I;16':
+            self.dtype = np.uint16
+        elif self.img.mode == 'I':
+            self.dtype = np.uint32 # Often used for 16-bit data in some PIL versions, but let's assume it maps to int/uint
+        elif self.img.mode == 'F':
+            self.dtype = np.float32
+        else:
+            self.dtype = np.uint8 # Default fallback (L, RGB, etc)
+            
     def __getitem__(self, key):
         # Handle Integer Index [z]
         if isinstance(key, int):
-            if key < 0: key += self.len
-            if key < 0 or key >= self.len: raise IndexError("Index out of bounds")
-            return self.items[key].asarray()
+            if key < 0: key += self.frame_count
+            if key < 0 or key >= self.frame_count: raise IndexError("Index out of bounds")
+            
+            # Map logical index to physical index
+            phys_idx = self.frame_start + key
+            self.img.seek(phys_idx)
+            return np.array(self.img)
             
         # Handle Slice [a:b]
         if isinstance(key, slice):
-            start, stop, step = key.indices(self.len)
-            return np.stack([self.items[i].asarray() for i in range(start, stop, step)])
+            # Indices relative to frame_count
+            start, stop, step = key.indices(self.frame_count)
+            res = []
+            for i in range(start, stop, step):
+                phys_idx = self.frame_start + i
+                self.img.seek(phys_idx)
+                res.append(np.array(self.img))
+            if not res: return np.array([], dtype=self.dtype).reshape((0, self.height, self.width))
+            return np.stack(res)
             
         # Handle tuple [z, y, x]
         if isinstance(key, tuple):
             z = key[0]
-            layer = self[z] # Get array
-            return layer[key[1:]]
-            
-        return self.items[key].asarray()
+            if isinstance(z, int):
+                # Optimization
+                if z < 0: z += self.frame_count
+                
+                # Check Bounds
+                if z < 0 or z >= self.frame_count: raise IndexError("Index out of bounds")
+                
+                phys_idx = self.frame_start + z
+                self.img.seek(phys_idx)
+                arr = np.array(self.img)
+                return arr[key[1:]]
+            else:
+                 # Slice
+                 layer = self[z] 
+                 return layer[key[1:]]
+
+        # Fallback
+        return np.array(self.img)
 
     def __len__(self):
-        return self.len
+        return self.frame_count
+
+    def close(self):
+        if self.owned:
+            self.img.close()
 
 class GridConfig:
     def __init__(self):

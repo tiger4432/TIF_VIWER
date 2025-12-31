@@ -1,7 +1,7 @@
 import sys
 import os
 import numpy as np
-import tifffile
+import numpy as np
 import time
 import json # Used in VoidManager serialization, but here maybe not needed directly?
 # MainWindow uses 'to_gray2d_uint16' from core_data.
@@ -38,7 +38,7 @@ class MainWindow(QMainWindow):
         self.calib_timer.timeout.connect(self.calculate_calibration)
         
         self.full_data = None #(Z, H, W) or (H, W) or LazyTiffStack
-        self.current_tif_file = None # Keep file handle open for Lazy Stack
+
         self.current_z = 0
         self.layer_offset = 0 # Absolute offset of loaded layers
         self.layer_cache = {} # Cache for TiledImage objects to avoid re-uploading
@@ -703,21 +703,29 @@ class MainWindow(QMainWindow):
         
         try:
             # 1. Cleanup previous file handle
-            if self.current_tif_file:
-                self.current_tif_file.close()
-                self.current_tif_file = None
-                
-            # 2. Open new file (Keep handle for Lazy Load)
-            self.current_tif_file = tifffile.TiffFile(path)
+            if hasattr(self.full_data, 'close'):
+                self.full_data.close()
+            self.full_data = None
             
-            # 3. Create Lazy Stack
-            # This handles both Multi-Series (fast open) and regular stacks.
-            lazy_stack = LazyTiffStack(self.current_tif_file)
+            # 2. Create Lazy Stack (PIL Path)
+            lazy_stack = LazyTiffStack(path)
+            
+            # Apply Limits
+            # req_start is 0-indexed index. req_end is inclusive? 
+            # UI Default: Start 0, End 10.
+            # Range: [Start, End]. Count = End - Start + 1?
+            # Or is End exclusive? "End Limit". Usually inclusive in user speak?
+            # Let's assume inclusive for now or match previous logical intent.
+            # If default is 0 to 10.
+            if req_start <= req_end:
+                 count = req_end - req_start + 1
+                 lazy_stack.set_range(req_start, count)
+                 print(f"Applied Layer Limit: Start {req_start}, Count {count}")
             
             print(f"Opened with Lazy Loading (Instant). Shape: {lazy_stack.shape}")
             
             self.full_data = lazy_stack
-            self.layer_offset = 0 # Offset handling simplified for now
+            self.layer_offset = req_start # Store simple offset for reference if needed
             
             # Slice if requested?
             # LazyTiffStack doesn't support sophisticated slicing view yet, but we can just use indices.
