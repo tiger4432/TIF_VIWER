@@ -81,6 +81,9 @@ class ExportManager(QObject):
             # Accumulators
             merged_accumulators = {} 
             mask_accumulators = {} 
+            
+            # Patch Metadata Collection (List of Dicts)
+            patch_metadata_list = []
 
             # Iterate Layers
             for layer_idx in range(num_layers):
@@ -125,12 +128,18 @@ class ExportManager(QObject):
                     if patch_qimg is None: continue 
                     
                     # For drawing voids, we need Center in Raw Coords.
-                    # Calculate from Grid
                     gx = cfg.start_x + (c + 0.5) * cfg.pitch_x
                     gy = cfg.start_y + (r + 0.5) * cfg.pitch_y
                     
                     # Using GLWidget's descale logic
                     center_x, center_y = self.main_window.glw.deskew_to_raw(gx, gy)
+                    
+                    # Deskewed BBox (for visual alignment/mosaic)
+                    x0 = cfg.start_x + c * cfg.pitch_x
+                    y0 = cfg.start_y + r * cfg.pitch_y
+                    x1 = x0 + cfg.pitch_x
+                    y1 = y0 + cfg.pitch_y
+                    bbox_deskewed = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
                     
                     # Sanitize Filename & Create Title Text
                     safe_label = "".join([c if c.isalnum() or c in (' ', '_', '-') else '_' for c in label])
@@ -141,22 +150,34 @@ class ExportManager(QObject):
                     
                     basename = f"X{c:02d}_Y{r:02d}_L{layer_idx:02d}_LEG_{safe_label}"
                     
+                    # Default filename for metadata (prefer raw, then overlay)
+                    saved_rel_path = ""
+
                     # A. Raw Export
                     if options.get('raw'):
-                        path = os.path.join(layer_subdirs['raw'], f"{basename}.png")
+                        fname = f"{basename}.png"
+                        path = os.path.join(layer_subdirs['raw'], fname)
                         final_img = self._add_title_bar(patch_qimg, title_raw_ov)
                         if not final_img.save(path):
                             print(f"Error saving {path}")
+                        else:
+                            # Save relative path for metadata
+                            # raw/Layer_XX/filename.png
+                            saved_rel_path = f"raw/{layer_name}/{fname}"
                         
                     # B. Overlay (Burn-in)
                     if options.get('overlay'):
                         ov_img = patch_qimg.convertToFormat(QImage.Format_ARGB32)
                         # Pass center_x, center_y (Raw Center)
                         self._draw_voids(ov_img, layer_idx, center_x, center_y, w_pitch, h_pitch, cfg.angle, mode='overlay')
-                        path = os.path.join(layer_subdirs['overlay'], f"{basename}_overlay.png")
+                        fname = f"{basename}_overlay.png"
+                        path = os.path.join(layer_subdirs['overlay'], fname)
                         final_img = self._add_title_bar(ov_img, title_raw_ov)
                         if not final_img.save(path):
                             print(f"Error saving {path}")
+                        else:
+                            if not saved_rel_path:
+                                saved_rel_path = f"overlay/{layer_name}/{fname}"
                         
                     # C. Mask (Accumulate per Chip)
                     if options.get('mask'):
@@ -182,6 +203,19 @@ class ExportManager(QObject):
                             
                         self._draw_voids(merged_accumulators[safe_label_merged]['img'], layer_idx, center_x, center_y, w_pitch, h_pitch, cfg.angle, mode='mask')
 
+                    # Collect Metadata
+                    if saved_rel_path:
+                        meta = {
+                            "layer": layer_idx,
+                            "x": c,
+                            "y": r,
+                            "label": safe_label,
+                            "bbox_raw": bbox_raw, # List of (x,y) tuples
+                            "bbox_deskewed": bbox_deskewed,
+                            "filename": saved_rel_path
+                        }
+                        patch_metadata_list.append(meta)
+
                     processed += 1
                     if processed % 10 == 0:
                         self.progress_update.emit(int(processed / total_chips * 100), f"Processing {r}, {c}...")
@@ -204,6 +238,24 @@ class ExportManager(QObject):
                     path = os.path.join(subdirs['merged'], f"Merged_Label_{label}.png")
                     final_img = self._add_title_bar(img, title)
                     final_img.save(path)
+            
+            # Save Patch Metadata (patches.json)
+            if options.get('json'):
+                p_path = os.path.join(output_dir, "patches.json")
+                with open(p_path, 'w') as f:
+                    out_data = {
+                        "grid_config": {
+                            "start_x": cfg.start_x,
+                            "start_y": cfg.start_y,
+                            "pitch_x": cfg.pitch_x,
+                            "pitch_y": cfg.pitch_y,
+                            "rows": cfg.rows,
+                            "cols": cfg.cols,
+                            "angle": cfg.angle
+                        },
+                        "patches": patch_metadata_list
+                    }
+                    json.dump(out_data, f, indent=2)
 
             self.finished.emit()
             
@@ -284,14 +336,6 @@ class ExportManager(QObject):
         pcy = target_img.height() / 2
         
         # Calculate Chip Center in Deskewed Space using Main Window GL Widget
-        gx_chip, gy_chip = self.main_window.glw.deskew_to_raw(cx, cy) 
-        # WAIT! deskew_to_raw maps Dest -> Raw.
-        # We want raw_to_deskew to map Raw Voids -> Dest.
-        # Check logic: 
-        # cx, cy is Raw Center.
-        # gx_chip, gy_chip = self.main_window.glw.raw_to_deskew(cx, cy)
-        # Yes.
-        
         gx_chip, gy_chip = self.main_window.glw.raw_to_deskew(cx, cy)
         
         # Decide which layers to draw
