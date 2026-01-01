@@ -1,12 +1,10 @@
+
 import sys
 import os
 import numpy as np
-import numpy as np
 import time
-import json # Used in VoidManager serialization, but here maybe not needed directly?
-# MainWindow uses 'to_gray2d_uint16' from core_data.
-# MainWindow calls void_manager.load_from_file which uses json.
-# MainWindow logic seems free of direct json usage, but explicit imports are safer if I missed something.
+from datetime import datetime
+import json 
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -19,10 +17,12 @@ from PySide6.QtGui import QSurfaceFormat, QAction, QImage, QPainter
 from PySide6.QtCore import Qt, QTimer
 
 # Imports from sat_widgets
-from sat_widgets.core_data import LazyTiffStack, GridConfig, BondingMap, to_gray2d_uint16
+from sat_widgets.core_data import LazyTiffStack, GridConfig, BondingMap, to_gray2d_uint16, ImageNormalizer
 from sat_widgets.void_manager import VoidManager, VoidTypeDialog
 from sat_widgets.gl_widget import GLImageWidget, TiledImage
 from sat_widgets.exporter import ExportManager
+from sat_widgets.patch_viewer import PatchViewer
+from sat_widgets.roi_inspector import ROIInspector
 
 # ==================================================================================
 # 4. Main Window
@@ -41,8 +41,9 @@ class MainWindow(QMainWindow):
 
         self.current_z = 0
         self.layer_offset = 0 # Absolute offset of loaded layers
-        self.layer_cache = {} # Cache for TiledImage objects to avoid re-uploading
-        self.layer_calib_data = {} # Cache for Calibration Data (Rows, Cols, 2)
+        self.layer_cache = {} # Cache for TiledImage objects
+        self.layer_calib_data = {} # Cache for calibration data {z: (rows, cols, 2)}
+        self.rois = [] # Pre-calculated ROIs [{'label':.., 'x':.., 'y':.., 'bbox':[(x,y)*4]}, ...]
         
         self.glw = GLImageWidget()
         
@@ -168,13 +169,19 @@ class MainWindow(QMainWindow):
         # 3. Extraction
         gb_extract = QGroupBox("Extraction")
         v_ext = QVBoxLayout(gb_extract)
-        btn_extract = QPushButton("Extract Patches (Simple)")
-        btn_extract.clicked.connect(self.extract_patches)
-        v_ext.addWidget(btn_extract)
+
         
         btn_adv_export = QPushButton("Advanced Export...")
         btn_adv_export.clicked.connect(self.open_advanced_export)
         v_ext.addWidget(btn_adv_export)
+        
+        btn_patch_view = QPushButton("Open Patch Viewer")
+        btn_patch_view.clicked.connect(self.open_patch_viewer)
+        v_ext.addWidget(btn_patch_view)
+        
+        btn_inspect_rois = QPushButton("Inspect ROIs (Debug)")
+        btn_inspect_rois.clicked.connect(self.open_roi_inspector)
+        v_ext.addWidget(btn_inspect_rois)
         # v_ext.addWidget(btn_extract) # Duplicate in original?
         dock_layout.addWidget(gb_extract)
         
@@ -357,6 +364,9 @@ class MainWindow(QMainWindow):
         
         # CRITICAL: Notify GLWidget to rebuild CoordinateTransform
         self.glw.update_grid_params()
+        
+        # Update ROIs
+        self.update_rois()
 
     def on_grid_moved_by_input(self):
         # Update spinboxes without triggering recursive updates
@@ -370,6 +380,72 @@ class MainWindow(QMainWindow):
         
         self.sb_grid_x.blockSignals(False)
         self.sb_grid_y.blockSignals(False)
+        
+        self.update_rois() # Update ROIs on manual move too
+
+        if self.chk_use_calib.isChecked():
+             # Disable auto-recalc on move (User Request)
+             # User must click 'Recalculate'
+             pass
+             # self.calib_timer.start(200) # 200ms debounce
+
+    def update_rois(self):
+        """
+        Pre-calculate ROIs for all (bonded) chips in Raw Image Coordinates.
+        Stored in self.rois
+        """
+        self.rois = []
+        cfg = self.glw.grid_cfg
+        
+        # If bonding map exists, use it. Else use all grid cells? 
+        # User said "bonding map에 따라서" (according to bonding map).
+        # If no map, maybe empty? Or all? Let's assume all if no map, or just logic handle both.
+        # "bonding map... bonding 좌표들의 roi" implies only bonded ones.
+        
+        rows = cfg.rows
+        cols = cfg.cols
+        
+        for r in range(rows):
+            for c in range(cols):
+                label = f"{r}_{c}"
+                is_bonded = True
+                
+                if self.glw.bonding_map:
+                    key = self.glw.bonding_map.get_key(r, c)
+                    if not key:
+                        is_bonded = False
+                    else:
+                        label = key
+                
+                if not is_bonded:
+                    continue
+                    
+                # Calculate 4 corners in Deskewed Space
+                # Top-Left: (c*p_x, r*p_y) + start
+                x0 = cfg.start_x + c * cfg.pitch_x
+                y0 = cfg.start_y + r * cfg.pitch_y
+                x1 = x0 + cfg.pitch_x
+                y1 = y0 + cfg.pitch_y
+                
+                # 4 Points (TL, TR, BR, BL)
+                corners_deskewed = [
+                    (x0, y0), (x1, y0), (x1, y1), (x0, y1)
+                ]
+                
+                bbox_raw = []
+                for gx, gy in corners_deskewed:
+                    rx, ry = self.glw.deskew_to_raw(gx, gy)
+                    bbox_raw.append((rx, ry))
+                    
+                self.rois.append({
+                    'label': label,
+                    'x': c,
+                    'y': r,
+                    'bbox': bbox_raw
+                })
+        
+        # Debug print
+        # print(f"Updated ROIs: {len(self.rois)} items")
         
         if self.chk_use_calib.isChecked():
              # Disable auto-recalc on move (User Request)
@@ -408,7 +484,10 @@ class MainWindow(QMainWindow):
             if not self.chk_grid_show.isChecked():
                 self.chk_grid_show.setChecked(True)
                 
-            print(f"Map Imported: {bmap.rows}x{bmap.cols}, Unique Keys: {len(bmap.unique_keys)}")
+            print(f"Map Imported: {bmap.rows}x{bmap.cols}, Unique Keys: {len(bmap.data_map)}")
+            
+            # Update ROIs
+            self.update_rois()
             
 
     def on_view_center_changed(self, c, r):
@@ -446,13 +525,6 @@ class MainWindow(QMainWindow):
                  try:
                      # Accessing single pixel from LazyTiffStack might be slow if we load full page.
                      # But we have `layer_cache`?
-                     # Ideally we look at "Current Rendered Layer".
-                     # If it's preloaded in RAM?
-                     # Let's assume LazyStack is efficient or we accept small lag.
-                     # Actually, `self.full_data[z]` loads `(H,W)`.
-                     # If we do this on every mouse move, it WILL lag if not cached.
-                     
-                     # Check `self.layer_cache`?
                      # `layer_cache` stores `TiledImage`. `TiledImage` doesn't keep full numpy array (it chops tiles).
                      # `TiledImage` assumes tile data is in RAM or GPU? 
                      # `Tile.data` is numpy.
@@ -467,10 +539,19 @@ class MainWindow(QMainWindow):
         
         # 3. Calculate Grid Cell (Deskewed)
         cfg = self.glw.grid_cfg
-        c = int(gx / cfg.pitch_x)
-        r = int(gy / cfg.pitch_y)
+        # Adjust for start offset before dividing by pitch
+        c = int(np.floor((gx - cfg.start_x) / cfg.pitch_x))
+        r = int(np.floor((gy - cfg.start_y) / cfg.pitch_y))
         
-        self.lbl_cursor_pos.setText(f"Cell: {c}, {r} | PX: {int(rx)}, {int(ry)}")
+        label_str = "-"
+        if self.glw.bonding_map:
+             label_str = self.glw.bonding_map.get_key(r, c) or "-"
+             
+        # Update Label (User Request: Show Raw & Deskew)
+        # Format: Raw: (X, Y) | Deskew: (X, Y) | Cell: R_C (Label)
+        self.lbl_cursor_pos.setText(
+            f"Raw: ({rx:.1f}, {ry:.1f}) | Deskew: ({gx:.1f}, {gy:.1f}) | Cell: {r}_{c} ({label_str})"
+        )
         
     def on_navigation_requested(self, c, r):
         # Update inputs first
@@ -489,158 +570,7 @@ class MainWindow(QMainWindow):
         r = self.sb_jump_y.value()
         self.glw.fit_to_cell(c, r)
             
-    def extract_patches(self):
-        if self.full_data is None:
-            print("No image loaded.")
-            return
 
-        # Choose directory
-        out_dir = QFileDialog.getExistingDirectory(self, "Select Output Directory")
-        if not out_dir:
-            return
-            
-        print(f"Extracting to {out_dir}...")
-        
-        cfg = self.glw.grid_cfg
-        win_lo = self.glw.win_lo
-        win_hi = self.glw.win_hi
-        win_range = max(1.0, win_hi - win_lo)
-        use_calib = self.chk_use_calib.isChecked()
-        
-        # Determine layers
-        # User said "all layers"
-        if self.full_data.ndim == 2 or (self.full_data.ndim == 3 and self.full_data.shape[-1] in (3,4)):
-            layers = [0]
-        elif self.full_data.ndim == 3:
-            layers = range(self.full_data.shape[0])
-        elif self.full_data.ndim == 4:
-             layers = range(self.full_data.shape[0])
-        else:
-            layers = [0]
-            
-        import os
-        
-        total_extracted = 0
-        
-        progress = QProgressDialog("Extracting patches...", "Cancel", 0, len(layers), self)
-        progress.setWindowModality(Qt.WindowModal)
-        progress.show()
-
-        for idx, z in enumerate(layers):
-            if progress.wasCanceled(): break
-            progress.setValue(idx)
-            QApplication.processEvents()
-            
-            # Create Layer Folder
-            # Folder name: Layer_Z
-            layer_dir = os.path.join(out_dir, f"Layer_{z}")
-            os.makedirs(layer_dir, exist_ok=True)
-            
-            # Get Image
-            try:
-                img = to_gray2d_uint16(self.full_data, z)
-            except:
-                continue
-                
-            h, w = img.shape
-            
-            # Get Calibration Data for this layer
-            calib_map = None
-            if use_calib:
-                calib_map = self.layer_calib_data.get(z, None)
-                
-            # Rotation pre-calc
-            rad = np.radians(cfg.angle)
-            sin_a = np.sin(rad)
-            cos_a = np.cos(rad)
-            
-            for r in range(cfg.rows):
-                for c in range(cfg.cols):
-                    # Check Bonding Map
-                    label = "chip"
-                    if self.glw.bonding_map:
-                         key = self.glw.bonding_map.get_key(r, c)
-                         if not key:
-                             continue # Skip unbonded
-                         label = key
-                    
-                    # Calculate Center in Deskewed Space (gx, gy)
-                    gx = cfg.start_x + (c + 0.5) * cfg.pitch_x
-                    gy = cfg.start_y + (r + 0.5) * cfg.pitch_y
-                    
-                    # Convert to Raw (Image) Coordinates
-                    # Delegates to self.glw which uses CoordinateTransform
-                    center_x, center_y = self.glw.deskew_to_raw(gx, gy)
-                    
-                    # Extract Upright Patch using QPainter (Large Crop + Rotate)
-                    # 1. Determine safe bounding box for rotation
-                    diag = np.sqrt(cfg.pitch_x**2 + cfg.pitch_y**2)
-                    r_bound = int(diag / 2.0) + 5 # Extra padding
-                    
-                    x_min = int(max(0, center_x - r_bound))
-                    y_min = int(max(0, center_y - r_bound))
-                    x_max = int(min(w, center_x + r_bound))
-                    y_max = int(min(h, center_y + r_bound))
-                    
-                    if x_max <= x_min or y_max <= y_min:
-                        continue
-                        
-                    # Extract Source Crop
-                    roi = img[y_min:y_max, x_min:x_max].astype(np.float32)
-                    
-                    # Apply Window Level
-                    roi = (roi - win_lo) / win_range
-                    
-                    # Apply Calibration
-                    if calib_map is not None:
-                        if r < calib_map.shape[0] and c < calib_map.shape[1]:
-                            scale = calib_map[r, c, 0]
-                            offset = calib_map[r, c, 1]
-                            roi = roi * scale + offset
-                            
-                    # Clip to 0-1
-                    roi = np.clip(roi, 0.0, 1.0)
-                    
-                    # Convert to uint8 (Visual)
-                    roi_u8 = (roi * 255.0).astype(np.uint8)
-                    
-                    # Create Source QImage
-                    h_roi, w_roi = roi_u8.shape
-                    q_src = QImage(roi_u8.data, w_roi, h_roi, w_roi, QImage.Format_Grayscale8)
-                    
-                    # Create Target QImage (Upright)
-                    dst_w = int(cfg.pitch_x)
-                    dst_h = int(cfg.pitch_y)
-                    q_dst = QImage(dst_w, dst_h, QImage.Format_Grayscale8)
-                    q_dst.fill(0)
-                    
-                    # Paint Rotated
-                    p = QPainter(q_dst)
-                    # p.setRenderHint(QPainter.SmoothPixmapTransform) # Bilinear - optional, might blur slightly
-                    # Using default (Nearest) usually preserves edge sharpness for scientific images.
-                    # But user wants "visual appearance", so Smooth might be better for rotation.
-                    # Let's use Smooth.
-                    p.setRenderHint(QPainter.SmoothPixmapTransform)
-                    
-                    # Transform: Target Center -> Rotate -> Match Source Coords
-                    p.translate(dst_w / 2.0, dst_h / 2.0)
-                    p.rotate(-cfg.angle) # Rotate back to upright
-                    p.translate(-center_x, -center_y) # Align with Global System
-                    
-                    # Draw Source at its global position
-                    p.drawImage(x_min, y_min, q_src)
-                    p.end()
-                    
-                    # Filename: X00_Y03_L01_LEG_class.png
-                    fname = f"X{c:02d}_Y{r:02d}_L{z:02d}_LEG_{label}.png"
-                    fpath = os.path.join(layer_dir, fname)
-                    
-                    q_dst.save(fpath)
-                    
-                    total_extracted += 1
-
-        progress.setValue(len(layers))
-        print(f"Extraction Complete. Total {total_extracted} patches.")
 
     def set_void_mode_draw(self):
         self.rb_draw.setChecked(True)
@@ -1118,12 +1048,53 @@ class MainWindow(QMainWindow):
         if self.current_z in self.layer_calib_data:
             self.glw.update_calib_texture(self.layer_calib_data[self.current_z])
 
+    def open_patch_viewer(self):
+        if self.full_data is None:
+            print("No image loaded.")
+            return
+
+        # Ensure we have ROIs (from grid update or import map)
+        if not self.rois:
+             print("No ROIs found. Attempting to update from grid...")
+             self.update_rois()
+             
+        dlg = PatchViewer(
+            self, 
+            rois=self.rois, 
+            data_source=self.full_data, 
+            grid_cfg=self.glw.grid_cfg,
+            gl_widget=self.glw,
+            calib_data=self.layer_calib_data if self.chk_use_calib.isChecked() else None,
+            win_lo=self.glw.win_lo,
+            win_hi=self.glw.win_hi
+        )
+        dlg.exec()
+
+    def open_roi_inspector(self):
+        if not self.rois:
+             print("No ROIs found. Updating...")
+             self.update_rois()
+             
+        dlg = ROIInspector(self.rois, self)
+        dlg.exec()
+
     def open_advanced_export(self):
         if not self.full_data and not self.glw.tiled_image:
             print("No image loaded.")
             return
 
-        dlg = ExportDialog(self)
+        # 1. Generate Auto Path
+        # save/{tif_name}_{timestamp}
+        tif_basename = "unknown"
+        if hasattr(self.full_data, 'path') and self.full_data.path:
+             # Extract filename without extension
+             fname = os.path.basename(self.full_data.path)
+             tif_basename = os.path.splitext(fname)[0]
+             
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        default_dir = os.path.join(os.getcwd(), "save", f"{tif_basename}_{timestamp}")
+        
+        dlg = ExportDialog(self, default_dir=default_dir)
         if dlg.exec():
             # Run Export
             out_dir = dlg.output_dir
@@ -1140,22 +1111,23 @@ class MainWindow(QMainWindow):
             self.pd.setWindowModality(Qt.WindowModal)
             self.pd.show()
             
-            # Create Manager
-            # Using self.full_data (LazyStack) allows accessing logic for all layers
-            data_source = self.full_data
+            # Ensure ROIs are up to date
+            if not self.rois:
+                 print("Updating ROIs for export...")
+                 self.update_rois()
             
-            if data_source is None:
-                print("No Data Source loaded.")
-                return
-                
-            exporter = ExportManager(data_source, self.void_manager, self.glw.grid_cfg, self.glw.bonding_map)
+            # Create Manager (Pass MainWindow)
+            exporter = ExportManager(self)
             
             # Connect
             exporter.progress_update.connect(lambda p, msg: (self.pd.setValue(p), self.pd.setLabelText(msg), QApplication.processEvents()))
             
             # Run
             try:
-                exporter.run_export(out_dir, opts)
+                # Pass Window Levels for WYSIWYG
+                win_lo = self.glw.win_lo
+                win_hi = self.glw.win_hi
+                exporter.run_export(out_dir, opts, win_lo, win_hi)
             except Exception as e:
                 print(f"Export Error: {e}")
                 
@@ -1163,7 +1135,7 @@ class MainWindow(QMainWindow):
             print("Export Finished.")
 
 class ExportDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, default_dir=""):
         super().__init__(parent)
         self.setWindowTitle("Advanced Export")
         self.resize(400, 300)
@@ -1199,8 +1171,8 @@ class ExportDialog(QDialog):
         
         # 2. Directory
         h_dir = QHBoxLayout()
-        self.lbl_dir = QLabel("Out Dir: -")
-        self.output_dir = ""
+        self.output_dir = default_dir
+        self.lbl_dir = QLabel(f"Out Dir: {default_dir}" if default_dir else "Out Dir: -")        
         btn_dir = QPushButton("Browse...")
         btn_dir.clicked.connect(self.browse_dir)
         h_dir.addWidget(self.lbl_dir, 1)

@@ -1,3 +1,4 @@
+
 import os
 import csv
 import json
@@ -13,20 +14,23 @@ class ExportManager(QObject):
     finished = Signal()
     error_occurred = Signal(str)
 
-    def __init__(self, data_stack, void_manager, grid_cfg, bonding_map):
+    def __init__(self, main_window):
         super().__init__()
-        self.data_stack = data_stack
-        self.void_manager = void_manager
-        self.grid_cfg = grid_cfg
-        self.bonding_map = bonding_map
+        self.main_window = main_window
         self.stop_requested = False
-        self.coord_transform = None
+        
+        # Shortcuts for cleaner access (optional, but good for read)
+        self.data_stack = self.main_window.full_data
+        self.void_manager = self.main_window.void_manager
+        # self.grid_cfg = self.main_window.glw.grid_cfg 
+        # Access dynamically to ensure freshness during run_export
 
-    def run_export(self, output_dir, options: dict):
+    def run_export(self, output_dir, options: dict, win_lo=0, win_hi=65535):
         """
         Main export loop.
         options = {'raw': bool, 'overlay': bool, 'mask': bool, 'merged': bool, 
                    'json': bool, 'csv': bool}
+        win_lo, win_hi: Normalization range (from UI)
         """
         self.stop_requested = False
         
@@ -57,22 +61,26 @@ class ExportManager(QObject):
             elif hasattr(self.data_stack, '__len__'):
                  num_layers = len(self.data_stack)
 
-            # 3. Pre-calc Grid Geometry (Rotation)
-            cfg = self.grid_cfg
-            rad = np.radians(cfg.angle)
-            sin_a = np.sin(rad)
-            cos_a = np.cos(rad)
+            # 3. Access Configs & ROIs
+            cfg = self.main_window.glw.grid_cfg
+            rois = self.main_window.rois
+            
+            if not rois:
+                # Should not happen if triggered from main window
+                # But just in case
+                self.main_window.update_rois()
+                rois = self.main_window.rois
             
             w_pitch = int(cfg.pitch_x)
             h_pitch = int(cfg.pitch_y)
             
-            total_chips = cfg.rows * cfg.cols * num_layers
+            total_chips = len(rois) * num_layers
             if total_chips == 0: total_chips = 1
             processed = 0
             
             # Accumulators
             merged_accumulators = {} 
-            mask_accumulators = {} # Key: (c, r) or label? User said "chip 별로". Using (c,r) is safer for unique identification.
+            mask_accumulators = {} 
 
             # Iterate Layers
             for layer_idx in range(num_layers):
@@ -87,103 +95,100 @@ class ExportManager(QObject):
                         os.makedirs(p, exist_ok=True)
                         layer_subdirs[k] = p
                 
-                # Get Layer Image (Gray uint16)
-                try:
-                    full_layer = self._get_layer_image(layer_idx)
-                except Exception as e:
-                    print(f"Failed to load layer {layer_idx}: {e}")
-                    continue
-                    
-                h_img, w_img = full_layer.shape
-                # Init Coordinate Transform for this layer (assuming size consistency)
-                from .core_data import CoordinateTransform
-                self.coord_transform = CoordinateTransform(cfg.angle, w_img, h_img)
+                # Get Calibration Map for this layer
+                calib_map = None
+                if self.main_window.layer_calib_data:
+                    calib_map = self.main_window.layer_calib_data.get(layer_idx, None)
                 
-                for r in range(cfg.rows):
-                    for c in range(cfg.cols):
-                        if self.stop_requested: break
-                        
-                        # Bonding Map Check
-                        label = "chip"
-                        if self.bonding_map:
-                            key = self.bonding_map.get_key(r, c)
-                            if not key: continue # Skip unbonded
-                            label = key
-                            
-                        # Calculate Rotated Center
-                        # Calculate Center in Deskewed Space (gx, gy)
-                        # start_x is Grid Top-Left in Deskewed Space
-                        gx = cfg.start_x + (c + 0.5) * cfg.pitch_x
-                        gy = cfg.start_y + (r + 0.5) * cfg.pitch_y
-                        
-                        # Convert to Raw Image Coordinates (u, v)
-                        # This matches the Visual Logic (Shader) exactly.
-                        center_x, center_y = self.coord_transform.deskew_to_raw(gx, gy)
-                        
-                        # Extract Patch
-                        patch_qimg = self._extract_patch_qimage(full_layer, center_x, center_y, w_pitch, h_pitch, cfg.angle)
-                        if patch_qimg is None: continue # Out of bounds
-                        
-                        # Sanitize Filename & Create Title Text
-                        safe_label = "".join([c if c.isalnum() or c in (' ', '_', '-') else '_' for c in label])
-                        
-                        # Titles
-                        title_raw_ov = f"X{c:02d}_Y{r:02d}_L{layer_idx:02d}_LEG:{safe_label}"
-                        title_mask = f"X{c:02d}_Y{r:02d}_LEG:{safe_label}"
-                        
-                        basename = f"X{c:02d}_Y{r:02d}_L{layer_idx:02d}_LEG_{safe_label}"
-                        
-                        # A. Raw Export
-                        if options.get('raw'):
-                            path = os.path.join(layer_subdirs['raw'], f"{basename}.png")
-                            final_img = self._add_title_bar(patch_qimg, title_raw_ov)
-                            if not final_img.save(path):
-                                print(f"Error saving {path}")
-                            
-                        # B. Overlay (Burn-in)
-                        if options.get('overlay'):
-                            ov_img = patch_qimg.convertToFormat(QImage.Format_ARGB32)
-                            self._draw_voids(ov_img, layer_idx, center_x, center_y, w_pitch, h_pitch, cfg.angle, mode='overlay')
-                            path = os.path.join(layer_subdirs['overlay'], f"{basename}_overlay.png")
-                            final_img = self._add_title_bar(ov_img, title_raw_ov)
-                            if not final_img.save(path):
-                                print(f"Error saving {path}")
-                            
-                        # C. Mask (Accumulate per Chip)
-                        if options.get('mask'):
-                            # Key: (c, r) -> {image, label}
-                            key = (c, r)
-                            if key not in mask_accumulators:
-                                img = QImage(w_pitch, h_pitch, QImage.Format_ARGB32)
-                                img.fill(Qt.transparent)
-                                mask_accumulators[key] = {'img': img, 'label': safe_label, 'title': title_mask}
-                            
-                            # Draw voids for this layer onto the accumulator
-                            self._draw_voids(mask_accumulators[key]['img'], layer_idx, center_x, center_y, w_pitch, h_pitch, cfg.angle, mode='mask')
-                            
-                        # D. Merged Accumulate
-                        if options.get('merged'):
-                            safe_label_merged = "".join([c if c.isalnum() or c in (' ', '_', '-') else '_' for c in label])
-                            # Title for Merged: LEG:{label}_MERGED
-                            title_merged = f"LEG:{safe_label_merged}_MERGED"
-                            
-                            if safe_label_merged not in merged_accumulators:
-                                merged_accumulators[safe_label_merged] = {
-                                    'img': QImage(w_pitch, h_pitch, QImage.Format_ARGB32),
-                                    'title': title_merged
-                                }
-                                merged_accumulators[safe_label_merged]['img'].fill(Qt.transparent)
-                                
-                            self._draw_voids(merged_accumulators[safe_label_merged]['img'], layer_idx, center_x, center_y, w_pitch, h_pitch, cfg.angle, mode='mask')
+                # Iterate ROIs
+                for item in rois:
+                    if self.stop_requested: break
+                    
+                    r = item['y']
+                    c = item['x']
+                    label = item.get('label', f"{r}_{c}")
+                    bbox_raw = item.get('bbox', [])
+                    
+                    if not bbox_raw: continue
 
-                        processed += 1
-                        if processed % 10 == 0:
-                            self.progress_update.emit(int(processed / total_chips * 100), f"Processing {r}, {c}...")
+                    # Calibration Params
+                    scale, offset = 1.0, 0.0
+                    if calib_map is not None:
+                         if r < calib_map.shape[0] and c < calib_map.shape[1]:
+                             scale = calib_map[r, c, 0]
+                             offset = calib_map[r, c, 1]
+                    
+                    # Extract Patch (Unified)
+                    # use layer_idx, bbox_raw
+                    patch_qimg = self._extract_patch_unified(layer_idx, bbox_raw, win_lo, win_hi, scale, offset)
+                    
+                    if patch_qimg is None: continue 
+                    
+                    # For drawing voids, we need Center in Raw Coords.
+                    # Calculate from Grid
+                    gx = cfg.start_x + (c + 0.5) * cfg.pitch_x
+                    gy = cfg.start_y + (r + 0.5) * cfg.pitch_y
+                    
+                    # Using GLWidget's descale logic
+                    center_x, center_y = self.main_window.glw.deskew_to_raw(gx, gy)
+                    
+                    # Sanitize Filename & Create Title Text
+                    safe_label = "".join([c if c.isalnum() or c in (' ', '_', '-') else '_' for c in label])
+                    
+                    # Titles
+                    title_raw_ov = f"X{c:02d}_Y{r:02d}_L{layer_idx:02d}_LEG:{safe_label}"
+                    title_mask = f"X{c:02d}_Y{r:02d}_LEG:{safe_label}"
+                    
+                    basename = f"X{c:02d}_Y{r:02d}_L{layer_idx:02d}_LEG_{safe_label}"
+                    
+                    # A. Raw Export
+                    if options.get('raw'):
+                        path = os.path.join(layer_subdirs['raw'], f"{basename}.png")
+                        final_img = self._add_title_bar(patch_qimg, title_raw_ov)
+                        if not final_img.save(path):
+                            print(f"Error saving {path}")
+                        
+                    # B. Overlay (Burn-in)
+                    if options.get('overlay'):
+                        ov_img = patch_qimg.convertToFormat(QImage.Format_ARGB32)
+                        # Pass center_x, center_y (Raw Center)
+                        self._draw_voids(ov_img, layer_idx, center_x, center_y, w_pitch, h_pitch, cfg.angle, mode='overlay')
+                        path = os.path.join(layer_subdirs['overlay'], f"{basename}_overlay.png")
+                        final_img = self._add_title_bar(ov_img, title_raw_ov)
+                        if not final_img.save(path):
+                            print(f"Error saving {path}")
+                        
+                    # C. Mask (Accumulate per Chip)
+                    if options.get('mask'):
+                        key = (c, r)
+                        if key not in mask_accumulators:
+                            img = QImage(w_pitch, h_pitch, QImage.Format_ARGB32)
+                            img.fill(Qt.transparent)
+                            mask_accumulators[key] = {'img': img, 'label': safe_label, 'title': title_mask}
+                        
+                        self._draw_voids(mask_accumulators[key]['img'], layer_idx, center_x, center_y, w_pitch, h_pitch, cfg.angle, mode='mask')
+                        
+                    # D. Merged Accumulate
+                    if options.get('merged'):
+                        safe_label_merged = "".join([c if c.isalnum() or c in (' ', '_', '-') else '_' for c in label])
+                        title_merged = f"LEG:{safe_label_merged}_MERGED"
+                        
+                        if safe_label_merged not in merged_accumulators:
+                            merged_accumulators[safe_label_merged] = {
+                                'img': QImage(w_pitch, h_pitch, QImage.Format_ARGB32),
+                                'title': title_merged
+                            }
+                            merged_accumulators[safe_label_merged]['img'].fill(Qt.transparent)
+                            
+                        self._draw_voids(merged_accumulators[safe_label_merged]['img'], layer_idx, center_x, center_y, w_pitch, h_pitch, cfg.angle, mode='mask')
 
-            # Save Masks (Flattened)
+                    processed += 1
+                    if processed % 10 == 0:
+                        self.progress_update.emit(int(processed / total_chips * 100), f"Processing {r}, {c}...")
+
+            # Save Masks
             if options.get('mask'):
                 for (c, r), data in mask_accumulators.items():
-                    # Filename: X{c}_Y{r}_LEG_{label}.png (No Layer Info)
                     fname = f"X{c:02d}_Y{r:02d}_LEG_{data['label']}.png"
                     path = os.path.join(subdirs['mask'], fname)
                     
@@ -196,7 +201,6 @@ class ExportManager(QObject):
                 for label, data in merged_accumulators.items():
                     img = data['img']
                     title = data['title']
-                    
                     path = os.path.join(subdirs['merged'], f"Merged_Label_{label}.png")
                     final_img = self._add_title_bar(img, title)
                     final_img.save(path)
@@ -217,29 +221,11 @@ class ExportManager(QObject):
         
         # New Image with extra height
         new_h = h + title_h
-        # Use ARGB32 for safety (handles transparency in original img)
+        # Use ARGB32 to capture transparency
         out_img = QImage(w, new_h, QImage.Format_ARGB32)
-        out_img.fill(Qt.black) # Background is black
+        out_img.fill(Qt.transparent)
         
         painter = QPainter(out_img)
-        
-        # Draw Original Image below title
-        # Note: If original has transparency (Mask), we want black BG or transparent?
-        # User said "black title bar". Usually implies the content area is separate.
-        # But if Mask is transparent, drawing it on Black will make it Black.
-        # Let's keep the content area transparent if possible?
-        # But `out_img.fill(Qt.black)` fills everything.
-        
-        # Actually, for Mask/Merged (transparent), the user might still want the void outlines to be visible.
-        # If I fill with Black, the transparent background becomes black.
-        # If I fill title with black and rest transparent? 
-        # But the User request showed a GREY background in the screenshot provided? 
-        # No, the screenshot shows: "Black bar with white text" on top. Content below.
-        # Let's assume the content background should be preserved.
-        
-        # 1. Clear text area to black, rest to transparent?
-        # Better: Create empty image. Fill top rect with black.
-        out_img.fill(Qt.transparent)
         
         # Draw Black Bar
         painter.fillRect(0, 0, w, title_h, Qt.black)
@@ -262,82 +248,29 @@ class ExportManager(QObject):
         painter.end()
         return out_img
 
-    def _get_layer_image(self, z_index):
-        # Local helper or import from core_data
-        # Simulating to_gray2d_uint16 logic
-        arr = self.data_stack
-        
-        # Simple slicing for now, assuming standard shape
-        # Better: import to_gray2d_uint16 from .core_data
-        from .core_data import to_gray2d_uint16, CoordinateTransform
-        return to_gray2d_uint16(arr, z_index)
-
-    def _extract_patch_qimage(self, img, cx, cy, w, h, angle):
-        # Extract Upright Patch using QPainter (Large Crop + Rotate)
-        # 1. Determine safe bounding box for rotation
-        diag = np.sqrt(w**2 + h**2)
-        r_bound = int(diag / 2.0) + 5
-        
-        h_img, w_img = img.shape
-        
-        x_min = int(max(0, cx - r_bound))
-        y_min = int(max(0, cy - r_bound))
-        x_max = int(min(w_img, cx + r_bound))
-        y_max = int(min(h_img, cy + r_bound))
-        
-        if x_max <= x_min or y_max <= y_min:
+    def _extract_patch_unified(self, z, bbox, win_lo, win_hi, scale, offset):
+        """
+        Uses LazyTiffStack.get_poly_crop to extract straightened patch.
+        Returns QImage (Grayscale8).
+        """
+        if not hasattr(self.data_stack, 'get_poly_crop'):
              return None
              
-        # Extract Source Crop
-        roi = img[y_min:y_max, x_min:x_max]
+        roi_raw = self.data_stack.get_poly_crop(z, bbox)
+        if roi_raw is None:
+             return None
         
-        # Normalize (Simple Min/Max for Export? Or use Window settings if passed?)
-        # User might want "What I see is what I get".
-        # For validation, let's use simple min/max normalization to ensure visibility.
-        # Or better: If using MainWindow logic, we should use window level!
-        # But Exporter doesn't have reference to Window Level...
-        # Let's standardize to full range for now to avoid pitch black images.
+        # Process / Normalize
+        roi_f32 = roi_raw.astype(np.float32)
         
-        c_min, c_max = roi.min(), roi.max()
-        if c_max > c_min:
-             roi_norm = ((roi - c_min) / (c_max - c_min) * 255).astype(np.uint8)
-        else:
-             roi_norm = np.zeros_like(roi, dtype=np.uint8)
+        from .core_data import ImageNormalizer
+        roi_u8 = ImageNormalizer.process(roi_f32, win_lo, win_hi, scale, offset)
         
-        # Make Contiguous! Critical for QImage
-        roi_norm = np.ascontiguousarray(roi_norm)
-             
-        # Create Source QImage
-        # MUST keep reference to data if not copying? 
-        # But QImage(..., Format) usually wraps.
-        # We should use .copy() on the QImage to deep copy the pixel data immediately.
-        h_roi, w_roi = roi_norm.shape
-        q_src = QImage(roi_norm.data, w_roi, h_roi, w_roi, QImage.Format_Grayscale8).copy()
+        h_roi, w_roi = roi_u8.shape
+        # Create QImage copy (Safe)
+        q_src = QImage(roi_u8.data, w_roi, h_roi, w_roi, QImage.Format_Grayscale8).copy()
         
-        # Create Target QImage (Upright)
-        q_dst = QImage(w, h, QImage.Format_Grayscale8)
-        q_dst.fill(0)
-        
-        painter = QPainter(q_dst)
-        painter.setRenderHint(QPainter.Antialiasing)
-        
-        # Transform: Center -> Rotate -> Center
-        # Source coordinate of patch center relative to crop top-left
-        src_cx = cx - x_min
-        src_cy = cy - y_min
-        
-        # Target center
-        dst_cx = w / 2
-        dst_cy = h / 2
-        
-        painter.translate(dst_cx, dst_cy)
-        painter.rotate(-angle) # Un-rotate the grid angle to make chip upright
-        painter.translate(-src_cx, -src_cy)
-        
-        painter.drawImage(0, 0, q_src)
-        painter.end()
-        
-        return q_dst
+        return q_src
 
     def _draw_voids(self, target_img: QImage, current_layer, cx, cy, w, h, angle, mode='overlay'):
         """
@@ -347,25 +280,21 @@ class ExportManager(QObject):
         painter = QPainter(target_img)
         painter.setRenderHint(QPainter.Antialiasing)
         
-        # Setup Transform to map Global -> Chip Local
         pcx = target_img.width() / 2
         pcy = target_img.height() / 2
         
-        # Refactored to use CoordinateTransform if available
-        # Calculate Chip Center in Deskewed Space
-        gx_chip, gy_chip = 0, 0
-        if self.coord_transform:
-             gx_chip, gy_chip = self.coord_transform.raw_to_deskew(cx, cy)
-        else:
-             # Fallback (Manual)
-             rad = math.radians(-angle)
-             # ... simplified fallback omitted, assume coord_transform is present
-             pass
+        # Calculate Chip Center in Deskewed Space using Main Window GL Widget
+        gx_chip, gy_chip = self.main_window.glw.deskew_to_raw(cx, cy) 
+        # WAIT! deskew_to_raw maps Dest -> Raw.
+        # We want raw_to_deskew to map Raw Voids -> Dest.
+        # Check logic: 
+        # cx, cy is Raw Center.
+        # gx_chip, gy_chip = self.main_window.glw.raw_to_deskew(cx, cy)
+        # Yes.
+        
+        gx_chip, gy_chip = self.main_window.glw.raw_to_deskew(cx, cy)
         
         # Decide which layers to draw
-        # If Overlay: Draw ALL layers (Current=Solid, Others=Dot)
-        # If Mask/Merged: Draw ONLY current layer (Solid)
-        
         layers_to_draw = []
         if mode == 'overlay':
             layers_to_draw = self.void_manager.voids.keys()
@@ -374,40 +303,22 @@ class ExportManager(QObject):
             
         for layer_key in layers_to_draw:
             voids = self.void_manager.voids.get(layer_key, [])
-            
             is_active_layer = (layer_key == current_layer)
             
             for v in voids:
-                # Check bounds roughly (in Raw Space)
                 vx, vy = v["globalCX"], v["globalCY"]
                 
-                # Precise Transform using CoordinateTransform
-                if self.coord_transform:
-                     gx_void, gy_void = self.coord_transform.raw_to_deskew(vx, vy)
-                     
-                     # Relative position in Deskewed space
-                     dx = gx_void - gx_chip
-                     dy = gy_void - gy_chip
-                     
-                     px = pcx + dx
-                     py = pcy + dy
-                     
-                else:
-                    # Fallback (Old Logic)
-                    rad = math.radians(-angle)
-                    cos_a = math.cos(rad)
-                    sin_a = math.sin(rad)
-                    dx = vx - cx
-                    dy = vy - cy
-                    rot_x = dx * cos_a - dy * sin_a
-                    rot_y = dx * sin_a + dy * cos_a
-                    px = pcx + rot_x
-                    py = pcy + rot_y
+                # Transform Void to Deskewed
+                gx_void, gy_void = self.main_window.glw.raw_to_deskew(vx, vy)
                 
-                # Bounds check on px, py? 
-                # Patch width w, h. 
-                # If px outside 0..w, skip?
-                # Optimization.
+                # Relative Position
+                dx = gx_void - gx_chip
+                dy = gy_void - gy_chip
+                
+                px = pcx + dx
+                py = pcy + dy
+                
+                # Bounds check
                 if not (-w < (px-pcx) < w and -h < (py-pcy) < h):
                     continue
                 
@@ -427,7 +338,6 @@ class ExportManager(QObject):
                         pen.setStyle(Qt.SolidLine)
                     else:
                         pen.setStyle(Qt.DotLine) 
-                        
                     painter.setPen(pen)
                     painter.setBrush(Qt.NoBrush)
                     
@@ -444,10 +354,14 @@ class ExportManager(QObject):
 
     def _export_json(self, output_dir):
         path = os.path.join(output_dir, "voids.json")
-        self.void_manager.save_to_file(path, self.grid_cfg, self.bonding_map)
+        # Use main_window properties
+        self.void_manager.save_to_file(path, self.main_window.glw.grid_cfg, self.main_window.glw.bonding_map)
 
     def _export_csv(self, output_dir):
         path = os.path.join(output_dir, "voids.csv")
+        grid_cfg = self.main_window.glw.grid_cfg
+        bonding_map = self.main_window.glw.bonding_map
+        
         with open(path, 'w', newline='') as f:
             writer = csv.writer(f)
             # Header
@@ -459,22 +373,19 @@ class ExportManager(QObject):
                     vx, vy = v["globalCX"], v["globalCY"]
                     
                     # Determine which cell it belongs to
-                    gx = (vx - self.grid_cfg.start_x) / self.grid_cfg.pitch_x
-                    gy = (vy - self.grid_cfg.start_y) / self.grid_cfg.pitch_y
+                    gx = (vx - grid_cfg.start_x) / grid_cfg.pitch_x
+                    gy = (vy - grid_cfg.start_y) / grid_cfg.pitch_y
                     c = int(np.floor(gx))
                     r = int(np.floor(gy))
                     
-                    # Calculate Chip Relative (ignoring rotation for CSV as per V1 behavior)
-                    # Or should we respect rotation?
-                    # "chip 내 보이드의 x,y좌표" -> usually implies unrotated relative
-                    chip_x0 = self.grid_cfg.start_x + c * self.grid_cfg.pitch_x
-                    chip_y0 = self.grid_cfg.start_y + r * self.grid_cfg.pitch_y
+                    chip_x0 = grid_cfg.start_x + c * grid_cfg.pitch_x
+                    chip_y0 = grid_cfg.start_y + r * grid_cfg.pitch_y
                     rel_x = vx - chip_x0
                     rel_y = vy - chip_y0
                     
                     label = ""
-                    if self.bonding_map:
-                        label = self.bonding_map.get_key(r, c)
+                    if bonding_map:
+                        label = bonding_map.get_key(r, c)
                         
                     tid = v.get("type_id", 0)
                     tname = self.void_manager.types.get(tid, {}).get("name", "Unknown")

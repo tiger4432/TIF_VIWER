@@ -60,9 +60,11 @@ class LazyTiffStack:
     def __init__(self, source):
         if isinstance(source, str):
             self.img = Image.open(source)
+            self.path = source
             self.owned = True
         elif isinstance(source, Image.Image):
             self.img = source
+            self.path = getattr(source, 'filename', None)
             self.owned = False
         else:
             raise ValueError("Source must be a file path or PIL Image object")
@@ -138,6 +140,166 @@ class LazyTiffStack:
 
         # Fallback
         return np.array(self.img)
+    
+    def get_crop(self, z, x, y, w, h):
+        """Efficiently extracts a crop from a specific layer without loading full image."""
+        phys_idx = self.frame_start + z
+        if phys_idx < 0: phys_idx += self.n_frames
+        if phys_idx < 0 or phys_idx >= self.n_frames:
+             return np.zeros((h, w), dtype=self.dtype)
+
+        self.img.seek(phys_idx)
+        # PIL crop is lazy-ish. Converting to numpy triggers the load of just that region (mostly).
+        # Bounds check
+        if x < 0: x = 0
+        if y < 0: y = 0
+        # If crop exceeds bounds, PIL handles it or we should clamp?
+        # PIL crop handles cropping outside? No, it pads or cuts.
+        # Safe crop:
+        img_w, img_h = self.width, self.height
+        x2 = min(x + w, img_w)
+        y2 = min(y + h, img_h)
+        
+        if x >= x2 or y >= y2:
+             return np.zeros((h, w), dtype=self.dtype)
+             
+        region = self.img.crop((x, y, x2, y2))
+        arr = np.array(region)
+        
+        # Determine output array size (might be smaller if clipped)
+        out = np.zeros((h, w), dtype=arr.dtype)
+        out_h, out_w = arr.shape[:2]
+        
+        # Place in output (top-left alignment)
+        out[0:out_h, 0:out_w] = arr
+        
+        # Promote uint8 to uint16 (match to_gray2d_uint16 logic)
+        if out.dtype == np.uint8:
+            return (out.astype(np.uint16) * 257)
+            
+        return out
+
+    def get_poly_crop(self, z, points):
+        """
+        Extracts a patch defined by 4 points (TL, TR, BR, BL) in Raw Coordinates.
+        Returns a straightened (deskewed) numpy array.
+        """
+        # 1. Bounding Box in Raw Space
+        poly = np.array(points) # [[x,y], ...]
+        min_x = int(np.floor(poly[:, 0].min()))
+        min_y = int(np.floor(poly[:, 1].min()))
+        max_x = int(np.ceil(poly[:, 0].max()))
+        max_y = int(np.ceil(poly[:, 1].max()))
+        
+        # Clamp to image bounds
+        img_w, img_h = self.width, self.height
+        min_x = max(0, min_x)
+        min_y = max(0, min_y)
+        max_x = min(img_w, max_x)
+        max_y = min(img_h, max_y)
+        
+        if max_x <= min_x or max_y <= min_y:
+            return None
+            
+        # 2. Extract bounding rect (Raw)
+        phys_idx = self.frame_start + z
+        if phys_idx < 0: phys_idx += self.n_frames
+        self.img.seek(phys_idx)
+        
+        raw_crop_pil = self.img.crop((min_x, min_y, max_x, max_y))
+        
+        # 3. Rotate and Straighten
+        # Calculate angle from TL->TR vector
+        # points expected order: TL, TR, BR, BL
+        p0 = points[0]
+        p1 = points[1]
+        p3 = points[3] # BL
+        
+        # Width/Height of the target patch (Euclidean dist)
+        dst_w = int(np.hypot(p1[0] - p0[0], p1[1] - p0[1]))
+        dst_h = int(np.hypot(p3[0] - p0[0], p3[1] - p0[1]))
+        if dst_w <= 0 or dst_h <= 0: return None
+        
+        # Angle of the edge in Raw Space
+        dx = p1[0] - p0[0]
+        dy = p1[1] - p0[1]
+        angle_rad = np.arctan2(dy, dx)
+        angle_deg = np.degrees(angle_rad)
+        
+        # We need to rotate the RAW content by -angle_deg to make it horizontal
+        # PIL rotate is CCW. 
+        # If line is angled +30 deg (down-right). We rotate by +30 to make it upright? 
+        # No, if line is +30, we rotate by +30 to align X axis? 
+        # Wait. Visualizing: Line is \ (positive slope in Y-down?).
+        # If we Rotate image by Angle, we align axis.
+        # Let's trust standard deskew logic: Rotate by Angle.
+        # But `raw_crop_pil` center is NOT the patch center.
+        # We need to handle translation.
+        
+        # Robust Approach: Use Affine Transform on the BBox Crop
+        # Center of ROI in Raw Coords
+        cx = np.mean(poly[:, 0])
+        cy = np.mean(poly[:, 1])
+        
+        # Center of the Crop Image
+        crop_cx = cx - min_x
+        crop_cy = cy - min_y
+        
+        # Target Center (center of dst)
+        tgt_cx = dst_w / 2.0
+        tgt_cy = dst_h / 2.0
+        
+        # We want to map: Output(xy) -> Input(xy)
+        # Transform Matrix M maps Output -> Input
+        # 1. Output Center -> Origin
+        # 2. Rotate
+        # 3. Translate to Input Center
+        
+        # Using PIL.Image.transform with QUAD is easiest for 4 points
+        # quad argument: 4 points in the Input Image (raw_crop_pil)
+        # mapped to the corners of the Output Image (0,0, w,0, w,h, 0,h)
+        
+        # The points passed to `transform` must be relative to the image being transformed (raw_crop_pil)
+        # So we shift `points` by (min_x, min_y)
+        local_poly = []
+        for p in points:
+            local_poly.append(p[0] - min_x)
+            local_poly.append(p[1] - min_y)
+            
+        # Flatten for quad (TL, BL, BR, TR) order?
+        # PIL.Image.transform method=QUAD
+        # data = (x0, y0, x1, y1, x2, y2, x3, y3) - NW, SW, SE, NE?
+        # Doc: "The QUAD transform maps a quadrilateral (a region defined by four corners) in the *given image* to a rectangle of the given size."
+        # "Data is an 8-tuple (x0, y0, x1, y1, x2, y2, x3, y3) which contain the upper left, lower left, lower right, and upper right corners of the source quadrilateral."
+        # ORDER: TL, BL, BR, TR ??
+        # Wait, standard is usually TL, TR, BR, BL?
+        # Let's check PIL Docs or assume standard order.
+        # StackOverflow: "NW, SW, SE, NE". So TL, BL, BR, TR.
+        # My points are TL, TR, BR, BL.
+        # So I need: p0, p3, p2, p1.
+        
+        quad_data = (
+            local_poly[0], local_poly[1], # TL
+            local_poly[6], local_poly[7], # BL (Index 3 * 2 = 6,7)
+            local_poly[4], local_poly[5], # BR (Index 2)
+            local_poly[2], local_poly[3]  # TR (Index 1)
+        )
+        
+        out_pil = raw_crop_pil.transform(
+            (dst_w, dst_h),
+            method=3, # Image.QUAD (cannot import Image here easily if not at top)
+            # method 3 is QUAD
+            data=quad_data,
+            resample=2 # Image.BILINEAR or BICUBIC
+        )
+        
+        out = np.array(out_pil)
+        
+        if out.dtype == np.uint8:
+            return (out.astype(np.uint16) * 257)
+            
+        return out
+
 
     def __len__(self):
         return self.frame_count
@@ -342,3 +504,30 @@ class CoordinateTransform:
         rot_y = dx * self.sin_raw + dy * self.cos_raw
         
         return self.img_cx + rot_x, self.img_cy + rot_y
+
+class ImageNormalizer:
+    """
+    Unified Image Processing Logic.
+    Ensures consistency between Viewer (Shader) and Exporter (CPU).
+    Pipeline: Normalization (Window Level) -> Calibration (Scale/Offset) -> Clip -> Uint8
+    """
+    @staticmethod
+    def process(data: np.ndarray, win_lo: float, win_hi: float, scale: float = 1.0, offset: float = 0.0) -> np.ndarray:
+        # Cast to float for precision
+        if data.dtype != np.float32 and data.dtype != np.float64:
+             data = data.astype(np.float32)
+             
+        # 1. Apply Window Leveling (Brightness/Contrast)
+        # Matches Shader: normalized = (pixel - win_lo) / win_range
+        win_range = max(1.0, win_hi - win_lo)
+        res = (data - win_lo) / win_range
+        
+        # 2. Apply Calibration (Scale/Offset)
+        # Matches Shader: final = normalized * scale + offset
+        res = res * scale + offset
+        
+        # 3. Clip
+        res = np.clip(res, 0.0, 1.0)
+        
+        # 4. Convert to uint8 (0-255)
+        return (res * 255.0).astype(np.uint8)

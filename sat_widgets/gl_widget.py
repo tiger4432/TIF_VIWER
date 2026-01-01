@@ -1049,7 +1049,7 @@ class GLImageWidget(QOpenGLWidget):
         if self.grid_cfg.pitch_x > 0 and self.grid_cfg.pitch_y > 0:
              c = int(np.floor((gx - self.grid_cfg.start_x) / self.grid_cfg.pitch_x))
              r = int(np.floor((gy - self.grid_cfg.start_y) / self.grid_cfg.pitch_y))
-             self.cursor_moved.emit(c, r)
+        self.cursor_moved.emit(gx, gy)
 
         if self._last_mouse is None:
             # Hover only
