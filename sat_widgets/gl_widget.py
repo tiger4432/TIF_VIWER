@@ -87,7 +87,22 @@ class TiledImage:
                 w_chunk = min(self.TILE_SIZE, self.w - x)
                 
                 # Extract sub-region
-                sub_img = full_image[y:y+h_chunk, x:x+w_chunk]
+                if hasattr(full_image, 'get_crop'):
+                     # Support for Virtual Stacks (LazyTiffStack, MosaicTiffStack)
+                     # get_crop(z, x, y, w, h). 
+                     # If full_image is a Wrapper (2D), it might expect get_crop(0, ...) or get_crop(x,...)
+                     # We should check call signature? 
+                     # Or assume TiledImage is given a "2D-like" object.
+                     # If it's a LayerWrapper, we added get_crop(z, ...) but ignored z.
+                     # Let's standardize: TiledImage expects 2D access. 
+                     # If get_crop exists, we try get_crop(0, x, y, w, h) or get_crop(x, y, w, h)?
+                     # LazyTiffStack.get_crop(z, x, y, w, h).
+                     # MosaicTiffStack.get_crop(z, x, y, w_ h).
+                     # If we passed 'wrapper', wrapper.get_crop takes (z, ...).
+                     # So we call full_image.get_crop(0, x, y, w_chunk, h_chunk).
+                     sub_img = full_image.get_crop(0, x, y, w_chunk, h_chunk)
+                else:
+                     sub_img = full_image[y:y+h_chunk, x:x+w_chunk]
                 
                 tile = Tile(x, y, w_chunk, h_chunk, sub_img)
                 self.tiles.append(tile)

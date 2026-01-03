@@ -17,7 +17,7 @@ from PySide6.QtGui import QSurfaceFormat, QAction, QImage, QPainter
 from PySide6.QtCore import Qt, QTimer
 
 # Imports from sat_widgets
-from sat_widgets.core_data import LazyTiffStack, GridConfig, BondingMap, to_gray2d_uint16, ImageNormalizer
+from sat_widgets.core_data import LazyTiffStack, MosaicTiffStack, GridConfig, BondingMap, to_gray2d_uint16, ImageNormalizer, CoordinateTransform
 from sat_widgets.void_manager import VoidManager, VoidTypeDialog
 from sat_widgets.gl_widget import GLImageWidget, TiledImage
 from sat_widgets.exporter import ExportManager
@@ -85,6 +85,10 @@ class MainWindow(QMainWindow):
         a = QAction("Open TIF", self)
         a.triggered.connect(self.open_file)
         tb.addAction(a)
+
+        a_proj = QAction("Open Project", self)
+        a_proj.triggered.connect(self.open_project_folder)
+        tb.addAction(a_proj)
 
         # ---------------------------------------------------------
         # Dock Widget for Grid/Map Controls
@@ -568,6 +572,81 @@ class MainWindow(QMainWindow):
     def go_to_cell(self):
         c = self.sb_jump_x.value()
         r = self.sb_jump_y.value()
+        # Auto Level
+        self.auto_level()
+
+    def open_project_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Project Folder (with patches.json)")
+        if not folder: return
+        
+        # Check for patches.json
+        p_json = os.path.join(folder, "patches.json")
+        if not os.path.exists(p_json):
+            print("patches.json not found!")
+            return
+            
+        # 1. Init Mosaic Stack
+        try:
+            self.full_data = MosaicTiffStack(p_json)
+            self.layer_cache.clear()
+        except Exception as e:
+            print(f"Failed to load project: {e}")
+            return
+            
+        # 2. Setup UI
+        frames = len(self.full_data)
+        self.spin_layer.setRange(0, frames - 1)
+        self.spin_layer.setValue(0)
+        self.spin_layer.setEnabled(True)
+        self.current_z = 0
+        
+        # 3. Apply Grid Config from Stack
+        # MosaicStack .grid_cfg is a dict
+        gcfg = self.full_data.grid_cfg
+        
+        self.sb_grid_x.setValue(gcfg.get("start_x", 0.0))
+        self.sb_grid_y.setValue(gcfg.get("start_y", 0.0))
+        self.sb_pitch_x.setValue(gcfg.get("pitch_x", 100.0))
+        self.sb_pitch_y.setValue(gcfg.get("pitch_y", 100.0))
+        self.sb_rows.setValue(gcfg.get("rows", 1))
+        self.sb_cols.setValue(gcfg.get("cols", 1))
+        self.sb_angle.setValue(gcfg.get("angle", 0.0))
+        
+        # Update GL Widget Grid Config
+        self.glw.grid_cfg.start_x = self.sb_grid_x.value()
+        self.glw.grid_cfg.start_y = self.sb_grid_y.value()
+        self.glw.grid_cfg.pitch_x = self.sb_pitch_x.value()
+        self.glw.grid_cfg.pitch_y = self.sb_pitch_y.value()
+        self.glw.grid_cfg.rows = self.sb_rows.value()
+        self.glw.grid_cfg.cols = self.sb_cols.value()
+        self.glw.grid_cfg.angle = self.sb_angle.value()
+        
+        # self.glw.update_grid_buffer() # Method does not exist, update() is sufficient
+        self.glw.update()
+
+        # 4. Load Voids (Raw)
+        v_json = os.path.join(folder, "voids.json")
+        if os.path.exists(v_json):
+            # Virtual Raw Strategy: Mosaic is the Raw Image.
+            # Voids are in Raw Coords.
+            # Load directly without transformation.
+            self.void_manager.load_from_file(v_json, self.glw.grid_cfg)
+
+        
+        # 5. Load Initial Layer
+        self.current_z = 0
+        self.load_layer(0)
+        
+        # Auto Level (Optional, or standard default)
+        self.slider_lo.setValue(0)
+        self.slider_hi.setValue(255) # Mosaic usually 8-bit
+        self.glw.win_lo = 0
+        self.glw.win_hi = 255
+        self.glw.update()
+
+    def auto_level(self):
+        c = self.sb_jump_x.value()
+        r = self.sb_jump_y.value()
         self.glw.fit_to_cell(c, r)
             
 
@@ -873,9 +952,47 @@ class MainWindow(QMainWindow):
             tiled = self.layer_cache[z_index]
         else:
             print(f"Processing Layer {z_index}...")
-            img_2d = to_gray2d_uint16(self.full_data, z_index)
-            print("Creating tiles...")
-            tiled = TiledImage(img_2d)
+            # Handle MosaicTiffStack specialized loading
+            if isinstance(self.full_data, MosaicTiffStack):
+                print("Using Mosaic Stack (Virtual Tiles)...")
+                # Create TiledImage directly from Stack (it handles get_crop)
+                # tiled = TiledImage(self.full_data) # REMOVED: Causes ValueError (3D shape)
+                # TiledImage needs to know the "source specific z" if we pass the whole stack?
+                # TiledImage design: __init__(img_data). 
+                # If img_data is stack, TiledImage.update_tile -> img_data.get_crop(z, ...)
+                # Wait, TiledImage doesn't store 'z'. It takes 2D data usually.
+                # If we pass Stack, we must wrap it or TiledImage needs modification.
+                # Actually, TiledImage expects an object with .shape or .size?
+                # Let's check TiledImage.
+                # Assuming TiledImage(data) acts on data. If data is 2D array, it works.
+                # If data is Stack, TiledImage might fail if it doesn't know Z.
+                
+                # TRICK: Wrap the stack for this Z?
+                class LayerWrapper:
+                    def __init__(self, stack, z):
+                        self.stack = stack
+                        self.z = z
+                        self.shape = (stack.height, stack.width)
+                        self.dtype = stack.dtype
+                        self.ndim = 2 # Pretend 2D
+                    def get_crop(self, z_ignored, x, y, w, h): # TiledImage might call get_crop(0,...) or get_crop(x,y,w,h)?
+                         # TiledImage calls: data.get_crop(z??) NO.
+                         # TiledImage usually takes a single image.
+                         # If TiledImage supports crop, it usually calls data.get_crop if available?
+                         # Let's verify TiledImage.update_tile.
+                         return self.stack.get_crop(self.z, x, y, w, h)
+                    # For TiledImage constructor reading shape
+                    @property
+                    def size(self): return (self.stack.width, self.stack.height)
+
+                img_2d = to_gray2d_uint16(self.full_data, z_index)
+                tiled = TiledImage(img_2d)
+                
+            else:
+                img_2d = to_gray2d_uint16(self.full_data, z_index)
+                print("Creating tiles...")
+                tiled = TiledImage(img_2d)
+                
             self.layer_cache[z_index] = tiled
             print("Uploading to GPU...")
 
