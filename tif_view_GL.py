@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QSlider, QLabel, QToolBar, QDockWidget, QGroupBox, 
     QFormLayout, QPushButton, QDoubleSpinBox, QPlainTextEdit, 
     QFileDialog, QProgressDialog, QCheckBox, QRadioButton, 
-    QButtonGroup, QComboBox, QDialog 
+    QButtonGroup, QComboBox, QDialog, QScrollArea 
 )
 from PySide6.QtGui import QSurfaceFormat, QAction, QImage, QPainter
 from PySide6.QtCore import Qt, QTimer
@@ -343,8 +343,22 @@ class MainWindow(QMainWindow):
         
         dock_layout.addWidget(gb_calib)
         
+
+        dock_layout.addWidget(gb_calib)
+        
         dock_layout.addStretch()
-        dock.setWidget(dock_content)
+        
+
+        # Scroll Area Wrapper
+        scroll = QScrollArea()
+        scroll.setWidget(dock_content)
+        scroll.setWidgetResizable(True)
+        # scroll.setMaximumHeight(1000) # Removed fixed limit
+        
+        from PySide6.QtWidgets import QSizePolicy
+        scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        
+        dock.setWidget(scroll)
 
         # Sync initial state
         self.on_window_changed()
@@ -588,6 +602,7 @@ class MainWindow(QMainWindow):
         # 1. Init Mosaic Stack
         try:
             self.full_data = MosaicTiffStack(p_json)
+            self.layer_offset = self.full_data.layer_offset
             self.layer_cache.clear()
         except Exception as e:
             print(f"Failed to load project: {e}")
@@ -638,10 +653,6 @@ class MainWindow(QMainWindow):
         self.load_layer(0)
         
         # Auto Level (Optional, or standard default)
-        self.slider_lo.setValue(0)
-        self.slider_hi.setValue(255) # Mosaic usually 8-bit
-        self.glw.win_lo = 0
-        self.glw.win_hi = 255
         self.glw.update()
 
     def auto_level(self):
@@ -953,46 +964,8 @@ class MainWindow(QMainWindow):
         else:
             print(f"Processing Layer {z_index}...")
             # Handle MosaicTiffStack specialized loading
-            if isinstance(self.full_data, MosaicTiffStack):
-                print("Using Mosaic Stack (Virtual Tiles)...")
-                # Create TiledImage directly from Stack (it handles get_crop)
-                # tiled = TiledImage(self.full_data) # REMOVED: Causes ValueError (3D shape)
-                # TiledImage needs to know the "source specific z" if we pass the whole stack?
-                # TiledImage design: __init__(img_data). 
-                # If img_data is stack, TiledImage.update_tile -> img_data.get_crop(z, ...)
-                # Wait, TiledImage doesn't store 'z'. It takes 2D data usually.
-                # If we pass Stack, we must wrap it or TiledImage needs modification.
-                # Actually, TiledImage expects an object with .shape or .size?
-                # Let's check TiledImage.
-                # Assuming TiledImage(data) acts on data. If data is 2D array, it works.
-                # If data is Stack, TiledImage might fail if it doesn't know Z.
-                
-                # TRICK: Wrap the stack for this Z?
-                class LayerWrapper:
-                    def __init__(self, stack, z):
-                        self.stack = stack
-                        self.z = z
-                        self.shape = (stack.height, stack.width)
-                        self.dtype = stack.dtype
-                        self.ndim = 2 # Pretend 2D
-                    def get_crop(self, z_ignored, x, y, w, h): # TiledImage might call get_crop(0,...) or get_crop(x,y,w,h)?
-                         # TiledImage calls: data.get_crop(z??) NO.
-                         # TiledImage usually takes a single image.
-                         # If TiledImage supports crop, it usually calls data.get_crop if available?
-                         # Let's verify TiledImage.update_tile.
-                         return self.stack.get_crop(self.z, x, y, w, h)
-                    # For TiledImage constructor reading shape
-                    @property
-                    def size(self): return (self.stack.width, self.stack.height)
-
-                img_2d = to_gray2d_uint16(self.full_data, z_index)
-                tiled = TiledImage(img_2d)
-                
-            else:
-                img_2d = to_gray2d_uint16(self.full_data, z_index)
-                print("Creating tiles...")
-                tiled = TiledImage(img_2d)
-                
+            img_2d = to_gray2d_uint16(self.full_data, z_index)
+            tiled = TiledImage(img_2d)
             self.layer_cache[z_index] = tiled
             print("Uploading to GPU...")
 
@@ -1271,10 +1244,10 @@ class ExportDialog(QDialog):
         self.chk_csv = QCheckBox("Metadata CSV (voids.csv)")
         
         # Defaults
-        self.chk_raw.setChecked(False)
+        self.chk_raw.setChecked(True)
         self.chk_overlay.setChecked(True)
-        self.chk_mask.setChecked(False)
-        self.chk_merged.setChecked(False)
+        self.chk_mask.setChecked(True)
+        self.chk_merged.setChecked(True)
         self.chk_json.setChecked(True)
         self.chk_csv.setChecked(True)
         

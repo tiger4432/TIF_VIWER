@@ -224,7 +224,7 @@ class LazyTiffStack:
             local_poly[4], local_poly[5], # BR (Index 2)
             local_poly[2], local_poly[3]  # TR (Index 1)
         )
-        
+        print(quad_data, dst_w, dst_h, raw_crop_pil.size)
         out_pil = raw_crop_pil.transform(
             (dst_w, dst_h),
             method=3, # Image.QUAD (cannot import Image here easily if not at top)
@@ -319,7 +319,8 @@ class MosaicTiffStack:
         self.n_frames = len(self.layers) if self.layers else 1
         self.shape = (self.n_frames, self.height, self.width)
         self.ndim = 3
-        self.dtype = np.uint16 
+        self.dtype = np.uint8 
+        self.layer_offset = min(list(self.layers))
         
         # Alignment Params
         if offsets_x:
@@ -344,8 +345,7 @@ class MosaicTiffStack:
         if z in self.layer_cache: return self.layer_cache[z]
         
         print(f"Building Deskewed Layer {z}...")
-        canvas = Image.new("I;16", (self.deskew_w, self.deskew_h), 0)
-        print(canvas.size)        
+        canvas = Image.new("L", (self.deskew_w, self.deskew_h), 0)
         patches = self.patches_by_layer.get(z, [])
         first_patch = True
         
@@ -354,7 +354,6 @@ class MosaicTiffStack:
             if not bd: continue
             
             try:
-                
                 path = os.path.join(self.base_dir, p["filename"])
                 img = Image.open(path)
                 
@@ -362,12 +361,6 @@ class MosaicTiffStack:
                 if img.height > 40:
                     img = img.crop((0, 40, img.width, img.height))
                     
-                # Ensure I;16
-                if img.mode != 'I;16':
-                     arr = np.array(img)
-                     if arr.ndim == 3: arr = arr[..., 0]
-                     if arr.dtype == np.uint8: arr = arr.astype(np.uint16) * 257
-                     img = Image.fromarray(arr, mode='I;16')
                 
                 pts = np.array(bd)
                 min_x = int(pts[:, 0].min())
@@ -401,73 +394,20 @@ class MosaicTiffStack:
         gy = -dx * self.sin_a + dy * self.cos_a
         return gx, gy
 
-    def get_crop(self, z, raw_x, raw_y, w, h):
-        """
-        Serves the RAW View by warping the Deskewed Master Layer.
-        """
-        # 1. Map requested Raw Rect to Deskewed ROI
-        corners_raw = [
-            (raw_x, raw_y), (raw_x+w, raw_y),
-            (raw_x+w, raw_y+h), (raw_x, raw_y+h)
-        ]
-        corners_ds = [self.raw_to_deskew(rx, ry) for rx, ry in corners_raw]
-        
-        xs = [c[0] for c in corners_ds]
-        ys = [c[1] for c in corners_ds]
-        min_x, max_x = min(xs), max(xs)
-        min_y, max_y = min(ys), max(ys)
-        
-        start_dx = int(np.floor(min_x))
-        start_dy = int(np.floor(min_y))
-        end_dx = int(np.ceil(max_x))
-        end_dy = int(np.ceil(max_y))
-        
-        ds_w = end_dx - start_dx
-        ds_h = end_dy - start_dy
-        
-        if ds_w <= 0 or ds_h <= 0: return np.zeros((h, w), dtype=self.dtype)
-
-        # 2. Get Deskewed Master & Crop relevant region
-        deskew_img = self._build_deskewed_layer(z)
-        
-        # Clamp crop to image bounds
-        src_x = max(0, start_dx)
-        src_y = max(0, start_dy)
-        src_x2 = min(deskew_img.width, end_dx)
-        src_y2 = min(deskew_img.height, end_dy)
-        
-        cw, ch = src_x2 - src_x, src_y2 - src_y
-        if cw <= 0 or ch <= 0:
-            return np.zeros((h, w), dtype=self.dtype)
-            
-        src_crop = deskew_img.crop((src_x, src_y, src_x2, src_y2))
-        
-        # 3. Affine Transform (Raw ROI -> Deskewed Crop)
-        
-        C = self.cos_a
-        S = self.sin_a
-        
-        term_x = raw_x - self.off_x
-        term_y = raw_y - self.off_y
-        
-        # Coefficients
-        
-        a = C
-        b = S
-        c_coef = term_x * C + term_y * S - src_x
-        
-        d = -S
-        e = C
-        f_coef = -term_x * S + term_y * C - src_y
-        
-        out = src_crop.transform(
-            (w, h),
-            Image.AFFINE,
-            (a, b, c_coef, d, e, f_coef),
-            resample=Image.BILINEAR
-        )
-        
-        return np.array(out)
+    def get_crop(self, z, x, y, w, h):
+        phys_idx =  z
+        self.img = self.layer_cache[phys_idx]
+        img_w, img_h = self.width, self.height
+        x = max(0, x); y = max(0, y)
+        x2 = min(x + w, img_w); y2 = min(y + h, img_h)
+        if x >= x2 or y >= y2: return np.zeros((h, w), dtype=self.dtype)
+        region = self.img.crop((x, y, x2, y2))
+        arr = np.array(region)
+        out = np.zeros((h, w), dtype=arr.dtype)
+        out_h, out_w = arr.shape[:2]
+        out[0:out_h, 0:out_w] = arr
+        if out.dtype == np.uint8: return (out.astype(np.uint16) * 257)
+        return out
 
     def get_poly_crop(self, z, points):
         """
@@ -492,12 +432,11 @@ class MosaicTiffStack:
             return None
             
         # 2. Extract bounding rect (Raw)
-        phys_idx = z
+        phys_idx = z - self.layer_offset
         self.img = self.layer_cache[phys_idx]
 
-        
         raw_crop_pil = self.img.crop((min_x, min_y, max_x, max_y))
-        
+
         # 3. Rotate and Straighten
         # Calculate angle from TL->TR vector
         # points expected order: TL, TR, BR, BL
@@ -508,6 +447,7 @@ class MosaicTiffStack:
         # Width/Height of the target patch (Euclidean dist)
         dst_w = int(np.hypot(p1[0] - p0[0], p1[1] - p0[1]))
         dst_h = int(np.hypot(p3[0] - p0[0], p3[1] - p0[1]))
+
         if dst_w <= 0 or dst_h <= 0: return None
         
         # Angle of the edge in Raw Space
@@ -556,46 +496,34 @@ class MosaicTiffStack:
             local_poly.append(p[0] - min_x)
             local_poly.append(p[1] - min_y)
             
-        # Flatten for quad (TL, BL, BR, TR) order?
-        # PIL.Image.transform method=QUAD
-        # data = (x0, y0, x1, y1, x2, y2, x3, y3) - NW, SW, SE, NE?
-        # Doc: "The QUAD transform maps a quadrilateral (a region defined by four corners) in the *given image* to a rectangle of the given size."
-        # "Data is an 8-tuple (x0, y0, x1, y1, x2, y2, x3, y3) which contain the upper left, lower left, lower right, and upper right corners of the source quadrilateral."
-        # ORDER: TL, BL, BR, TR ??
-        # Wait, standard is usually TL, TR, BR, BL?
-        # Let's check PIL Docs or assume standard order.
-        # StackOverflow: "NW, SW, SE, NE". So TL, BL, BR, TR.
-        # My points are TL, TR, BR, BL.
-        # So I need: p0, p3, p2, p1.
-        
         quad_data = (
             local_poly[0], local_poly[1], # TL
             local_poly[6], local_poly[7], # BL (Index 3 * 2 = 6,7)
             local_poly[4], local_poly[5], # BR (Index 2)
             local_poly[2], local_poly[3]  # TR (Index 1)
         )
+
+        print(quad_data, dst_w, dst_h, raw_crop_pil.size)
         
         out_pil = raw_crop_pil.transform(
             (dst_w, dst_h),
-            method=3, # Image.QUAD (cannot import Image here easily if not at top)
+            method=Image.QUAD, # Image.QUAD (cannot import Image here easily if not at top)
             # method 3 is QUAD
             data=quad_data,
             resample=2 # Image.BILINEAR or BICUBIC
         )
         
         out = np.array(out_pil)
-        
+        Image.fromarray(out).save("out_pil.png")
         if out.dtype == np.uint8:
             return (out.astype(np.uint16) * 257)
             
         return out
 
     def __getitem__(self, key):
-        if key in self.layer_cache:
-            return np.array(self.layer_cache[key])
-        else:
-            self._build_deskewed_layer(key)
-            return np.array(self.layer_cache[key])
+        phy_idx = key + self.layer_offset
+        return np.array(self.layer_cache[phy_idx])
+
 
     def __len__(self): return self.n_frames
     def close(self): pass

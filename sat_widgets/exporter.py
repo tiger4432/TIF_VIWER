@@ -87,10 +87,11 @@ class ExportManager(QObject):
 
             # Iterate Layers
             for layer_idx in range(num_layers):
+                abs_layer = self.main_window.layer_offset + layer_idx
                 if self.stop_requested: break
                 
                 # Create Layer Subdirs (Only for Raw/Overlay)
-                layer_name = f"Layer_{layer_idx:02d}"
+                layer_name = f"Layer_{abs_layer:02d}"
                 layer_subdirs = {}
                 for k in ['raw', 'overlay']: # Mask/Merged are top-level
                     if k in subdirs:
@@ -145,10 +146,10 @@ class ExportManager(QObject):
                     safe_label = "".join([c if c.isalnum() or c in (' ', '_', '-') else '_' for c in label])
                     
                     # Titles
-                    title_raw_ov = f"X{c:02d}_Y{r:02d}_L{layer_idx:02d}_LEG:{safe_label}"
+                    title_raw_ov = f"X{c:02d}_Y{r:02d}_L{abs_layer:02d}_LEG:{safe_label}"
                     title_mask = f"X{c:02d}_Y{r:02d}_LEG:{safe_label}"
                     
-                    basename = f"X{c:02d}_Y{r:02d}_L{layer_idx:02d}_LEG_{safe_label}"
+                    basename = f"X{c:02d}_Y{r:02d}_L{abs_layer:02d}_LEG_{safe_label}"
                     
                     # Default filename for metadata (prefer raw, then overlay)
                     saved_rel_path = ""
@@ -177,7 +178,7 @@ class ExportManager(QObject):
                             print(f"Error saving {path}")
                         else:
                             if not saved_rel_path:
-                                saved_rel_path = f"overlay/{layer_name}/{fname}"
+                                saved_rel_path = f"raw/{layer_name}/{fname}"
                         
                     # C. Mask (Accumulate per Chip)
                     if options.get('mask'):
@@ -206,7 +207,7 @@ class ExportManager(QObject):
                     # Collect Metadata
                     if saved_rel_path:
                         meta = {
-                            "layer": layer_idx,
+                            "layer": abs_layer,
                             "x": c,
                             "y": r,
                             "label": safe_label,
@@ -316,8 +317,9 @@ class ExportManager(QObject):
         roi_f32 = roi_raw.astype(np.float32)
         
         from .core_data import ImageNormalizer
+        from PIL import Image
         roi_u8 = ImageNormalizer.process(roi_f32, win_lo, win_hi, scale, offset)
-        
+        Image.fromarray(roi_u8).save("roi_u8.png")
         h_roi, w_roi = roi_u8.shape
         # Create QImage copy (Safe)
         q_src = QImage(roi_u8.data, w_roi, h_roi, w_roi, QImage.Format_Grayscale8).copy()
