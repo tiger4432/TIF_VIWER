@@ -6,13 +6,12 @@ import numpy as np
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
     QListWidget, QListWidgetItem, QColorDialog, QInputDialog,
-    QDialog
+    QDialog, QLabel
 )
 from PySide6.QtCore import Qt, Signal, QRectF, QPointF
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 
 from . import output_columns
-from .app_paths import shared_dir
 
 # ==================================================================================
 # Void Data Manager
@@ -62,7 +61,7 @@ class VoidManager:
             path.lineTo(cx, cy + sy * ry)
         else:
             e = 2.0 / (p if shape == "curve" else 2.0)
-            n = 48
+            n = int(min(48, max(6, max(rx, ry) / 3.0)))
             for i in range(n + 1):
                 t = 0.5 * math.pi * i / n
                 path.lineTo(cx + sx * rx * math.cos(t) ** e, cy + sy * ry * math.sin(t) ** e)
@@ -79,7 +78,9 @@ class VoidManager:
         - Curve: Superellipse with exponent p.
         quadrant (sx, sy): draw only that quadrant (voids anchored with their center on a corner).
         """
-        if quadrant:
+        if max(rx, ry) < 1.5:
+            painter.drawPoint(QPointF(cx, cy)) # Too small on screen for an outline
+        elif quadrant:
             painter.drawPath(VoidManager.quadrant_path(shape, cx, cy, rx, ry, p or VoidManager.DEFAULT_P, quadrant))
         elif shape == "rectangle":
             # Rectangle: Center/Radius schema
@@ -87,7 +88,8 @@ class VoidManager:
             # rx, ry is Radius (Half-Width/Height)
             painter.drawRect(QRectF(cx - rx, cy - ry, rx * 2, ry * 2))
         elif shape == "curve":
-            painter.drawPath(VoidManager.superellipse_path(cx, cy, rx, ry, p or VoidManager.DEFAULT_P))
+            n = int(min(96, max(12, max(rx, ry) / 1.5))) # Fewer points when small on screen
+            painter.drawPath(VoidManager.superellipse_path(cx, cy, rx, ry, p or VoidManager.DEFAULT_P, n))
         else:
             # Ellipse: Center, Radius
             painter.drawEllipse(QPointF(cx, cy), rx, ry)
@@ -104,6 +106,8 @@ class VoidManager:
         self._undo_key = None
         self._undo_time = 0.0
         self._txn_depth = 0
+        self._version = 0 # Bumped on every change (see touch)
+        self._refs_cache = None
         
         # Layout of the selected WF product (products.json); provides named snap offsets like SL
         self.layout = None
@@ -111,17 +115,47 @@ class VoidManager:
         # Output field/column names (see output_columns.py; overridable in config.json)
         self.json_fields, self.csv_columns = output_columns.resolve()
         
-        # Default Types
-        self.types = {
-            0: {"name": "Defect", "color": (255, 0, 0)}, 
-            1: {"name": "Warning", "color": (255, 165, 0)}, 
-            2: {"name": "Safe", "color": (0, 255, 0)}, 
-            3: {"name": "Check", "color": (0, 255, 255)} 
-        }
-        self.next_type_id = 4
+        # Void types keyed by name, in declaration order (shortcuts 1..9, 0 follow this order).
+        # Declared in config.json (written by the user; the program never writes it).
+        self.types = self.normalize_types([
+            {"name": "Defect", "color": (255, 0, 0)},
+            {"name": "Warning", "color": (255, 165, 0)},
+            {"name": "Safe", "color": (0, 255, 0)},
+            {"name": "Check", "color": (0, 255, 255)},
+        ])
         
         # Load from config
         self.load_config()
+
+    @staticmethod
+    def normalize_types(declared):
+        """
+        {name: properties} from a void_types declaration, in declaration order. Accepted forms:
+          {"Edge": {"color": [...], "shape": "ellipse"}, ...}           (keyed by name)
+          [{"name": "Edge", "color": [...]}, ...]                        (list)
+          {"0": {"name": "Edge", "color": [...]}, ...}                   (legacy, keyed by number)
+        """
+        if isinstance(declared, dict):
+            items = list(declared.items())
+            if items and all(isinstance(v, dict) and "name" in v and str(k).lstrip("-").isdigit() for k, v in items):
+                entries = [v for _, v in sorted(items, key=lambda kv: int(kv[0]))] # Legacy numeric keys
+            else:
+                entries = [dict(v, name=k) for k, v in items]
+        else:
+            entries = list(declared or [])
+        types = {}
+        for e in entries:
+            t = dict(e)
+            name = str(t.get("name", "")).strip()
+            if not name:
+                continue
+            t["name"] = name
+            t["color"] = tuple(t.get("color", (255, 255, 0)))
+            t.setdefault("shape", "ellipse")
+            t.setdefault("def_w", 0.0)
+            t.setdefault("def_h", 0.0)
+            types[name] = t
+        return types
 
     def load_config(self):
         try:
@@ -129,103 +163,74 @@ class VoidManager:
                 data = json.load(f)
                 self.json_fields, self.csv_columns = output_columns.resolve(data)
                 if "void_types" in data:
-                    self.types = {}
-                    max_id = 0
-                    for tid_str, tdata in data["void_types"].items():
-                        tid = int(tid_str)
-                        # Keep every declared key (e.g. snap, snap_anchor, def_p)
-                        self.types[tid] = dict(tdata)
-                        self.types[tid]["color"] = tuple(tdata["color"])
-                        self.types[tid].setdefault("shape", "ellipse")
-                        self.types[tid].setdefault("def_w", 0.0)
-                        self.types[tid].setdefault("def_h", 0.0)
-                        if tid > max_id: max_id = tid
-                    self.next_type_id = max_id + 1
+                    types = self.normalize_types(data["void_types"])
+                    if types:
+                        self.types = types
                     print(f"Loaded {len(self.types)} void types from {self.config_path}")
         except FileNotFoundError:
             print("Config file not found, using defaults.")
         except Exception as e:
             print(f"Error loading config: {e}")
 
-    def save_config(self):
-        # Keep other sections (e.g. output_columns) of an existing config
-        try:
-            with open(self.config_path, 'r') as f:
-                data = json.load(f)
-        except Exception:
-            data = {}
-        data["void_types"] = {}
-        for tid, tdata in self.types.items():
-            entry = dict(tdata)
-            entry["color"] = list(tdata["color"])
-            entry.setdefault("shape", "ellipse")
-            entry.setdefault("def_w", 0.0)
-            entry.setdefault("def_h", 0.0)
-            data["void_types"][str(tid)] = entry
-            
-        try:
-            with open(self.config_path, 'w') as f:
-                json.dump(data, f, indent=4)
-            print(f"Saved config to {self.config_path}")
-            if shared_dir():
-                print("Note: declarations come from the shared folder; this change is local until "
-                      "config.json on the share is updated (it is replaced on the next start).")
-        except Exception as e:
-            print(f"Error saving config: {e}")
-
+    # Type edits from the Types dialog apply to this session only: declarations (config.json)
+    # are written by the user, never by the program.
     def add_type(self, name, color, shape="ellipse", def_w=0.0, def_h=0.0):
-        tid = self.next_type_id
-        self.types[tid] = {
-            "name": name, 
-            "color": color, 
-            "shape": shape,
-            "def_w": def_w,
-            "def_h": def_h
-        }
-        self.next_type_id += 1
-        self.save_config()
-        return tid
+        name = name.strip()
+        if not name or name in self.types:
+            return None
+        self.types[name] = {"name": name, "color": tuple(color), "shape": shape, "def_w": def_w, "def_h": def_h}
+        return name
 
-    def update_type(self, tid, name, color, shape="ellipse", def_w=0.0, def_h=0.0):
-        if tid in self.types:
-            # Keep other declared keys (snap, def_p, ...)
-            self.types[tid].update({
-                "name": name, 
-                "color": color, 
-                "shape": shape,
-                "def_w": def_w,
-                "def_h": def_h
-            })
-            self.save_config()
+    def update_type(self, name, color=None, shape=None, def_w=None, def_h=None):
+        t = self.types.get(name)
+        if t is None:
+            return
+        for k, val in (("color", color), ("shape", shape), ("def_w", def_w), ("def_h", def_h)):
+            if val is not None:
+                t[k] = tuple(val) if k == "color" else val
 
-    def remove_type(self, tid):
-        if tid in self.types and len(self.types) > 1:
-            fallback = min(k for k in self.types if k != tid)
-            affected = [v for vs in self.voids.values() for v in vs if v.get("type_id") == tid]
+    def rename_type(self, old, new):
+        """Renames a type and the voids using it (undoable). Returns True if renamed."""
+        new = new.strip()
+        if old not in self.types or not new or (new in self.types and new != old):
+            return False
+        affected = [v for vs in self.voids.values() for v in vs if v.get("type") == old]
+        if affected:
+            self.checkpoint()
+        self.types = {(new if k == old else k): (dict(t, name=new) if k == old else t) for k, t in self.types.items()}
+        for v in affected:
+            v["type"] = new
+        return True
+
+    def remove_type(self, name):
+        if name in self.types and len(self.types) > 1:
+            fallback = next(k for k in self.types if k != name)
+            affected = [v for vs in self.voids.values() for v in vs if v.get("type") == name]
             if affected:
                 self.checkpoint()
-            del self.types[tid]
-            self.save_config()
+            del self.types[name]
             # Remap existing voids to the first remaining type
             for v in affected:
-                v["type_id"] = fallback
+                v["type"] = fallback
 
     def paint_void(self, painter: QPainter, v, cx, cy, scale=1.0, style="normal", width=1.0, quadrant=None):
         """
         Single drawing routine for voids (viewer and export).
         (cx, cy): center in the target's pixel space; scale: target pixels per image pixel.
         style: "normal" (type color, solid), "ghost" (other layers: dotted, translucent),
-               "active" (selected: red border, translucent type fill).
+               "active" (selected: red border, translucent type fill),
+               "hover" (mouse over: translucent outline and fill).
         quadrant: see quadrant_of.
         """
-        tid = v.get("type_id", 0)
-        if tid not in self.types:
-            tid = min(self.types) if self.types else 0
-        r, g, b = self.types.get(tid, {}).get("color", (255, 255, 0))[:3]
+        t = self.type_of(v)
+        r, g, b = t.get("color", (255, 255, 0))[:3] # Undeclared type: yellow
 
         if style == "active":
             pen = QPen(QColor(255, 0, 0, 255))
             brush = QColor(r, g, b, 100)
+        elif style == "hover":
+            pen = QPen(QColor(r, g, b, 150)) # Mouse over: translucent
+            brush = QColor(r, g, b, 70)
         elif style == "ghost":
             pen = QPen(QColor(r, g, b, 128))
             pen.setStyle(Qt.DotLine)
@@ -238,14 +243,14 @@ class VoidManager:
         pen.setWidthF(width)
         painter.setPen(pen)
         painter.setBrush(brush)
-        self.draw_void_shape(painter, self.types.get(tid, {}).get("shape", "ellipse"),
+        self.draw_void_shape(painter, t.get("shape", "ellipse"),
                              cx, cy, v["radiusX"] * scale, v["radiusY"] * scale, self.p_of(v), quadrant)
 
     # -----------------------------------------------
     # Type properties
     # -----------------------------------------------
     def type_of(self, v):
-        return self.types.get(v.get("type_id", 0), {})
+        return self.types.get(v.get("type"), {})
 
     def shape_of(self, v):
         return self.type_of(v).get("shape", "ellipse")
@@ -321,6 +326,7 @@ class VoidManager:
         Calls with the same coalesce_key within 1.5 s form one undo step (e.g. wheel ticks).
         Inside a transaction the transaction's checkpoint covers the change.
         """
+        self.touch() # Called before every change
         if self._txn_depth > 0:
             return
         now = time.monotonic()
@@ -363,6 +369,7 @@ class VoidManager:
         state = self._undo.pop()
         self.voids.clear()
         self.voids.update(state)
+        self.touch()
         self._undo_key = None
         return True
 
@@ -376,12 +383,13 @@ class VoidManager:
         self.voids.clear()
         if voids:
             self.voids.update(voids)
+        self.touch()
         self.reset_history()
 
     # -----------------------------------------------
     # Mutators
     # -----------------------------------------------
-    def add_void(self, layer, gx, gy, rx, ry, type_id=0):
+    def add_void(self, layer, gx, gy, rx, ry, type_name=None):
         self.checkpoint()
         if layer not in self.voids:
             self.voids[layer] = []
@@ -392,11 +400,11 @@ class VoidManager:
             "radiusX": rx,
             "radiusY": ry,
             "layer": layer,
-            "type_id": type_id,
+            "type": type_name if type_name is not None else next(iter(self.types), ""),
             "createdAt": int(time.time() * 1000),
             "voidIndex": 0
         }
-        if self.types.get(type_id, {}).get("shape") == "curve":
+        if self.type_of(new_void).get("shape") == "curve":
             new_void["p"] = self.p_of(new_void)
         self.voids[layer].append(new_void)
         return new_void
@@ -435,6 +443,16 @@ class VoidManager:
         for layer in self.voids:
             self.voids[layer] = [v for v in self.voids[layer] if id(v) not in ids]
         return len(doomed)
+
+    def set_void_type(self, v, type_name, coalesce_key=None):
+        """Changes the type of a void (undoable). Returns True if changed."""
+        if v.get("type") == type_name:
+            return False
+        self.checkpoint(coalesce_key=coalesce_key)
+        v["type"] = type_name
+        if self.type_of(v).get("shape") == "curve" and "p" not in v:
+            v["p"] = self.p_of(v)
+        return True
 
     def set_p(self, v, p):
         """Sets the curve exponent (clamped); consecutive edits of one void are one undo step."""
@@ -495,6 +513,7 @@ class VoidManager:
 
         v["globalCX"], v["globalCY"] = to_raw(cx, cy)
         v["radiusX"], v["radiusY"] = rx, ry
+        self.touch()
         return True
 
     def snap_corner_point(self, v, grid_cfg, coord_transform=None):
@@ -551,7 +570,10 @@ class VoidManager:
         """
         if layer not in self.voids: return None, None
         
-        # Check reverse order (Top to Bottom visually)
+        # Among overlapping voids the one whose outline is closest to the point wins
+        # (ties: the one drawn on top). The reference bbox only when no other void is hit:
+        # corner voids lie on its outline and would otherwise lose to it.
+        best = None
         for v in reversed(self.voids[layer]):
             cx, cy = v["globalCX"], v["globalCY"]
             
@@ -576,8 +598,12 @@ class VoidManager:
                 continue
             # Edge band: the margin, but at most a third of the shape so small voids stay movable
             band = min(margin, 0.35 * min(rx, ry)) if inside else margin
-            return v, ('edge' if dist <= band else 'center')
+            key = (self.is_bbox(v), dist)
+            if best is None or key < best[0]:
+                best = (key, v, 'edge' if dist <= band else 'center')
 
+        if best is not None:
+            return best[1], best[2]
         return None, None
 
     def hit_test_all(self, gx, gy, margin=1.0, priority_layer=None, coord_transform=None):
@@ -631,22 +657,37 @@ class VoidManager:
 
     def is_bbox(self, v):
         """True if the void is a reference bbox marking (type name 'bbox', case-insensitive)."""
-        name = self.types.get(v.get("type_id", 0), {}).get("name", "")
-        return name.strip().lower() == self.BBOX_TYPE_NAME
+        return str(v.get("type", "")).strip().lower() == self.BBOX_TYPE_NAME
 
     @staticmethod
     def bbox_at(refs, grid_cfg, gx, gy):
-        """Reference bbox containing the Deskewed point, else the one of the point's cell (or None)."""
-        for (x0, y0, w, h) in refs.values():
-            if x0 <= gx <= x0 + w and y0 <= gy <= y0 + h:
-                return (x0, y0, w, h)
-        return refs.get(grid_cfg.cell_at(gx, gy))
+        """
+        Reference bbox containing the Deskewed point (looked up in the point's cell and its
+        neighbours), else the one of the point's cell (or None).
+        """
+        r, c = grid_cfg.cell_at(gx, gy)
+        for rr in (r, r - 1, r + 1):
+            for cc in (c, c - 1, c + 1):
+                b = refs.get((rr, cc))
+                if b is not None and b[0] <= gx <= b[0] + b[2] and b[1] <= gy <= b[1] + b[3]:
+                    return b
+        return refs.get((r, c))
+
+    def touch(self):
+        """Marks void data as changed (invalidates cached derived data such as reference bboxes)."""
+        self._version += 1
 
     def reference_bboxes(self, grid_cfg, coord_transform=None):
         """
         Reference bbox per grid cell: {(row, col): (x0, y0, w, h)} in Deskewed (grid-aligned)
         space. The bbox on the topmost (lowest-numbered) layer of the cell is used.
+        Cached until the voids, the grid or the transform change.
         """
+        key = (self._version, grid_cfg.start_x, grid_cfg.start_y, grid_cfg.pitch_x, grid_cfg.pitch_y,
+               id(coord_transform), getattr(coord_transform, "angle", None),
+               getattr(coord_transform, "img_cx", None), getattr(coord_transform, "img_cy", None))
+        if self._refs_cache is not None and self._refs_cache[0] == key:
+            return self._refs_cache[1]
         refs = {}
         for layer in sorted(self.voids):
             for v in self.voids[layer]:
@@ -659,6 +700,7 @@ class VoidManager:
                 if cell not in refs:
                     rx, ry = v["radiusX"], v["radiusY"]
                     refs[cell] = (gx - rx, gy - ry, 2 * rx, 2 * ry)
+        self._refs_cache = (key, refs)
         return refs
 
     def void_records(self, grid_cfg, bonding_map=None, coord_transform=None):
@@ -677,9 +719,6 @@ class VoidManager:
                 row, col = grid_cfg.cell_at(gx, gy)
                 chip_x0, chip_y0 = grid_cfg.cell_origin(row, col)
 
-                # Resolve Type Name
-                tid = v.get("type_id", 0)
-                type_name = self.types[tid]["name"] if tid in self.types else "bbox"
 
                 # Bonding Label
                 label = (bonding_map.get_key(row, col) if bonding_map else "") or ""
@@ -693,8 +732,7 @@ class VoidManager:
                     "row": row,
                     "layer": layer,
                     "void_index": v.get("voidIndex", 0),
-                    "type": type_name,
-                    "type_id": tid,
+                    "type": v.get("type", ""),
                     "center_x": gx - chip_x0,
                     "center_y": gy - chip_y0,
                     "radius_x": v["radiusX"],
@@ -758,6 +796,7 @@ class VoidManager:
 
             self.checkpoint() # Loading replaces the current voids (undoable)
             self.voids.clear()
+            legacy_names = {} # Old files: type number -> name
             count = 0
             legacy_layers = True
 
@@ -767,29 +806,21 @@ class VoidManager:
                 void_list = raw_data
             elif isinstance(raw_data, dict):
                 legacy_layers = raw_data.get("layer_numbering") != "absolute"
-                # V2 Format
+                # Types stored in the file: declarations (config.json) win; types the
+                # declaration does not know are added so their voids keep color and shape
                 if "types" in raw_data:
-                    # File types win, but keep keys declared in config.json (snap, def_p, ...)
-                    # for types of the same name that the file does not define
-                    by_name = {t.get("name"): t for t in self.types.values()}
-                    types = {}
-                    for k, t in raw_data["types"].items():
-                        merged = dict(by_name.get(t.get("name"), {}))
-                        merged.update(t)
-                        merged["color"] = tuple(merged.get("color", (255, 255, 0)))
-                        types[int(k)] = merged
-                    self.types = types
-                    if self.types:
-                        self.next_type_id = max(self.types.keys()) + 1
-                    else:
-                         self.next_type_id = 0
+                    file_types = self.normalize_types(raw_data["types"])
+                    for name, t in file_types.items():
+                        self.types.setdefault(name, t)
+                    # Legacy files reference types by number: number -> name
+                    if isinstance(raw_data["types"], dict):
+                        for k, t in raw_data["types"].items():
+                            if str(k).lstrip("-").isdigit() and isinstance(t, dict) and t.get("name"):
+                                legacy_names[int(k)] = str(t["name"]).strip()
                 void_list = raw_data.get("voids", [])
             else:
                 print("Unknown JSON format")
                 return
-
-            # Build Name -> ID map for resolution
-            name_to_id = {v["name"]: k for k, v in self.types.items()}
 
             if legacy_layers and layer_offset:
                 print(f"Legacy void file: relative layers shifted by +{layer_offset}")
@@ -805,18 +836,18 @@ class VoidManager:
                 rx = self._field(item, "radius_x", 10.0)
                 ry = self._field(item, "radius_y", 10.0)
                 
-                # Resolve Type
-                tid = 0
-                t_str = self._field(item, "type")
-                t_id = self._field(item, "type_id")
-                if t_str and t_str in name_to_id:
-                    tid = name_to_id[t_str]
-                elif t_id is not None:
-                    tid = t_id
-                    
-                # If Type ID not in current types (e.g. from V1 file or mismatch), fallback to 0
-                if tid not in self.types:
-                    tid = 0
+                # Resolve Type: by name; old files by number (their own number -> name table,
+                # else the declaration order)
+                type_name = self._field(item, "type")
+                if not type_name:
+                    t_id = item.get("type_id")
+                    order = list(self.types)
+                    if t_id in legacy_names:
+                        type_name = legacy_names[t_id]
+                    elif isinstance(t_id, int) and 0 <= t_id < len(order):
+                        type_name = order[t_id]
+                    else:
+                        type_name = order[0] if order else ""
                 
                 gx = self._field(item, "global_x")
                 gy = self._field(item, "global_y")
@@ -839,7 +870,7 @@ class VoidManager:
                     "radiusX": rx,
                     "radiusY": ry,
                     "layer": layer,
-                    "type_id": tid,
+                    "type": type_name,
                     "createdAt": self._field(item, "created_at", 0),
                     "voidIndex": self._field(item, "void_index", 0)
                 }
@@ -858,55 +889,40 @@ class VoidManager:
 
 class VoidTypeDialog(QDialog):
     """
-    Dialog to manage Void Types (Add, Remove, Color).
-    Inherits QDialog for proper window behavior.
+    Dialog to manage Void Types (Add, Remove, Color, Rename, Shape, Default Size).
+    Changes apply to this session only: declarations live in config.json, written by the user.
     """
     def __init__(self, void_manager, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Manage Void Types")
-        self.resize(300, 400)
+        self.resize(420, 420)
         self.setWindowModality(Qt.ApplicationModal)
         
         self.vm = void_manager
         
         layout = QVBoxLayout(self)
+        note = QLabel("Changes apply to this session only. To keep them, edit void_types in config.json.")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: gray;")
+        layout.addWidget(note)
         
         self.list_widget = QListWidget()
         layout.addWidget(self.list_widget)
         
         h = QHBoxLayout()
-        btn_add = QPushButton("Add")
-        btn_remove = QPushButton("Remove")
-        btn_color = QPushButton("Color")
-        btn_rename = QPushButton("Rename")
-        btn_shape = QPushButton("Shape (E/R/C)")
-        
-        h.addWidget(btn_add)
-        h.addWidget(btn_remove)
-        h.addWidget(btn_color)
-        h.addWidget(btn_rename)
-        h.addWidget(btn_shape)
+        for text, slot in (("Add", self.add_type), ("Remove", self.remove_type), ("Color", self.change_color),
+                           ("Rename", self.rename_type), ("Shape (E/R/C)", self.toggle_shape),
+                           ("Default Size", self.set_default_size)):
+            btn = QPushButton(text)
+            btn.clicked.connect(slot)
+            h.addWidget(btn)
         layout.addLayout(h)
-        
-        btn_add.clicked.connect(self.add_type)
-        btn_remove.clicked.connect(self.remove_type)
-        btn_color.clicked.connect(self.change_color)
-        btn_rename.clicked.connect(self.rename_type)
-        btn_rename.clicked.connect(self.rename_type)
-        btn_shape.clicked.connect(self.toggle_shape)
-        
-        btn_def = QPushButton("Default Size")
-        h.addWidget(btn_def)
-        btn_def.clicked.connect(self.set_default_size)
         
         self.refresh()
         
     def refresh(self):
         self.list_widget.clear()
-        for tid, data in self.vm.types.items():
-            name = data["name"]
-            color = data["color"] # (r, g, b)
-            name = data["name"]
+        for name, data in self.vm.types.items():
             color = data["color"] # (r, g, b)
             shape = data.get("shape", "ellipse")
             def_w = data.get("def_w", 0.0)
@@ -920,108 +936,71 @@ class VoidTypeDialog(QDialog):
                  size_code = f" [{def_w:.1f}x{def_h:.1f}]"
             
             item = QListWidgetItem(f"[{s_code}] {name}{size_code}")
-            # Set background color
             c = QColor(color[0], color[1], color[2])
             item.setBackground(c)
-            # Text color contrast?
-            if (c.red()*0.299 + c.green()*0.587 + c.blue()*0.114) < 128:
-                item.setForeground(Qt.white)
-            else:
-                item.setForeground(Qt.black)
-                
-            item.setData(Qt.UserRole, tid)
+            item.setForeground(Qt.white if (c.red()*0.299 + c.green()*0.587 + c.blue()*0.114) < 128 else Qt.black)
+            item.setData(Qt.UserRole, name)
             self.list_widget.addItem(item)
+
+    def _selected(self):
+        row = self.list_widget.currentRow()
+        return None if row < 0 else self.list_widget.item(row).data(Qt.UserRole)
             
     def add_type(self):
         name, ok = QInputDialog.getText(self, "New Type", "Type Name:")
-        if ok and name:
-            self.vm.add_type(name, (255, 255, 0)) # Default Yellow
+        if ok and name and self.vm.add_type(name, (255, 255, 0)): # Default Yellow
             self.refresh()
             
     def remove_type(self):
-        row = self.list_widget.currentRow()
-        if row < 0: return
-        tid = self.list_widget.item(row).data(Qt.UserRole)
-        self.vm.remove_type(tid)
-        self.refresh()
+        name = self._selected()
+        if name is not None:
+            self.vm.remove_type(name)
+            self.refresh()
         
     def change_color(self):
-        row = self.list_widget.currentRow()
-        if row < 0: return
-        tid = self.list_widget.item(row).data(Qt.UserRole)
-        
-        curr_c = self.vm.types[tid]["color"]
+        name = self._selected()
+        if name is None: return
+        curr_c = self.vm.types[name]["color"]
         c = QColorDialog.getColor(QColor(curr_c[0], curr_c[1], curr_c[2]), self)
-        
         if c.isValid():
-            self.vm.types[tid]["color"] = (c.red(), c.green(), c.blue())
-            self.vm.save_config()
+            self.vm.update_type(name, color=(c.red(), c.green(), c.blue()))
             self.refresh()
 
     def rename_type(self):
-        row = self.list_widget.currentRow()
-        if row < 0: return
-        tid = self.list_widget.item(row).data(Qt.UserRole)
-        old_name = self.vm.types[tid]["name"]
-        
+        old_name = self._selected()
+        if old_name is None: return
         name, ok = QInputDialog.getText(self, "Rename Type", "New Name:", text=old_name)
-        if ok and name:
-            self.vm.types[tid]["name"] = name
-            self.vm.save_config() # Save changes
+        if ok and name and self.vm.rename_type(old_name, name):
             self.refresh()
 
     def toggle_shape(self):
-        row = self.list_widget.currentRow()
-        if row < 0: return
-        tid = self.list_widget.item(row).data(Qt.UserRole)
-        
+        name = self._selected()
+        if name is None: return
         shapes = self.vm.SHAPES
-        curr_shape = self.vm.types[tid].get("shape", "ellipse")
+        curr_shape = self.vm.types[name].get("shape", "ellipse")
         new_shape = shapes[(shapes.index(curr_shape) + 1) % len(shapes)] if curr_shape in shapes else shapes[0]
-        
-        self.vm.types[tid]["shape"] = new_shape
-        self.vm.save_config()
+        self.vm.update_type(name, shape=new_shape)
         self.refresh()
 
     def set_default_size(self):
-        row = self.list_widget.currentRow()
-        if row < 0: return
-        tid = self.list_widget.item(row).data(Qt.UserRole)
+        name = self._selected()
+        if name is None: return
+        data = self.vm.types[name]
         
-        data = self.vm.types[tid]
-        curr_w = data.get("def_w", 0.0)
-        curr_h = data.get("def_h", 0.0)
-        
-        # simple dialog
+        from PySide6.QtWidgets import QDoubleSpinBox, QLabel, QDialogButtonBox
         dlg = QDialog(self)
         dlg.setWindowTitle("Set Default Size")
         l = QVBoxLayout(dlg)
-        
-        from PySide6.QtWidgets import QDoubleSpinBox, QLabel, QDialogButtonBox
-        
         l.addWidget(QLabel("Default Width (0 = Manual):"))
-        sb_w = QDoubleSpinBox()
-        sb_w.setRange(0.0, 99999.0)
-        sb_w.setValue(curr_w)
+        sb_w = QDoubleSpinBox(); sb_w.setRange(0.0, 99999.0); sb_w.setValue(data.get("def_w", 0.0))
         l.addWidget(sb_w)
-        
         l.addWidget(QLabel("Default Height (0 = Manual):"))
-        sb_h = QDoubleSpinBox()
-        sb_h.setRange(0.0, 99999.0)
-        sb_h.setValue(curr_h)
+        sb_h = QDoubleSpinBox(); sb_h.setRange(0.0, 99999.0); sb_h.setValue(data.get("def_h", 0.0))
         l.addWidget(sb_h)
-        
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(dlg.accept)
         btns.rejected.connect(dlg.reject)
         l.addWidget(btns)
-        
         if dlg.exec():
-            # Update
-            new_w = sb_w.value()
-            new_h = sb_h.value()
-            
-            self.vm.types[tid]["def_w"] = new_w
-            self.vm.types[tid]["def_h"] = new_h
-            self.vm.save_config()
+            self.vm.update_type(name, def_w=sb_w.value(), def_h=sb_h.value())
             self.refresh()

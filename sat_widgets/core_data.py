@@ -520,6 +520,8 @@ class BondingMap:
         as not bonded (empty), so they are skipped everywhere a bonded cell is required.
         """
         reject = {str(v).strip() for v in reject_values if str(v).strip()}
+        self.source_text = text # Saved with exports (bonding_map.txt)
+        self.reject_values = sorted(reject)
         lines = text.strip().split('\n')
         if not lines: return
 

@@ -13,10 +13,11 @@ from PySide6.QtWidgets import (
     QSpinBox, QSlider, QLabel, QToolBar, QDockWidget, QGroupBox,
     QFormLayout, QPushButton, QDoubleSpinBox, QPlainTextEdit,
     QFileDialog, QProgressDialog, QCheckBox, QRadioButton,
-    QButtonGroup, QComboBox, QDialog, QScrollArea, QMessageBox, QLineEdit
+    QButtonGroup, QComboBox, QDialog, QScrollArea, QMessageBox, QLineEdit,
+    QTextEdit, QAbstractSpinBox
 )
 from PySide6.QtGui import QSurfaceFormat, QAction, QImage, QPainter, QKeySequence
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QEvent
 
 # Imports from sat_widgets
 from sat_widgets.core_data import TiffStack, MosaicTiffStack, GridConfig, BondingMap, to_uint16, ImageNormalizer, CoordinateTransform
@@ -270,7 +271,9 @@ class MainWindow(QMainWindow):
         v_layout_void = QVBoxLayout(self.gb_void)
         
         # Toggle Mode (Hint Only)
-        self.lbl_void_hint = QLabel("W: Draw  E: Edit  R: Erase  Esc: View\nQ: move hovered void to this layer  |  Pan: right/middle drag")
+        self.lbl_void_hint = QLabel("Hold W: Draw  E: Edit  R: Erase (release: View)\n"
+                                    "1-9, 10..: type of the hovered void (else of new voids)\n"
+                                    "Q: move hovered void to this layer  |  Pan: right/middle drag")
         self.lbl_void_hint.setStyleSheet("font-weight: bold; color: gray;")
         
         # Mode Selection (Draw/Edit/Erase)
@@ -287,8 +290,10 @@ class MainWindow(QMainWindow):
         self.mode_group.addButton(self.rb_edit)
         self.mode_group.addButton(self.rb_erase)
         
-        # Use buttonClicked (pointer to button) or standard signals
-        self.mode_group.buttonClicked.connect(self.on_void_mode_changed)
+        # Indicators only: a mode is active while its key is held (see eventFilter)
+        for rb in (self.rb_view, self.rb_draw, self.rb_edit, self.rb_erase):
+            rb.setAttribute(Qt.WA_TransparentForMouseEvents)
+            rb.setFocusPolicy(Qt.NoFocus)
         
         h_modes.addWidget(self.rb_view)
         h_modes.addWidget(self.rb_draw)
@@ -354,6 +359,10 @@ class MainWindow(QMainWindow):
         # Shortcuts for Void Mode
     
     
+        self._held_modes = [] # Mode keys held down, in press order
+        QApplication.instance().installEventFilter(self)
+        QApplication.instance().applicationStateChanged.connect(self._on_app_state)
+
         self.action_void_view = QAction("View Mode", self)
         self.action_void_view.setShortcut("Esc")
         self.action_void_view.triggered.connect(self.set_void_mode_view)
@@ -364,15 +373,7 @@ class MainWindow(QMainWindow):
         self.action_void_to_layer.triggered.connect(self.glw.move_hovered_void_to_current_layer)
         self.addAction(self.action_void_to_layer)
 
-        self.action_void_draw = QAction("Void Draw Mode", self)
-        self.action_void_draw.setShortcut("w")
-        self.action_void_draw.triggered.connect(self.set_void_mode_draw)
-        self.addAction(self.action_void_draw)
 
-        self.action_void_edit = QAction("Void Edit Mode", self)
-        self.action_void_edit.setShortcut("e")
-        self.action_void_edit.triggered.connect(self.set_void_mode_edit)
-        self.addAction(self.action_void_edit)
         
         # Undo of void marking changes (add / move / resize / erase / clear / load / p)
         self.action_undo = QAction("Undo Void Change", self)
@@ -380,10 +381,6 @@ class MainWindow(QMainWindow):
         self.action_undo.triggered.connect(self.undo_void_change)
         self.addAction(self.action_undo)
 
-        self.action_void_erase = QAction("Void Erase Mode", self)
-        self.action_void_erase.setShortcut("r")
-        self.action_void_erase.triggered.connect(self.set_void_mode_erase)
-        self.addAction(self.action_void_erase)
 
 
         
@@ -837,39 +834,52 @@ class MainWindow(QMainWindow):
             
 
 
+    MODE_KEYS = {Qt.Key_W: "DRAW", Qt.Key_E: "EDIT", Qt.Key_R: "ERASE"}
+
+    TEXT_INPUTS = (QLineEdit, QPlainTextEdit, QTextEdit, QAbstractSpinBox)
+
+    def _typing(self, obj):
+        """True when the key goes to a text input (it keeps its keys)."""
+        return isinstance(obj, self.TEXT_INPUTS) or isinstance(QApplication.focusWidget(), self.TEXT_INPUTS)
+
+    def eventFilter(self, obj, ev):
+        # Application-wide, so the keys work whatever widget of this window has the focus.
+        # W / E / R: the mode is active only while its key is held (last held key wins).
+        # Digits: type number (gl_widget.type_number_key).
+        et = ev.type()
+        if et in (QEvent.KeyPress, QEvent.KeyRelease) and isinstance(obj, QWidget) and obj.window() is self:
+            key = ev.key()
+            plain = not (ev.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))
+            if key in self.MODE_KEYS and plain and not self._typing(obj):
+                if not ev.isAutoRepeat():
+                    tool = self.MODE_KEYS[key]
+                    if tool in self._held_modes:
+                        self._held_modes.remove(tool)
+                    if et == QEvent.KeyPress:
+                        self._held_modes.append(tool)
+                    self._apply_held_mode()
+                return True
+            if et == QEvent.KeyPress and Qt.Key_0 <= key <= Qt.Key_9 and plain and not self._typing(obj):
+                if not ev.isAutoRepeat():
+                    self.glw.type_number_key(key - Qt.Key_0)
+                return True
+        return super().eventFilter(obj, ev)
+
+    def _on_app_state(self, state):
+        # Key releases are lost while another application is active
+        if state != Qt.ApplicationActive and self._held_modes:
+            self._held_modes.clear()
+            self._apply_held_mode()
+
+    def _apply_held_mode(self):
+        tool = self._held_modes[-1] if self._held_modes else None
+        rb = {None: self.rb_view, "DRAW": self.rb_draw, "EDIT": self.rb_edit, "ERASE": self.rb_erase}[tool]
+        rb.setChecked(True)
+        self.glw.set_void_tool(tool)
+
     def set_void_mode_view(self):
-        self.rb_view.setChecked(True)
-        self.on_void_mode_changed()
-
-    def set_void_mode_draw(self):
-        self.rb_draw.setChecked(True)
-        self.on_void_mode_changed()
-
-    def set_void_mode_edit(self):
-        self.rb_edit.setChecked(True)
-        self.on_void_mode_changed()
-
-    def set_void_mode_erase(self):
-        self.rb_erase.setChecked(True)
-        self.on_void_mode_changed()
-
-    def on_void_mode_changed(self):
-        # Called when Radio Button changes (tools stay active until another is chosen)
-        if self.rb_view.isChecked():
-            self.glw.set_void_tool(None)
-            print("Void Tool: VIEW")
-        elif self.rb_draw.isChecked():
-            self.glw.set_void_tool("DRAW")
-            print("Void Tool: DRAW")
-        elif self.rb_edit.isChecked():
-            self.glw.set_void_tool("EDIT")
-            print("Void Tool: EDIT")
-        elif self.rb_erase.isChecked():
-            self.glw.set_void_tool("ERASE")
-            print("Void Tool: ERASE")
-            
-        self.glw.setFocus()
-        self.glw.update()
+        self._held_modes.clear()
+        self._apply_held_mode()
         
     def load_voids(self):
         path, _ = QFileDialog.getOpenFileName(self, "Load Voids JSON", "", "JSON (*.json)")
@@ -883,9 +893,9 @@ class MainWindow(QMainWindow):
         self.cb_void_type.blockSignals(True)
         self.cb_void_type.clear()
         
-        # Sort by ID
-        for tid, data in sorted(self.void_manager.types.items()):
-            self.cb_void_type.addItem(data["name"], tid)
+        # Declaration order (number keys 1..9, 10.. follow it)
+        for i, name in enumerate(self.void_manager.types, 1):
+            self.cb_void_type.addItem(f"{i}: {name}", name)
             
         self.cb_void_type.blockSignals(False)
         
@@ -896,21 +906,17 @@ class MainWindow(QMainWindow):
             
     def on_void_type_changed(self, idx):
         if idx < 0: return
-        tid = self.cb_void_type.currentData()
-        self.glw.active_type_id = tid
-        print(f"Active Void Type: {self.void_manager.types[tid]['name']}")
+        name = self.cb_void_type.currentData()
+        self.glw.active_type = name
+        print(f"Active Void Type: {name}")
         
         # Update cursor style if void mode is active
         if self.glw.void_mode:
             self.glw.update_cursor_style()
 
-    def on_void_type_shortcut(self, type_id):
-        """
-        Called when GLWidget detects a shortcut key (1-9, 0).
-        Sync the ComboBox.
-        """
-        # Find index for this type_id
-        idx = self.cb_void_type.findData(type_id)
+    def on_void_type_shortcut(self, type_name):
+        """Called when a number key selects the drawing type: sync the ComboBox."""
+        idx = self.cb_void_type.findData(type_name)
         if idx >= 0:
             self.cb_void_type.setCurrentIndex(idx)
         
@@ -938,17 +944,17 @@ class MainWindow(QMainWindow):
         self.update_void_ui()
         self.glw.setFocus()
 
-    def _bbox_type_id(self):
-        for tid, t in self.void_manager.types.items():
-            if t.get("name", "").strip().lower() == self.void_manager.BBOX_TYPE_NAME:
-                return tid
+    def _bbox_type_name(self):
+        for name in self.void_manager.types:
+            if name.strip().lower() == self.void_manager.BBOX_TYPE_NAME:
+                return name
         return None
 
     def auto_bbox(self):
         """Detects and draws the reference bbox of every (bonded) cell on the topmost layer."""
         if self.full_data is None or self.glw.tiled_image is None:
             return
-        tid = self._bbox_type_id()
+        tid = self._bbox_type_name()
         if tid is None:
             QMessageBox.warning(self, "Auto BBOX", "No void type named 'bbox' is declared in config.json.")
             return
@@ -1409,17 +1415,17 @@ class MainWindow(QMainWindow):
                 print("No output directory selected.")
                 return
                 
+            if self.glw.bonding_map is None and any(opts.get(k) for k in ('raw', 'overlay', 'mask', 'merged')):
+                QMessageBox.warning(self, "Export", "Images are exported only for cells with a LEG (bonding map value).\n"
+                                                    "Paste a bonding map first.")
+                return
+
             print(f"Starting Export to {out_dir} with opts: {opts}")
             
             # Setup Progress Dialog
             self.pd = QProgressDialog("Exporting...", "Cancel", 0, 100, self)
             self.pd.setWindowModality(Qt.WindowModal)
             self.pd.show()
-            
-            # Ensure ROIs are up to date
-            if not self.rois:
-                 print("Updating ROIs for export...")
-                 self.update_rois()
             
             # Create Manager (Pass MainWindow)
             exporter = ExportManager(self)
@@ -1440,6 +1446,8 @@ class MainWindow(QMainWindow):
                 traceback.print_exc()
                 errors.append(str(e))
 
+            # close() emits canceled: disconnect first, or a finished export reads as canceled
+            self.pd.canceled.disconnect(exporter.request_stop)
             self.pd.close()
             if errors:
                 QMessageBox.critical(self, "Export", f"Export failed:\n{errors[0]}")

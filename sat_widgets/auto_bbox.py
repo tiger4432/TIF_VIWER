@@ -123,11 +123,11 @@ def detect_box(patch, params=DEFAULTS, expected=None):
     return ((x0 + x1 + 1) / 2.0, (y0 + y1 + 1) / 2.0, float(x1 - x0 + 1), float(y1 - y0 + 1), min(sx, sy))
 
 
-def place_bboxes(stack, z, layer_number, grid_cfg, coord_transform, void_manager, bbox_type_id,
+def place_bboxes(stack, z, layer_number, grid_cfg, coord_transform, void_manager, bbox_type,
                  size, cells, params=None, progress=None):
     """
     Detects and (re)places the bbox of every cell in `cells` [(row, col)] on `layer_number`.
-    size: declared (w, h); None -> detected size. One undo step.
+    bbox_type: name of the bbox void type. size: declared (w, h); None -> detected size. One undo step.
     Returns {"detected": n, "estimated": [(r, c)], "failed": [(r, c)]}.
     """
     p = dict(DEFAULTS)
@@ -181,7 +181,7 @@ def place_bboxes(stack, z, layer_number, grid_cfg, coord_transform, void_manager
     try:
         cellset = set(cells)
         old = [v for v in vm.voids.get(layer_number, [])
-               if v.get("type_id") == bbox_type_id and grid_cfg.cell_at(*to_deskew(v["globalCX"], v["globalCY"])) in cellset]
+               if v.get("type") == bbox_type and grid_cfg.cell_at(*to_deskew(v["globalCX"], v["globalCY"])) in cellset]
         for v in old:
             vm.remove_void(layer_number, v)
 
@@ -199,7 +199,7 @@ def place_bboxes(stack, z, layer_number, grid_cfg, coord_transform, void_manager
                 result["failed"].append((r, c))
                 continue
             w, h = size if size is not None else (bw, bh)
-            v = vm.add_void(layer_number, *to_raw(cx + dx, cy + dy), w / 2.0, h / 2.0, bbox_type_id)
+            v = vm.add_void(layer_number, *to_raw(cx + dx, cy + dy), w / 2.0, h / 2.0, bbox_type)
             if flag:
                 v["auto"] = flag
                 result["estimated"].append((r, c))

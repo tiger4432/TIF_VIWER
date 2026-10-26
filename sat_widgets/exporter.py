@@ -46,6 +46,7 @@ class ExportManager(QObject):
         
         try:
             # 1. Create subdirectories
+            os.makedirs(output_dir, exist_ok=True)
             subdirs = {}
             for k in ('raw', 'overlay', 'mask', 'merged'):
                 if options.get(k):
@@ -57,16 +58,19 @@ class ExportManager(QObject):
                 self._export_json(output_dir)
             if options.get('csv'):
                 self._export_csv(output_dir)
+            self._export_bonding_map(output_dir)
 
             # 2. Layers, Configs & ROIs
             num_layers = len(self.data_stack)
             layer_numbers = [self.main_window.abs_layer(i) for i in range(num_layers)]
             cfg = self.main_window.glw.grid_cfg
-            rois = self.main_window.rois
-            if not rois:
-                self.main_window.update_rois()
-                rois = self.main_window.rois
-            rois = [item for item in rois if item.get('bbox') and self._roi_in_image(item['bbox'])]
+            # Only cells with a LEG (bonding map value; rejected values count as none). The ROIs are
+            # rebuilt so a map pasted or changed after they were computed is honoured.
+            bmap = self.main_window.glw.bonding_map
+            self.main_window.update_rois()
+            rois = [item for item in self.main_window.rois
+                    if bmap is not None and bmap.get_key(item['y'], item['x'])
+                    and item.get('bbox') and self._roi_in_image(item['bbox'])]
             
             # Same rounding as the extracted patch size (get_poly_crop)
             w_pitch = int(round(cfg.pitch_x))
@@ -351,6 +355,18 @@ class ExportManager(QObject):
         # Same as "Save JSON" (the transform is needed for rotated grids)
         glw = self.main_window.glw
         self.void_manager.save_to_file(path, glw.grid_cfg, glw.bonding_map, glw.coord_transform)
+
+    def _export_bonding_map(self, output_dir):
+        """bonding_map.txt: the pasted map as is (can be pasted again); reject values alongside."""
+        bmap = self.main_window.glw.bonding_map
+        text = getattr(bmap, "source_text", None) if bmap is not None else None
+        if not text:
+            return
+        with open(os.path.join(output_dir, "bonding_map.txt"), 'w', encoding='utf-8', newline='') as f:
+            f.write(text)
+        if bmap.reject_values:
+            with open(os.path.join(output_dir, "bonding_map_reject.txt"), 'w', encoding='utf-8') as f:
+                f.write(", ".join(bmap.reject_values) + "\n")
 
     def _export_csv(self, output_dir):
         path = os.path.join(output_dir, "voids.csv")

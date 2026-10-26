@@ -1,5 +1,6 @@
 import sys
 import math
+import time
 import ctypes
 import numpy as np
 
@@ -153,7 +154,13 @@ class GLImageWidget(QOpenGLWidget):
         self.void_manager = None
         self.void_mode = False # Active State: "DRAW" | "EDIT" | "ERASE" | False
         self.selected_void_tool = "DRAW" # Selected Tool: "DRAW" | "EDIT" | "ERASE"
-        self.active_type_id = 0
+        self.active_type = None # Void type name used for drawing
+        self.hover_void = None # Void under the mouse (drawn translucent)
+        self._hover_state = None # (void, action, axis) for the edit cursor (hysteresis)
+        self._digits = "" # Type number being typed (two digits when typed quickly)
+        self._digit_time = 0.0
+        self._number_started = 0.0
+        self._pending_tool = False # Tool change requested during a drag (applied on release)
         self.current_layer = 0 # Absolute layer number
         self.active_void = None
         self.active_void_action = None
@@ -165,7 +172,6 @@ class GLImageWidget(QOpenGLWidget):
         
         # Chip layout of the selected WF product, drawn inside each cell's reference bbox
         self.layout = None
-        self.setCursor(Qt.OpenHandCursor) # Starts in view mode
 
         # Auto-Calibration
         self.calib_tex = None # GL Texture for (Scale, Offset) per cell
@@ -695,7 +701,7 @@ class GLImageWidget(QOpenGLWidget):
             self.update()
 
     def _wheel_edit_curve(self, e, delta, modifiers):
-        if (self.selected_void_tool != "EDIT" or not self.void_manager or not self.tiled_image
+        if (self.void_mode != "EDIT" or not self.void_manager or not self.tiled_image
                 or modifiers & (Qt.ControlModifier | Qt.ShiftModifier) or delta == 0):
             return False
         gx, gy = self.get_image_coords(e.position())
@@ -800,7 +806,7 @@ class GLImageWidget(QOpenGLWidget):
     # -----------------------------------------------
 
     # Signal for shortcuts
-    void_type_shortcut_triggered = Signal(int) # Type ID
+    void_type_shortcut_triggered = Signal(str) # Type name
     
     def create_colored_cross_cursor(self, color_tuple):
         """
@@ -849,16 +855,16 @@ class GLImageWidget(QOpenGLWidget):
 
     def update_cursor_style(self):
         """
-        Mode cursor: View = open hand, Draw = crosshair in the type color, Edit = arrow
-        (changes over voids, see _update_edit_hover_cursor), Erase = red circle with X.
+        Mode cursor, only while a mode is active: Draw = crosshair in the type color, Edit = arrow
+        (changes over voids, see _update_hover), Erase = red circle with X. View: default cursor.
         """
         if not self.void_mode:
-            self.setCursor(Qt.OpenHandCursor)
+            self.unsetCursor()
         elif self.void_mode == "DRAW":
             # Use Colored Crosshair
-            tid = self.active_type_id
-            if self.void_manager and tid in self.void_manager.types:
-                col = self.void_manager.types[tid]["color"]
+            t = self.void_manager.types.get(self.active_type) if self.void_manager else None
+            if t is not None:
+                col = t["color"]
                 cursor = self.create_colored_cross_cursor(col)
                 self.setCursor(cursor)
             else:
@@ -868,27 +874,91 @@ class GLImageWidget(QOpenGLWidget):
         elif self.void_mode == "EDIT":
             self.setCursor(Qt.ArrowCursor)
 
-    def _update_edit_hover_cursor(self, gx, gy):
-        """Edit mode: move cursor over a void, resize arrows over its edge, arrow elsewhere."""
+    def _update_hover(self, gx, gy):
+        """
+        Hover in any mode: the void under the mouse (current layer first, then ghosts) is drawn
+        translucent; in edit mode the cursor shows move / resize direction. Hysteresis keeps the
+        cursor from flickering at the edge band and direction boundaries.
+        """
         if not self.void_manager or not self.tiled_image:
             return
-        v, action = self.void_manager.hit_test(self.current_layer, gx, gy, margin=10.0/self.zoom,
-                                               coord_transform=self.raw_to_deskew, quadrant_ctx=self._quadrant_ctx())
+        vm = self.void_manager
+        margin = 10.0 / self.zoom
+        ctx = self._quadrant_ctx()
+        v, action = vm.hit_test(self.current_layer, gx, gy, margin=margin, coord_transform=self.raw_to_deskew, quadrant_ctx=ctx)
+
+        prev = self._hover_state
+        if prev is not None and prev[0] is not None and prev[1] == "edge":
+            # Stay on the edge of the previous void until clearly away from it (1.6x band)
+            pv = prev[0]
+            pcx, pcy = self.raw_to_deskew(pv["globalCX"], pv["globalCY"])
+            shape = vm.shape_of(pv)
+            dist, inside = vm.boundary_distance(shape, gx - pcx, gy - pcy, pv["radiusX"], pv["radiusY"],
+                                                vm.p_of(pv) if shape == "curve" else 2.0)
+            if any(pv is x for x in vm.voids.get(self.current_layer, [])) and dist <= 1.6 * margin and (v is None or v is pv):
+                v, action = pv, "edge"
         if v is None:
+            # Ghost (other layer) voids also highlight (Q moves them here)
+            for layer in vm.voids:
+                if layer != self.current_layer:
+                    g, _ = vm.hit_test(layer, gx, gy, margin=margin, coord_transform=self.raw_to_deskew, quadrant_ctx=ctx)
+                    if g is not None:
+                        v, action = g, None
+                        break
+
+        axis = None
+        if v is not None and action == "edge":
+            axis = self._grab_axis(v, gx, gy, prev[2] if (prev and prev[0] is v and prev[1] == "edge") else "unset")
+        state = (v, action, axis)
+        if v is not self.hover_void:
+            self.hover_void = v
+            self.update()
+        self._hover_state = state
+
+        if self.void_mode != "EDIT":
+            return
+        if v is None or action is None:
             shape = Qt.ArrowCursor
-        elif action == 'center':
+        elif action == "center":
             shape = Qt.SizeAllCursor
+        elif axis == "x":
+            shape = Qt.SizeHorCursor
+        elif axis == "y":
+            shape = Qt.SizeVerCursor
         else:
-            fx, fy = self._resize_anchor_for(v, gx, gy)
-            if fx is not None and fy is not None:
-                cx, cy = self.raw_to_deskew(v["globalCX"], v["globalCY"])
-                shape = Qt.SizeFDiagCursor if (gx - cx) * (gy - cy) > 0 else Qt.SizeBDiagCursor
-            elif fx is not None:
-                shape = Qt.SizeHorCursor
-            else:
-                shape = Qt.SizeVerCursor
+            cx, cy = self.raw_to_deskew(v["globalCX"], v["globalCY"])
+            shape = Qt.SizeFDiagCursor if (gx - cx) * (gy - cy) > 0 else Qt.SizeBDiagCursor
         if self.cursor().shape() != shape:
             self.setCursor(shape)
+
+    def _grab_axis(self, v, gx, gy, prev_axis="unset"):
+        """
+        Resize direction for a grab at (gx, gy) on the outline: "x", "y" or None (both / uniform),
+        the same rule the resize uses. With prev_axis, a wider threshold keeps the previous
+        direction (hysteresis).
+        """
+        vm = self.void_manager
+        shape = vm.shape_of(v)
+        p = vm.p_of(v) if shape == "curve" else 2.0
+        cx, cy = self.raw_to_deskew(v["globalCX"], v["globalCY"])
+        ux = abs(gx - cx) / max(v["radiusX"], 1e-9)
+        uy = abs(gy - cy) / max(v["radiusY"], 1e-9)
+        if shape == "rectangle":
+            bx, by = min(ux, 1.0), min(uy, 1.0)
+            corner = 0.70 if prev_axis is None else 0.80 # Corner zone: both axes
+            if bx > corner and by > corner:
+                return None
+            if prev_axis in ("x", "y") and abs(bx - by) < 0.1:
+                return prev_axis
+            return "x" if bx >= by else "y"
+        t = (ux ** p + uy ** p) ** (1.0 / p) or 1.0
+        bx, by = ux / t, uy / t
+        lo = {"x": 0.47, "y": 0.47}.get(prev_axis, 0.40)
+        if by < (lo if prev_axis == "x" else 0.40):
+            return "x"
+        if bx < (lo if prev_axis == "y" else 0.40):
+            return "y"
+        return None
 
     view_center_changed = Signal(int, int) # Col, Row
 
@@ -948,10 +1018,18 @@ class GLImageWidget(QOpenGLWidget):
              vm = self.void_manager
              refs = vm.reference_bboxes(self.grid_cfg, self.coord_transform)
 
+             vw, vh = self.width(), self.height()
+             hover = self.hover_void
+
              def paint(v, style):
                  # Raw (storage) -> Deskewed (visual, applies the grid rotation) -> Screen
                  dx, dy = self.raw_to_deskew(v["globalCX"], v["globalCY"])
                  sx, sy = self.deskew_to_screen(dx, dy)
+                 rr = max(v["radiusX"], v["radiusY"]) * self.zoom + 2
+                 if sx + rr < 0 or sy + rr < 0 or sx - rr > vw or sy - rr > vh:
+                     return # Off screen
+                 if v is hover and style != "active":
+                     style = "hover"
                  vm.paint_void(painter, v, sx, sy, self.zoom, style=style,
                                quadrant=vm.quadrant_of(v, dx, dy, refs, self.grid_cfg))
 
@@ -1028,7 +1106,12 @@ class GLImageWidget(QOpenGLWidget):
         painter.setBrush(Qt.NoBrush)
 
         refs = self.void_manager.reference_bboxes(self.grid_cfg, self.coord_transform)
+        vw, vh = self.width(), self.height()
         for (x0, y0, w, h) in refs.values():
+            s0 = self.deskew_to_screen(x0, y0)
+            s1 = self.deskew_to_screen(x0 + w, y0 + h)
+            if max(s0[0], s1[0]) < 0 or max(s0[1], s1[1]) < 0 or min(s0[0], s1[0]) > vw or min(s0[1], s1[1]) > vh:
+                continue # Off screen
             dw, dh = layout.get("design_size", (w, h))
             sx, sy = w / dw, h / dh
             for (bx, by, bw, bh) in boxes:
@@ -1072,15 +1155,12 @@ class GLImageWidget(QOpenGLWidget):
             # Pan in every mode
             self._last_mouse = e.position()
             self._pan_only = True
-            self.setCursor(Qt.ClosedHandCursor)
             self.setFocus()
             return
         if e.button() == Qt.LeftButton:
             self._last_mouse = e.position()
             self._pan_only = False
             self.setFocus()
-            if not self.void_mode:
-                self.setCursor(Qt.ClosedHandCursor) # View mode: left drag pans
             
             # Void Interaction (one undo step per press .. release)
             if self.void_mode and self.void_manager and self.tiled_image:
@@ -1102,8 +1182,8 @@ class GLImageWidget(QOpenGLWidget):
                         def_h = 0
                         
                         shape = "ellipse"
-                        if self.active_type_id in self.void_manager.types:
-                             tdata = self.void_manager.types[self.active_type_id]
+                        if self.active_type in self.void_manager.types:
+                             tdata = self.void_manager.types[self.active_type]
                              shape = tdata.get("shape", "ellipse")
                              def_w = tdata.get("def_w", 0)
                              def_h = tdata.get("def_h", 0)
@@ -1123,7 +1203,7 @@ class GLImageWidget(QOpenGLWidget):
                                 cx_raw, cy_raw = self.deskew_to_raw(cx_deskew, cy_deskew)
                                 
                                 # Store Center. radiusX = Half-Width
-                                self.active_void = self.void_manager.add_void(self.current_layer, cx_raw, cy_raw, def_w/2.0, def_h/2.0, self.active_type_id)
+                                self.active_void = self.void_manager.add_void(self.current_layer, cx_raw, cy_raw, def_w/2.0, def_h/2.0, self.active_type)
                             else:
                                 # Ellipse: Schema Center, Radius
                                 # Click Point = Top-Left of Bounding Box
@@ -1133,7 +1213,7 @@ class GLImageWidget(QOpenGLWidget):
                                 cy_deskew = gy + def_h / 2.0
                                 cx_raw, cy_raw = self.deskew_to_raw(cx_deskew, cy_deskew)
                                 
-                                self.active_void = self.void_manager.add_void(self.current_layer, cx_raw, cy_raw, def_w/2.0, def_h/2.0, self.active_type_id)
+                                self.active_void = self.void_manager.add_void(self.current_layer, cx_raw, cy_raw, def_w/2.0, def_h/2.0, self.active_type)
                                 
                             # Snap types: attach to the bbox corner nearest to the click
                             self._snap_hint = (gx, gy)
@@ -1146,7 +1226,7 @@ class GLImageWidget(QOpenGLWidget):
                             # Drag-to-Size
                             # Initialize 1x1 void
                             # Center/Pos is rx, ry
-                            self.active_void = self.void_manager.add_void(self.current_layer, rx, ry, 1.0, 1.0, self.active_type_id)
+                            self.active_void = self.void_manager.add_void(self.current_layer, rx, ry, 1.0, 1.0, self.active_type)
                             self.active_void_action = 'sizing'
                             self._snap_hint = (gx, gy) # Snap types: corner nearest to the press point
 
@@ -1190,8 +1270,7 @@ class GLImageWidget(QOpenGLWidget):
 
         if self._last_mouse is None:
             # Hover only
-            if self.void_mode == "EDIT":
-                self._update_edit_hover_cursor(gx, gy)
+            self._update_hover(gx, gy)
             return
             
             
@@ -1200,6 +1279,7 @@ class GLImageWidget(QOpenGLWidget):
         
         # Void Interaction
         if self.void_mode and self.active_void_action and not getattr(self, '_pan_only', False):
+             self.void_manager.touch() # Fields are edited directly below
              # Handle Drag
              gx, gy = self.get_image_coords(e.position())
              
@@ -1208,7 +1288,7 @@ class GLImageWidget(QOpenGLWidget):
                  start_x = getattr(self, '_void_start_gx', gx)
                  start_y = getattr(self, '_void_start_gy', gy)
                  
-                 shape = self.void_manager.types.get(self.active_void.get("type_id", 0), {}).get("shape", "ellipse")
+                 shape = self.void_manager.shape_of(self.active_void)
                  
                  if shape == "rectangle":
                      # Rectangle Sizing: Defined by Center and Radii
@@ -1284,7 +1364,7 @@ class GLImageWidget(QOpenGLWidget):
                  self.update()
                  
              elif self.active_void_action == 'edge' and self.active_void:
-                 shape = self.void_manager.types.get(self.active_void.get("type_id", 0), {}).get("shape", "ellipse")
+                 shape = self.void_manager.shape_of(self.active_void)
                  
                  # Get Center in Deskewed Space (Reference)
                  cx_deskew, cy_deskew = self.raw_to_deskew(self.active_void["globalCX"], self.active_void["globalCY"])
@@ -1363,15 +1443,15 @@ class GLImageWidget(QOpenGLWidget):
         q = vm.quadrant_of(v, cx, cy, *self._quadrant_ctx())
         dx, dy = gx - cx, gy - cy
 
-        # Grabbed point on the unit outline
+        # Grabbed point on the unit outline; the direction shown by the hover cursor
         ux, uy = abs(dx) / max(rx, 1e-9), abs(dy) / max(ry, 1e-9)
         if shape == "rectangle":
             bx, by = min(ux, 1.0), min(uy, 1.0)
-            axis = None if (bx > 0.75 and by > 0.75) else ("x" if bx >= by else "y")
         else:
             t = (ux ** p + uy ** p) ** (1.0 / p) or 1.0
             bx, by = ux / t, uy / t
-            axis = "x" if by < 0.4 else ("y" if bx < 0.4 else None)
+        hs = self._hover_state
+        axis = hs[2] if (hs and hs[0] is v and hs[1] == "edge") else self._grab_axis(v, gx, gy)
 
         if q:
             return {"kind": "quadrant", "q": q, "c": (cx, cy), "r0": (rx, ry), "p": p, "axis": axis, "shape": shape}
@@ -1450,8 +1530,10 @@ class GLImageWidget(QOpenGLWidget):
                     self.void_manager.remove_void(self.current_layer, self.active_void)
         
         changed = self._end_void_change()
-        if not self.void_mode:
-            self.setCursor(Qt.OpenHandCursor)
+        if self._pending_tool is not False:
+            tool, self._pending_tool = self._pending_tool, False
+            self.active_void_action = None
+            self.set_void_tool(tool)
         if self.void_mode or self.active_void_action:
             self.active_void = None
             self.active_void_action = None
@@ -1475,12 +1557,41 @@ class GLImageWidget(QOpenGLWidget):
     
     def set_void_tool(self, tool_name):
         """Activates a marking tool ("DRAW" / "EDIT" / "ERASE"), or None for view mode."""
-        if self.active_void_action:
-            return # Not in the middle of a drag
+        if self.active_void_action or getattr(self, '_void_txn', False):
+            self._pending_tool = tool_name # Applied when the drag ends
+            return
         if tool_name:
             self.selected_void_tool = tool_name
         self.void_mode = tool_name or False
         self.update_cursor_style()
+        self.update()
+
+    def type_number_key(self, digit):
+        if not self.void_manager:
+            return
+        names = list(self.void_manager.types)
+        now = time.monotonic()
+        combined = self._digits + str(digit)
+        if self._digits and now - self._digit_time < 0.4 and 1 <= int(combined) <= len(names):
+            self._digits = combined # Second digit of the same number
+        else:
+            self._digits = str(digit)
+            self._number_started = now
+        self._digit_time = now
+        number = int(self._digits) or 10
+        if not 1 <= number <= len(names):
+            return
+        name = names[number - 1]
+        if self.hover_void is not None:
+            # The digits of one number are one undo step
+            if self.void_manager.set_void_type(self.hover_void, name,
+                                               coalesce_key=("type", id(self.hover_void), self._number_started)):
+                self.voids_changed.emit()
+        else:
+            self.active_type = name
+            self.void_type_shortcut_triggered.emit(name) # Sync UI
+            if self.void_mode:
+                self.update_cursor_style()
         self.update()
 
     def keyPressEvent(self, e):
@@ -1515,33 +1626,12 @@ class GLImageWidget(QOpenGLWidget):
                 self.update()
                 return
         
-        # Shortcuts for Void Types (No Modifier or Shift is OK)
-        # 1-9 -> Index 0-8
-        # 0 -> Index 9
+        # Type numbers (declaration order, 1-based; 0 alone = 10). Digits typed within 0.4 s
+        # form a two-digit number. Over a void: change its type; else: the type to draw with.
         key = e.key()
         if Qt.Key_0 <= key <= Qt.Key_9:
-             idx = -1
-             if key == Qt.Key_0: idx = 9
-             else: idx = key - Qt.Key_1
-             
-             if idx >= 0 and self.void_manager:
-                 types = sorted(self.void_manager.types.keys())
-                 if idx < len(types):
-                     new_id = types[idx]
-                     self.active_type_id = new_id
-                     print(f"Shortcut: Switch to Void Type ID {new_id}")
-                     
-                     # Emit Signal to sync UI
-                     self.void_type_shortcut_triggered.emit(new_id)
-                     
-                     # Update Cursor if needed
-                     if self.void_mode:
-                         self.update_cursor_style()
-                     
-                     self.update()
-                     
-             # Don't return, allow other handlers (though digits usually don't do nav)
-             return
+            self.type_number_key(key - Qt.Key_0)
+            return
         
         # 2. Plain Arrows
         # Left/Right: Navigate Patch

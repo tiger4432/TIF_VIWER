@@ -28,7 +28,6 @@ JSON_FIELDS = {
     "layer": "layer",
     "void_index": "voidIndex",
     "type": "type",
-    "type_id": "type_id",
     "center_x": "centerX",
     "center_y": "centerY",
     "radius_x": "radiusX",
