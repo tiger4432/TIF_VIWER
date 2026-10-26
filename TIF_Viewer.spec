@@ -13,7 +13,9 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter"],
+    # Not used by the app. setuptools/pkg_resources would add a runtime hook that fails in the
+    # frozen exe (setuptools 7x: "No module named 'backports'").
+    excludes=["tkinter", "setuptools", "pkg_resources", "distutils", "_distutils_hack"],
     noarchive=False,
 )
 pyz = PYZ(a.pure)
