@@ -64,6 +64,9 @@ class Tile:
             GL_RED, gl_type, data
         )
 
+        # Restore the default: Qt uploads its glyph textures (overlay text) with this state
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 4)
+
         self.is_uploaded = True
         self.nbytes = data.nbytes
 
@@ -591,6 +594,13 @@ class GLImageWidget(QOpenGLWidget):
             glUniform2f(glGetUniformLocation(self.prog, "tileSize"), tile.w, tile.h)
             
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4)
+
+        # Leave a clean GL state for the QPainter overlay drawn afterwards (text uses glyph textures)
+        for unit in (GL_TEXTURE2, GL_TEXTURE1, GL_TEXTURE0):
+            glActiveTexture(unit)
+            glBindTexture(GL_TEXTURE_2D, 0)
+        glBindVertexArray(0)
+        glUseProgram(0)
             
     # -----------------------------------------------
     # Coordinate Transforms (Deskew Logic)
@@ -911,7 +921,36 @@ class GLImageWidget(QOpenGLWidget):
              for v in vm.voids.get(self.current_layer, []):
                  paint(v, "active" if v is active else "normal")
 
+
+             # Center cell info (top-left, yellow)
+             self._draw_center_info(painter)
              painter.end()
+
+    def center_cell(self):
+        """(row, col) of the grid cell at the view center (grid space = Deskewed)."""
+        if self.coord_transform:
+            img_cx, img_cy = self.coord_transform.img_cx, self.coord_transform.img_cy
+        else:
+            img_cx, img_cy = 500, 500
+        return self.grid_cfg.cell_at(img_cx - self.pan_x, img_cy - self.pan_y)
+
+    def _draw_center_info(self, painter):
+        r, c = self.center_cell()
+        if not self.grid_cfg.contains(r, c):
+            text = "X: -  Y: -  LEG: -"
+        else:
+            leg = self.bonding_map.get_key(r, c) if self.bonding_map else ""
+            text = f"X: {c:02d}  Y: {r:02d}  LEG: {leg or '-'}"
+        font = painter.font()
+        font.setPixelSize(18)
+        font.setBold(True)
+        painter.setFont(font)
+        # Dark outline for readability on bright images
+        painter.setPen(QColor(0, 0, 0, 200))
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (1, 1)):
+            painter.drawText(QPointF(12 + dx, 28 + dy), text)
+        painter.setPen(QColor(255, 255, 0))
+        painter.drawText(QPointF(12, 28), text)
 
     def deskew_to_screen(self, dx, dy):
         """Deskewed (grid space) point -> widget pixel position."""

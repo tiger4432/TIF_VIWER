@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QSpinBox, QSlider, QLabel, QToolBar, QDockWidget, QGroupBox,
     QFormLayout, QPushButton, QDoubleSpinBox, QPlainTextEdit,
     QFileDialog, QProgressDialog, QCheckBox, QRadioButton,
-    QButtonGroup, QComboBox, QDialog, QScrollArea, QMessageBox
+    QButtonGroup, QComboBox, QDialog, QScrollArea, QMessageBox, QLineEdit
 )
 from PySide6.QtGui import QSurfaceFormat, QAction, QImage, QPainter, QKeySequence
 from PySide6.QtCore import Qt, QTimer
@@ -25,6 +25,7 @@ from sat_widgets.gl_widget import GLImageWidget, TiledImage
 from sat_widgets.exporter import ExportManager
 from sat_widgets.patch_viewer import PatchViewer
 from sat_widgets.roi_inspector import ROIInspector
+from sat_widgets.angle_preview import AnglePreview
 from sat_widgets.products import load_products, GRID_KEYS
 from sat_widgets.app_paths import declaration_path, sync_declarations, default_update_manifest
 from sat_widgets.version import APP_VERSION
@@ -154,6 +155,12 @@ class MainWindow(QMainWindow):
         self.slider_opacity.setValue(50)
         form.addRow("Opacity:", self.slider_opacity)
         
+        # Angle alignment preview (cells spread over the wafer)
+        self.angle_preview = None
+        btn_angle_preview = QPushButton("Angle Preview...")
+        btn_angle_preview.clicked.connect(self.open_angle_preview)
+        form.addRow(btn_angle_preview)
+        
         # Connect signals
         for w in [self.sb_grid_x, self.sb_grid_y, self.sb_pitch_x, self.sb_pitch_y, self.sb_angle]:
             w.valueChanged.connect(self.update_grid_params)
@@ -186,6 +193,17 @@ class MainWindow(QMainWindow):
         # 2. Bonding Map Paste
         gb_map = QGroupBox("Bonding Map (Paste Excel)")
         v_map = QVBoxLayout(gb_map)
+        
+        # Map values to exclude (treated as not bonded), comma separated
+        h_reject = QHBoxLayout()
+        h_reject.addWidget(QLabel("Reject Values:"))
+        self.le_reject = QLineEdit()
+        self.le_reject.setPlaceholderText("e.g. X, NG, 0")
+        self.le_reject.setToolTip("Bonding map values to exclude, comma separated. Press Enter to apply.")
+        self.le_reject.editingFinished.connect(self.import_map_data)
+        h_reject.addWidget(self.le_reject, 1)
+        v_map.addLayout(h_reject)
+        
         self.txt_map = QPlainTextEdit()
         self.txt_map.setPlaceholderText("Paste grid data here (tab separated)...")
         v_map.addWidget(self.txt_map)
@@ -526,6 +544,16 @@ class MainWindow(QMainWindow):
              pass
              # self.calib_timer.start(200) # 200ms debounce
 
+    def open_angle_preview(self):
+        if self.angle_preview is None:
+            self.angle_preview = AnglePreview(self)
+        self.angle_preview.show()
+        self.angle_preview.raise_()
+
+    def _refresh_angle_preview(self):
+        if getattr(self, 'angle_preview', None) is not None:
+            self.angle_preview.schedule_update()
+
     def update_rois(self):
         """
         Pre-calculate ROIs for all (bonded) chips in Raw Image Coordinates.
@@ -590,6 +618,8 @@ class MainWindow(QMainWindow):
              pass
              # self.calib_timer.start(200) # 200ms debounce
 
+        self._refresh_angle_preview()
+
     def on_layer_wheel_scroll(self, delta):
         # delta is +1 or -1
         if not self.spin_layer.isEnabled():
@@ -601,13 +631,16 @@ class MainWindow(QMainWindow):
         new_val = max(self.spin_layer.minimum(), min(self.spin_layer.maximum(), new_val))
         self.spin_layer.setValue(new_val)
 
+    def reject_values(self):
+        return [v.strip() for v in self.le_reject.text().split(",") if v.strip()]
+
     def import_map_data(self):
         text = self.txt_map.toPlainText()
         if not text.strip():
             return
             
         bmap = BondingMap()
-        bmap.parse_text(text)
+        bmap.parse_text(text, self.reject_values())
         
         if bmap.rows > 0 and bmap.cols > 0:
             self.glw.bonding_map = bmap
@@ -621,7 +654,7 @@ class MainWindow(QMainWindow):
             if not self.chk_grid_show.isChecked():
                 self.chk_grid_show.setChecked(True)
                 
-            print(f"Map Imported: {bmap.rows}x{bmap.cols}, Unique Keys: {len(bmap.data_map)}")
+            print(f"Map Imported: {bmap.rows}x{bmap.cols}, Values: {len(bmap.unique_keys)}, Rejected: {self.reject_values()}")
             
             # Update ROIs
             self.update_rois()
@@ -1097,11 +1130,13 @@ class MainWindow(QMainWindow):
 
         self.load_layer(val)
         self.update_void_ui()
+        self._refresh_angle_preview()
 
     def on_window_changed(self):
         self.glw.win_lo = self.slider_lo.value()
         self.glw.win_hi = self.slider_hi.value()
         self.glw.update()
+        self._refresh_angle_preview()
         
     def toggle_calib(self, checked):
         self.chk_use_calib.setText(f"Enable Auto-Calib: {'ON' if checked else 'OFF'}")

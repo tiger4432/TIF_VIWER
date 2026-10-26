@@ -514,7 +514,12 @@ class BondingMap:
             (128, 0, 255), (255, 0, 128), (128, 128, 128)
         ]
 
-    def parse_text(self, text: str):
+    def parse_text(self, text: str, reject_values=()):
+        """
+        Parses a pasted (tab separated) map. Cells whose value is in reject_values are treated
+        as not bonded (empty), so they are skipped everywhere a bonded cell is required.
+        """
+        reject = {str(v).strip() for v in reject_values if str(v).strip()}
         lines = text.strip().split('\n')
         if not lines: return
 
@@ -565,6 +570,7 @@ class BondingMap:
         
         self.data_map = []
         for r_idx, row_data in enumerate(extracted_rows):
+            row_data = ["" if v in reject else v for v in row_data]
             padded = row_data + [""] * (max_cols - len(row_data))
             self.data_map.append(padded)
             for val in padded:
