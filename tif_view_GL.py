@@ -167,10 +167,7 @@ class MainWindow(QMainWindow):
         form.addRow("Opacity:", self.slider_opacity)
         
         # Angle alignment preview (cells spread over the wafer)
-        self.angle_preview = None
-        btn_angle_preview = QPushButton("Angle Preview...")
-        btn_angle_preview.clicked.connect(self.open_angle_preview)
-        form.addRow(btn_angle_preview)
+        self.angle_preview = None # Always-visible dock, created at the end of __init__
         
         # Connect signals
         for w in [self.sb_grid_x, self.sb_grid_y, self.sb_pitch_x, self.sb_pitch_y, self.sb_angle]:
@@ -241,8 +238,7 @@ class MainWindow(QMainWindow):
         btn_inspect_rois = QPushButton("Inspect ROIs (Debug)")
         btn_inspect_rois.clicked.connect(self.open_roi_inspector)
         v_ext.addWidget(btn_inspect_rois)
-        # v_ext.addWidget(btn_extract) # Duplicate in original?
-        dock_layout.addWidget(gb_extract)
+        # (added at the bottom of the dock, below Void Marking)
         
         # 3.2 Coordinate Display & Navigation
         gb_coord = QGroupBox("Coordinates & Navigation")
@@ -348,18 +344,6 @@ class MainWindow(QMainWindow):
         v_layout_void.addLayout(h_layout_void_btns)
         v_layout_void.addWidget(self.btn_clear_voids)
         
-        # Automatic reference bboxes (topmost layer) and review of estimated ones
-        h_auto = QHBoxLayout()
-        btn_auto_bbox = QPushButton("Auto BBOX")
-        btn_auto_bbox.setToolTip("Detect the package edges of every (bonded) cell on the topmost layer and draw the bbox (declared size, detected center)")
-        btn_auto_bbox.clicked.connect(self.auto_bbox)
-        btn_next_est = QPushButton("Next Estimated")
-        btn_next_est.setToolTip("Go to the next bbox that was estimated because detection failed (drawn dashed)")
-        btn_next_est.clicked.connect(self.next_estimated_bbox)
-        h_auto.addWidget(btn_auto_bbox)
-        h_auto.addWidget(btn_next_est)
-        v_layout_void.addLayout(h_auto)
-        
         dock_layout.addWidget(self.gb_void)
         
         # Init Types
@@ -377,10 +361,9 @@ class MainWindow(QMainWindow):
         self.action_void_view.triggered.connect(self.set_void_mode_view)
         self.addAction(self.action_void_view)
 
+        # Q (handled in eventFilter, like the mode keys: works whatever widget has the focus)
         self.action_void_to_layer = QAction("Move Hovered Void To Current Layer", self)
-        self.action_void_to_layer.setShortcut("q")
         self.action_void_to_layer.triggered.connect(self.glw.move_hovered_void_to_current_layer)
-        self.addAction(self.action_void_to_layer)
 
 
         
@@ -402,14 +385,16 @@ class MainWindow(QMainWindow):
         self.chk_use_calib.toggled.connect(self.toggle_calib)
         form_calib.addRow(self.chk_use_calib)
         
-        self.chk_calib_robust = QPushButton("Rboust Mode (Ignore Voids): OFF")
+        self.chk_calib_robust = QPushButton("Robust Mode (Ignore Voids): ON")
         self.chk_calib_robust.setCheckable(True)
+        self.chk_calib_robust.setChecked(True)
         self.chk_calib_robust.clicked.connect(lambda c: self.chk_calib_robust.setText(f"Robust Mode (Ignore Voids): {'ON' if c else 'OFF'}"))
         self.chk_calib_robust.clicked.connect(self.calculate_calibration)
         form_calib.addRow(self.chk_calib_robust)
         
-        self.chk_calib_all = QPushButton("Apply to All Layers: OFF")
+        self.chk_calib_all = QPushButton("Apply to All Layers: ON")
         self.chk_calib_all.setCheckable(True)
+        self.chk_calib_all.setChecked(True)
         self.chk_calib_all.clicked.connect(lambda c: self.chk_calib_all.setText(f"Apply to All Layers: {'ON' if c else 'OFF'}"))
         form_calib.addRow(self.chk_calib_all)
         
@@ -421,12 +406,22 @@ class MainWindow(QMainWindow):
         btn_recalc = QPushButton("Recalculate")
         btn_recalc.clicked.connect(self.calculate_calibration)
         form_calib.addRow(btn_recalc)
-        
-        dock_layout.addWidget(gb_calib)
-        
 
-        dock_layout.addWidget(gb_calib)
-        
+        # Reference bboxes (topmost layer) and review of the estimated ones
+        h_auto = QHBoxLayout()
+        btn_auto_bbox = QPushButton("Detect BBOX")
+        btn_auto_bbox.setToolTip("Detect the package edges of every (bonded) cell on the topmost layer and draw the bbox (declared size, detected center)")
+        btn_auto_bbox.clicked.connect(self.auto_bbox)
+        btn_next_est = QPushButton("Next Estimated")
+        btn_next_est.setToolTip("Go to the next bbox that was estimated because detection failed (drawn dashed)")
+        btn_next_est.clicked.connect(self.next_estimated_bbox)
+        h_auto.addWidget(btn_auto_bbox)
+        h_auto.addWidget(btn_next_est)
+        form_calib.addRow(h_auto)
+
+        # Panel order: ... Bonding Map, Auto Calibration, Coordinates, Void Marking, Extraction
+        dock_layout.insertWidget(dock_layout.indexOf(gb_map) + 1, gb_calib)
+        dock_layout.addWidget(gb_extract)
         dock_layout.addStretch()
         
 
@@ -451,6 +446,8 @@ class MainWindow(QMainWindow):
         if self.cb_product.count() > 0:
             self.apply_product(self.cb_product.currentText())
         
+        self._create_angle_preview()
+
         # Newer build available? (location declared in config.json "update.manifest")
         manifest = self._config().get("update", {}).get("manifest") or default_update_manifest()
         self.update_checker = UpdateChecker(APP_VERSION, manifest, self)
@@ -535,7 +532,7 @@ class MainWindow(QMainWindow):
         """
         Default size of the bbox type (session only, not written to config.json):
         chip_size_um / scale, or the legacy "bbox": {"w", "h"} in pixels.
-        No scale -> 0 (drag to size; Auto BBOX uses the detected size).
+        No scale -> 0 (drag to size; Detect BBOX uses the detected size).
         """
         prod = getattr(self, "current_product", None) or {}
         chip = prod.get("chip_size_um")
@@ -561,7 +558,7 @@ class MainWindow(QMainWindow):
     def undo_void_change(self):
         if self.void_manager.undo():
             self.glw.active_void = None
-            self.glw.update()
+            self.glw.refresh_hover() # Undo restores copies of the voids
             self.update_void_ui()
 
     def toggle_grid(self, checked):
@@ -607,11 +604,15 @@ class MainWindow(QMainWindow):
              pass
              # self.calib_timer.start(200) # 200ms debounce
 
-    def open_angle_preview(self):
-        if self.angle_preview is None:
-            self.angle_preview = AnglePreview(self)
-        self.angle_preview.show()
-        self.angle_preview.raise_()
+    def _create_angle_preview(self):
+        """Angle preview: always visible in its own dock (left)."""
+        self.angle_preview = AnglePreview(self)
+        dock = QDockWidget("Angle Preview", self)
+        dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        dock.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
+        dock.setWidget(self.angle_preview)
+        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
+        self.angle_dock = dock
 
     def _refresh_angle_preview(self):
         if getattr(self, 'angle_preview', None) is not None:
@@ -889,7 +890,7 @@ class MainWindow(QMainWindow):
     def eventFilter(self, obj, ev):
         # Application-wide, so the keys work whatever widget of this window has the focus.
         # W / E / R: the mode is active only while its key is held (last held key wins).
-        # Digits: type number (gl_widget.type_number_key).
+        # Digits: type number (gl_widget.type_number_key). Q: move the hovered void here.
         et = ev.type()
         if et in (QEvent.KeyPress, QEvent.KeyRelease) and isinstance(obj, QWidget) and obj.window() is self:
             key = ev.key()
@@ -906,6 +907,10 @@ class MainWindow(QMainWindow):
             if et == QEvent.KeyPress and Qt.Key_0 <= key <= Qt.Key_9 and plain and not self._typing(obj):
                 if not ev.isAutoRepeat():
                     self.glw.type_number_key(key - Qt.Key_0)
+                return True
+            if et == QEvent.KeyPress and key == Qt.Key_Q and plain and not self._typing(obj):
+                if not ev.isAutoRepeat():
+                    self.action_void_to_layer.trigger()
                 return True
         return super().eventFilter(obj, ev)
 
@@ -930,6 +935,7 @@ class MainWindow(QMainWindow):
         if path:
             self.void_manager.load_from_file(path, self.glw.grid_cfg, self.glw.coord_transform, self.layer_offset)
             self._scale_from_file()
+            self.glw.refresh_hover()
             self.populate_void_types() # Refresh types
             self.update_void_ui()
             self.glw.update()
@@ -1008,7 +1014,7 @@ class MainWindow(QMainWindow):
             return
         tid = self._bbox_type_name()
         if tid is None:
-            QMessageBox.warning(self, "Auto BBOX", "No void type named 'bbox' is declared in config.json.")
+            QMessageBox.warning(self, "Detect BBOX", "No void type named 'bbox' is declared in config.json.")
             return
         t = self.void_manager.types[tid]
         size = (t["def_w"], t["def_h"]) if t.get("def_w", 0) > 0 and t.get("def_h", 0) > 0 else None
@@ -1034,17 +1040,17 @@ class MainWindow(QMainWindow):
             return
         self.glw.update()
         self.update_void_ui()
-        msg = (f"Auto BBOX on layer {top_layer}: {result['detected']} detected, "
+        msg = (f"Detect BBOX on layer {top_layer}: {result['detected']} detected, "
                f"{len(result['estimated'])} estimated (dashed, check with 'Next Estimated'), "
                f"{len(result['failed'])} failed")
         self.statusBar().showMessage(msg)
         print(msg)
         if result["failed"] and not result["detected"]:
-            QMessageBox.warning(self, "Auto BBOX", "No box edge could be detected. Check the grid origin/pitch "
+            QMessageBox.warning(self, "Detect BBOX", "No box edge could be detected. Check the grid origin/pitch "
                                 "and the bbox size, or adjust auto_bbox in config.json.")
 
     def next_estimated_bbox(self):
-        """Navigates through the bboxes estimated by Auto BBOX (row-major order)."""
+        """Navigates through the bboxes estimated by Detect BBOX (row-major order)."""
         cfg = self.glw.grid_cfg
         cells = sorted({self.glw.raw_to_cell(v["globalCX"], v["globalCY"])
                         for vs in self.void_manager.voids.values() for v in vs if v.get("auto") == "estimated"})
@@ -1279,6 +1285,7 @@ class MainWindow(QMainWindow):
         self.spin_layer.setSuffix(f" (Abs: {abs_layer})")
 
         self.load_layer(val)
+        self.glw.refresh_hover()
         self.update_void_ui()
         self._refresh_angle_preview()
 

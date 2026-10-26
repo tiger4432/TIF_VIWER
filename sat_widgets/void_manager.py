@@ -12,6 +12,7 @@ from PySide6.QtCore import Qt, Signal, QRectF, QPointF
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 
 from . import output_columns
+from .products import layout_boxes
 
 # ==================================================================================
 # Void Data Manager
@@ -214,6 +215,35 @@ class VoidManager:
             # Remap existing voids to the first remaining type
             for v in affected:
                 v["type"] = fallback
+
+    def paint_layout(self, painter: QPainter, bbox, to_paint):
+        """
+        Draws the selected product's layout (dashed sub-boxes, see products.json) inside a reference
+        bbox (x0, y0, w, h) in Deskewed space; to_paint(x, y) maps Deskewed -> painter coordinates.
+        The layout is scaled from its design size to the bbox (the drawn bbox is the reference).
+        """
+        layout = self.layout
+        if not layout:
+            return
+        boxes = layout_boxes(layout)
+        if not boxes:
+            return
+        style = layout.get("style", {})
+        col = style.get("color", [0, 200, 255])
+        pen = QPen(QColor(col[0], col[1], col[2], style.get("alpha", 200)))
+        pen.setWidthF(style.get("width", 1.0))
+        dash = style.get("dash", [4, 4])
+        if dash:
+            pen.setDashPattern(dash)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        x0, y0, w, h = bbox
+        dw, dh = layout.get("design_size", (w, h))
+        sx, sy = w / dw, h / dh
+        for (bx, by, bw, bh) in boxes:
+            p0 = to_paint(x0 + bx * sx, y0 + by * sy)
+            p1 = to_paint(x0 + (bx + bw) * sx, y0 + (by + bh) * sy)
+            painter.drawRect(QRectF(QPointF(*p0), QPointF(*p1)))
 
     def paint_void(self, painter: QPainter, v, cx, cy, scale=1.0, style="normal", width=1.0, quadrant=None):
         """

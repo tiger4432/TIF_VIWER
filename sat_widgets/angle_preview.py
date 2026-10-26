@@ -22,7 +22,7 @@ import numpy as np
 from PIL import Image
 from PySide6.QtCore import Qt, QTimer, QRectF, QPointF, Signal
 from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor
-from PySide6.QtWidgets import QDialog, QGridLayout, QLabel, QVBoxLayout, QWidget, QSizePolicy
+from PySide6.QtWidgets import QGridLayout, QLabel, QVBoxLayout, QWidget, QSizePolicy
 
 from .core_data import ImageNormalizer, to_uint16
 from .products import layout_boxes
@@ -103,9 +103,10 @@ class _Tile(QWidget):
         self.image.setPixmap(pixmap)
 
 
-class AnglePreview(QDialog):
+class AnglePreview(QWidget):
     """
-    Non-modal 2x2 preview; call schedule_update() whenever grid, layer or window changes.
+    2x2 preview shown in a dock of the main window; call schedule_update() whenever grid, layer or
+    window changes.
 
     Fast path (target < 30 ms per update): the raw region around each preview cell is read once
     with a one-pitch margin and kept in memory; angle / origin / window changes only re-warp it at
@@ -114,8 +115,7 @@ class AnglePreview(QDialog):
 
     def __init__(self, main_window):
         super().__init__(main_window)
-        self.setWindowTitle("Angle Preview")
-        self.resize(760, 800)
+        self.setMinimumWidth(320)
         self.mw = main_window
 
         lay = QVBoxLayout(self)
@@ -152,7 +152,7 @@ class AnglePreview(QDialog):
 
     def showEvent(self, e):
         super().showEvent(e)
-        self._settings_cache = None # Re-read config.json when reopened
+        self._settings_cache = None # Re-read config.json when shown again
         self.timer.start()
 
     def hideEvent(self, e):

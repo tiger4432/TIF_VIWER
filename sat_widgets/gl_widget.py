@@ -13,7 +13,6 @@ from PySide6.QtCore import Qt, Signal, QRectF, QTimer, QPointF, Slot
 from PySide6.QtWidgets import QApplication, QToolTip
 
 from .core_data import GridConfig, BondingMap, CoordinateTransform
-from .products import layout_boxes
 
 
 # ==================================================================================
@@ -933,6 +932,23 @@ class GLImageWidget(QOpenGLWidget):
         if self.cursor().shape() != shape:
             self.setCursor(shape)
 
+    def refresh_hover(self):
+        """Re-evaluates the hovered void at the mouse position (after undo, load, layer change)."""
+        self.hover_void = None
+        self._hover_state = None
+        pos = self.mapFromGlobal(QCursor.pos())
+        if self.void_manager and self.tiled_image and self.rect().contains(pos):
+            self._update_hover(*self.get_image_coords(QPointF(pos)))
+        self.update()
+
+    def _live_hover(self):
+        """The hovered void, or None; a void replaced by undo / load is re-evaluated first."""
+        hv = self.hover_void
+        if hv is not None and not any(hv is x for vs in self.void_manager.voids.values() for x in vs):
+            self.refresh_hover()
+            hv = self.hover_void
+        return hv
+
     def _grab_axis(self, v, gx, gy, prev_axis="unset"):
         """
         Resize direction for a grab at (gx, gy) on the outline: "x", "y" or None (both / uniform),
@@ -1091,22 +1107,8 @@ class GLImageWidget(QOpenGLWidget):
         cell's reference bbox. Layout coordinates are in layout.design_size units relative to the
         bbox top-left and are scaled to the actual bbox (the drawn bbox is the reference).
         """
-        layout = self.layout
-        if not layout or not self.void_manager:
+        if not self.layout or not self.void_manager:
             return
-        boxes = layout_boxes(layout)
-        if not boxes:
-            return
-        style = layout.get("style", {})
-        col = style.get("color", [0, 200, 255])
-        pen = QPen(QColor(col[0], col[1], col[2], style.get("alpha", 200)))
-        pen.setWidthF(style.get("width", 1.0))
-        dash = style.get("dash", [4, 4])
-        if dash:
-            pen.setDashPattern(dash)
-        painter.setPen(pen)
-        painter.setBrush(Qt.NoBrush)
-
         refs = self.void_manager.reference_bboxes(self.grid_cfg, self.coord_transform)
         vw, vh = self.width(), self.height()
         for (x0, y0, w, h) in refs.values():
@@ -1114,12 +1116,7 @@ class GLImageWidget(QOpenGLWidget):
             s1 = self.deskew_to_screen(x0 + w, y0 + h)
             if max(s0[0], s1[0]) < 0 or max(s0[1], s1[1]) < 0 or min(s0[0], s1[0]) > vw or min(s0[1], s1[1]) > vh:
                 continue # Off screen
-            dw, dh = layout.get("design_size", (w, h))
-            sx, sy = w / dw, h / dh
-            for (bx, by, bw, bh) in boxes:
-                p0 = self.deskew_to_screen(x0 + bx * sx, y0 + by * sy)
-                p1 = self.deskew_to_screen(x0 + (bx + bw) * sx, y0 + (by + bh) * sy)
-                painter.drawRect(QRectF(QPointF(*p0), QPointF(*p1)))
+            self.void_manager.paint_layout(painter, (x0, y0, w, h), self.deskew_to_screen)
 
     # -----------------------------------------------
     # Mouse Interaction
@@ -1588,10 +1585,10 @@ class GLImageWidget(QOpenGLWidget):
         if not 1 <= number <= len(names):
             return
         name = names[number - 1]
-        if self.hover_void is not None:
+        hv = self._live_hover()
+        if hv is not None:
             # The digits of one number are one undo step
-            if self.void_manager.set_void_type(self.hover_void, name,
-                                               coalesce_key=("type", id(self.hover_void), self._number_started)):
+            if self.void_manager.set_void_type(hv, name, coalesce_key=("type", id(hv), self._number_started)):
                 self.voids_changed.emit()
         else:
             self.active_type = name
@@ -1740,6 +1737,15 @@ class GLImageWidget(QOpenGLWidget):
         """Q: moves the void of another layer under the mouse (ghost) to the current layer."""
         if not self.void_manager or not self.tiled_image:
             return False
+        hv = self._live_hover()
+        if hv is not None:
+            layer = next((l for l, vs in self.void_manager.voids.items() if any(hv is x for x in vs)), None)
+            if layer is not None and layer != self.current_layer:
+                if self.void_manager.move_void_to_layer(hv, layer, self.current_layer):
+                    self.voids_changed.emit()
+                    self.update()
+                    return True
+                return False
         gx, gy = self.get_image_coords(QPointF(self.mapFromGlobal(QCursor.pos())))
         ctx = self._quadrant_ctx()
         for layer in sorted(self.void_manager.voids):

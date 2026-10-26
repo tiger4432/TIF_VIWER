@@ -5,12 +5,19 @@ import json
 import time
 import numpy as np
 import math
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from PySide6.QtCore import QObject, Signal, Qt, QRectF, QPointF
 from PySide6.QtGui import QImage, QPainter, QColor, QPen, QTransform, QFont
 
 from .core_data import ImageNormalizer
+
+# PNG quality for QImage.save: 80 = light zlib compression, ~3x faster to write than the
+# default for ~15 % larger files
+PNG_QUALITY = 80
+
 
 class ExportManager(QObject):
     progress_update = Signal(int, str) # Percentage, Message
@@ -43,6 +50,12 @@ class ExportManager(QObject):
         - merged:  per bonding-map value, markings of all chips with that value composited
         """
         self.stop_requested = False
+        # Image composition + PNG encoding run on worker threads (Qt releases the GIL); the
+        # main thread extracts patches (shared decode cache) and keeps the UI alive
+        self._workers = min(8, os.cpu_count() or 4)
+        self._pool = ThreadPoolExecutor(self._workers)
+        self._pending = deque()
+        self._failed = []
         
         try:
             # 1. Create subdirectories
@@ -123,23 +136,16 @@ class ExportManager(QObject):
                         # A. Raw Export (grayscale PNG)
                         if 'raw' in layer_subdirs:
                             fname = f"{basename}.png"
-                            path = os.path.join(layer_subdirs['raw'], fname)
-                            final_img = self._add_title_bar(patch_qimg, title).convertToFormat(QImage.Format_Grayscale8)
-                            if final_img.save(path):
-                                saved_rel_path = f"raw/{layer_name}/{fname}"
-                            else:
-                                print(f"Error saving {path}")
+                            self._submit(self._save_raw, patch_qimg, title, os.path.join(layer_subdirs['raw'], fname),
+                                         f"raw/{layer_name}/{fname}")
+                            saved_rel_path = f"raw/{layer_name}/{fname}"
                             
-                        # B. Overlay (Burn-in)
+                        # B. Overlay (Burn-in): voids + product layout
                         if 'overlay' in layer_subdirs:
-                            ov_img = patch_qimg.convertToFormat(QImage.Format_ARGB32)
-                            self._draw_chip_voids(ov_img, void_index, cfg, r, c, mode='overlay', current_layer=abs_layer)
                             fname = f"{basename}_overlay.png"
-                            path = os.path.join(layer_subdirs['overlay'], fname)
-                            if self._add_title_bar(ov_img, title).save(path):
-                                saved_rel_path = saved_rel_path or f"overlay/{layer_name}/{fname}"
-                            else:
-                                print(f"Error saving {path}")
+                            self._submit(self._save_overlay, patch_qimg, void_index, cfg, r, c, abs_layer, title,
+                                         os.path.join(layer_subdirs['overlay'], fname), f"overlay/{layer_name}/{fname}")
+                            saved_rel_path = saved_rel_path or f"overlay/{layer_name}/{fname}"
 
                         # Collect Metadata (Deskewed BBox for visual alignment/mosaic)
                         if saved_rel_path:
@@ -169,12 +175,9 @@ class ExportManager(QObject):
                     self._progress_step(f"Masks: chip {r}, {c}...")
 
                     if 'mask' in subdirs:
-                        img = QImage(w_pitch, h_pitch, QImage.Format_ARGB32)
-                        img.fill(Qt.transparent)
-                        self._draw_chip_voids(img, void_index, cfg, r, c, mode='mask', layers=layers)
                         path = os.path.join(subdirs['mask'], f"X{c:02d}_Y{r:02d}_LEG_{safe_label}.png")
-                        if not self._add_title_bar(img, f"X{c:02d}_Y{r:02d}_LEG:{safe_label}").save(path):
-                            print(f"Error saving mask {path}")
+                        self._submit(self._save_mask, w_pitch, h_pitch, void_index, cfg, r, c, layers,
+                                     f"X{c:02d}_Y{r:02d}_LEG:{safe_label}", path, None)
 
                     if 'merged' in subdirs:
                         img = merged_accumulators.get(safe_label)
@@ -187,12 +190,15 @@ class ExportManager(QObject):
                 if not self.stop_requested:
                     for label, img in merged_accumulators.items():
                         path = os.path.join(subdirs['merged'], f"Merged_Label_{label}.png")
-                        if not self._add_title_bar(img, f"LEG:{label}_MERGED").save(path):
-                            print(f"Error saving merged {path}")
+                        self._submit(self._save_titled, img, f"LEG:{label}_MERGED", path, None)
 
+            self._drain()
             if self.stop_requested:
                 print("Export canceled.")
                 return
+            if self._failed:
+                failed = set(self._failed)
+                patch_metadata_list = [p for p in patch_metadata_list if p["filename"] not in failed]
             
             # Save Patch Metadata (patches.json)
             if options.get('json'):
@@ -219,6 +225,49 @@ class ExportManager(QObject):
             self.error_occurred.emit(str(e))
             import traceback
             traceback.print_exc()
+        finally:
+            for f in self._pending:
+                f.cancel()
+            self._pool.shutdown(wait=True)
+            self._pending.clear()
+
+    # ---------------- worker jobs (QImage painting / PNG encoding off the main thread) ----------------
+    def _submit(self, fn, *args):
+        # Bounded queue: keeps memory flat and surfaces worker errors early
+        while len(self._pending) >= 3 * self._workers:
+            self._pending.popleft().result()
+        self._pending.append(self._pool.submit(fn, *args))
+
+    def _drain(self):
+        while self._pending:
+            f = self._pending.popleft()
+            if self.stop_requested:
+                f.cancel()
+            else:
+                f.result()
+
+    def _write(self, img, path, rel_path):
+        if not img.save(path, "PNG", PNG_QUALITY):
+            print(f"Error saving {path}")
+            if rel_path:
+                self._failed.append(rel_path)
+
+    def _save_raw(self, patch, title, path, rel_path):
+        self._write(self._add_title_bar(patch, title), path, rel_path)
+
+    def _save_overlay(self, patch, void_index, cfg, r, c, layer, title, path, rel_path):
+        img = patch.convertToFormat(QImage.Format_RGB32)
+        self._draw_chip_voids(img, void_index, cfg, r, c, mode='overlay', current_layer=layer)
+        self._write(self._add_title_bar(img, title), path, rel_path)
+
+    def _save_mask(self, w, h, void_index, cfg, r, c, layers, title, path, rel_path):
+        img = QImage(w, h, QImage.Format_ARGB32)
+        img.fill(Qt.transparent)
+        self._draw_chip_voids(img, void_index, cfg, r, c, mode='mask', layers=layers)
+        self._write(self._add_title_bar(img, title), path, rel_path)
+
+    def _save_titled(self, img, title, path, rel_path):
+        self._write(self._add_title_bar(img, title), path, rel_path)
 
     @staticmethod
     def _safe(label):
@@ -256,39 +305,42 @@ class ExportManager(QObject):
 
     def _add_title_bar(self, img: QImage, text: str) -> QImage:
         """
-        Adds a 40px black title bar at the top with white text.
+        Adds a 40px black title bar at the top with white text. The result keeps the format of
+        img (grayscale patches stay grayscale): only the small bar is painted in color and
+        converted; the rows are joined with numpy.
         """
         w, h = img.width(), img.height()
         title_h = 40
-        
-        # New Image with extra height
-        new_h = h + title_h
-        # Use ARGB32 to capture transparency
-        out_img = QImage(w, new_h, QImage.Format_ARGB32)
-        out_img.fill(Qt.transparent)
-        
-        painter = QPainter(out_img)
-        
-        # Draw Black Bar
-        painter.fillRect(0, 0, w, title_h, Qt.black)
-        
-        # Draw Text
-        pen = QPen(Qt.white)
-        painter.setPen(pen)
+        bar = QImage(w, title_h, QImage.Format_RGB32)
+        bar.fill(Qt.black)
+        painter = QPainter(bar)
+        painter.setPen(QPen(Qt.white))
         font = painter.font()
-        font.setPixelSize(24) # Adjust size
+        font.setPixelSize(24)
         font.setBold(True)
         painter.setFont(font)
-        
-        # Align Left-Center in the bar
-        rect = QRectF(10, 0, w-20, title_h)
-        painter.drawText(rect, Qt.AlignLeft | Qt.AlignVCenter, text)
-        
-        # Draw the original image at (0, 40)
-        painter.drawImage(0, title_h, img)
-        
+        painter.drawText(QRectF(10, 0, w - 20, title_h), Qt.AlignLeft | Qt.AlignVCenter, text)
         painter.end()
-        return out_img
+        bar = bar.convertToFormat(img.format())
+
+        bpl = img.bytesPerLine()
+        if bar.bytesPerLine() != bpl:
+            return self._add_title_bar_painted(img, bar)
+        out = QImage(w, h + title_h, img.format())
+        dst = np.frombuffer(out.bits(), np.uint8, out.sizeInBytes()).reshape(h + title_h, bpl)
+        dst[:title_h] = np.frombuffer(bar.constBits(), np.uint8, bar.sizeInBytes()).reshape(title_h, bpl)
+        dst[title_h:] = np.frombuffer(img.constBits(), np.uint8, img.sizeInBytes()).reshape(h, bpl)
+        return out
+
+    @staticmethod
+    def _add_title_bar_painted(img, bar):
+        out = QImage(img.width(), img.height() + bar.height(), QImage.Format_ARGB32)
+        out.fill(Qt.transparent)
+        painter = QPainter(out)
+        painter.drawImage(0, 0, bar)
+        painter.drawImage(0, bar.height(), img)
+        painter.end()
+        return out
 
     def _extract_patch_unified(self, z, bbox, win_lo, win_hi, scale, offset):
         """
@@ -349,6 +401,11 @@ class ExportManager(QObject):
             self.void_manager.paint_void(painter, v, pcx + dx, pcy + dy, style="ghost", width=2, quadrant=q)
         for v, dx, dy, q in actives:
             self.void_manager.paint_void(painter, v, pcx + dx, pcy + dy, style="normal", width=2, quadrant=q)
+        if mode == 'overlay':
+            # Product layout inside the cell's reference bbox
+            bbox = self._refs.get((r, c))
+            if bbox is not None:
+                self.void_manager.paint_layout(painter, bbox, lambda x, y: (pcx + x - gx_chip, pcy + y - gy_chip))
         painter.end()
 
     def _export_json(self, output_dir):
