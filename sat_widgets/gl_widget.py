@@ -164,6 +164,7 @@ class GLImageWidget(QOpenGLWidget):
         
         # Chip layout of the selected WF product, drawn inside each cell's reference bbox
         self.layout = None
+        self.setCursor(Qt.OpenHandCursor) # Starts in view mode
 
         # Auto-Calibration
         self.calib_tex = None # GL Texture for (Scale, Offset) per cell
@@ -828,15 +829,31 @@ class GLImageWidget(QOpenGLWidget):
         
         return QCursor(pixmap, center, center)
 
+    def create_erase_cursor(self):
+        """Red circle with an X (erase mode)."""
+        size = 32
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        for color, width in ((QColor(0, 0, 0, 160), 4), (QColor(255, 60, 60), 2)):
+            pen = QPen(color)
+            pen.setWidth(width)
+            painter.setPen(pen)
+            painter.drawEllipse(QRectF(5, 5, 22, 22))
+            painter.drawLine(QPointF(10, 10), QPointF(22, 22))
+            painter.drawLine(QPointF(22, 10), QPointF(10, 22))
+        painter.end()
+        return QCursor(pixmap, size // 2, size // 2)
+
     def update_cursor_style(self):
         """
-        Updates the cursor based on current Void Mode and Type.
+        Mode cursor: View = open hand, Draw = crosshair in the type color, Edit = arrow
+        (changes over voids, see _update_edit_hover_cursor), Erase = red circle with X.
         """
         if not self.void_mode:
-            self.setCursor(Qt.ArrowCursor)
-            return
-
-        if self.void_mode == "DRAW" or self.void_mode == "ERASE":
+            self.setCursor(Qt.OpenHandCursor)
+        elif self.void_mode == "DRAW":
             # Use Colored Crosshair
             tid = self.active_type_id
             if self.void_manager and tid in self.void_manager.types:
@@ -845,9 +862,32 @@ class GLImageWidget(QOpenGLWidget):
                 self.setCursor(cursor)
             else:
                 self.setCursor(Qt.CrossCursor)
-                
+        elif self.void_mode == "ERASE":
+            self.setCursor(self.create_erase_cursor())
         elif self.void_mode == "EDIT":
-            self.setCursor(Qt.SizeAllCursor)
+            self.setCursor(Qt.ArrowCursor)
+
+    def _update_edit_hover_cursor(self, gx, gy):
+        """Edit mode: move cursor over a void, resize arrows over its edge, arrow elsewhere."""
+        if not self.void_manager or not self.tiled_image:
+            return
+        v, action = self.void_manager.hit_test(self.current_layer, gx, gy, margin=10.0/self.zoom,
+                                               coord_transform=self.raw_to_deskew, quadrant_ctx=self._quadrant_ctx())
+        if v is None:
+            shape = Qt.ArrowCursor
+        elif action == 'center':
+            shape = Qt.SizeAllCursor
+        else:
+            fx, fy = self._resize_anchor_for(v, gx, gy)
+            if fx is not None and fy is not None:
+                cx, cy = self.raw_to_deskew(v["globalCX"], v["globalCY"])
+                shape = Qt.SizeFDiagCursor if (gx - cx) * (gy - cy) > 0 else Qt.SizeBDiagCursor
+            elif fx is not None:
+                shape = Qt.SizeHorCursor
+            else:
+                shape = Qt.SizeVerCursor
+        if self.cursor().shape() != shape:
+            self.setCursor(shape)
 
     view_center_changed = Signal(int, int) # Col, Row
 
@@ -1031,12 +1071,15 @@ class GLImageWidget(QOpenGLWidget):
             # Pan in every mode
             self._last_mouse = e.position()
             self._pan_only = True
+            self.setCursor(Qt.ClosedHandCursor)
             self.setFocus()
             return
         if e.button() == Qt.LeftButton:
             self._last_mouse = e.position()
             self._pan_only = False
             self.setFocus()
+            if not self.void_mode:
+                self.setCursor(Qt.ClosedHandCursor) # View mode: left drag pans
             
             # Void Interaction (one undo step per press .. release)
             if self.void_mode and self.void_manager and self.tiled_image:
@@ -1145,6 +1188,8 @@ class GLImageWidget(QOpenGLWidget):
 
         if self._last_mouse is None:
             # Hover only
+            if self.void_mode == "EDIT":
+                self._update_edit_hover_cursor(gx, gy)
             return
             
             
@@ -1318,6 +1363,7 @@ class GLImageWidget(QOpenGLWidget):
         self._last_mouse = None
         if getattr(self, '_pan_only', False):
             self._pan_only = False
+            self.update_cursor_style()
             return
 
         # A click without dragging in Drag-to-Size mode leaves a 1px void -> discard it
@@ -1329,6 +1375,8 @@ class GLImageWidget(QOpenGLWidget):
                     self.void_manager.remove_void(self.current_layer, self.active_void)
         
         changed = self._end_void_change()
+        if not self.void_mode:
+            self.setCursor(Qt.OpenHandCursor)
         if self.void_mode or self.active_void_action:
             self.active_void = None
             self.active_void_action = None
