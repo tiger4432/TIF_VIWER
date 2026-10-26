@@ -1,12 +1,14 @@
 @echo off
 REM Builds dist\TIF_Viewer\TIF_Viewer.exe with PyInstaller (Windows x64, Python 3.10 - 3.13).
-REM Python used for .venv, in this order:
+REM Python used for the build environment, in this order:
 REM   1. %PYTHON% if set           e.g.  set PYTHON=C:\Python310\python.exe
 REM   2. the py launcher           py -3.10
 REM   3. python on PATH            e.g. an activated conda environment
-REM An existing .venv made with a different Python is recreated.
+REM The build uses its own virtual environment (.venv-build), separate from a .venv an IDE may
+REM keep open; it is recreated when it was made with a different Python.
 setlocal
 cd /d "%~dp0"
+set "VENV=.venv-build"
 
 set "PYEXE="
 if defined PYTHON set PYEXE="%PYTHON%"
@@ -30,18 +32,19 @@ if errorlevel 1 goto :bad_python
 echo Using Python: %PYEXE%
 %PYEXE% -c "import sys; print(sys.version); print(sys.base_prefix)"
 
-if not exist .venv\pyvenv.cfg goto :make_venv
-REM Reuse .venv only if it was created from this Python installation
-%PYEXE% -c "import os, sys; cfg = {k.strip(): v.strip() for k, v in (l.split('=', 1) for l in open(r'.venv\pyvenv.cfg') if '=' in l)}; base = os.path.dirname(getattr(sys, '_base_executable', sys.executable)); same = os.path.normcase(os.path.abspath(cfg.get('home', ''))) == os.path.normcase(os.path.abspath(base)); sys.exit(0 if same else 1)"
+if not exist %VENV%\pyvenv.cfg goto :make_venv
+REM Reuse the build environment only if it was created from this Python installation
+%PYEXE% -c "import os, sys; cfg = {k.strip(): v.strip() for k, v in (l.split('=', 1) for l in open(r'%VENV%\pyvenv.cfg') if '=' in l)}; base = os.path.dirname(getattr(sys, '_base_executable', sys.executable)); same = os.path.normcase(os.path.abspath(cfg.get('home', ''))) == os.path.normcase(os.path.abspath(base)); sys.exit(0 if same else 1)"
 if not errorlevel 1 goto :venv_ready
-echo .venv was created with another Python - recreating it.
-rmdir /s /q .venv || goto :error
+echo %VENV% was created with another Python - recreating it.
+rmdir /s /q %VENV% 2>nul
+if exist %VENV% goto :venv_locked
 
 :make_venv
-%PYEXE% -m venv .venv || goto :error
+%PYEXE% -m venv %VENV% || goto :error
 
 :venv_ready
-call .venv\Scripts\activate.bat || goto :error
+call %VENV%\Scripts\activate.bat || goto :error
 
 python -m pip install --upgrade pip || goto :error
 python -m pip install -r requirements.txt -r requirements-build.txt || goto :error
@@ -69,6 +72,14 @@ echo %PYEXE% is not a 64-bit Python 3.10 - 3.13.
 echo Conda: conda create -n tifviewer -c conda-forge python=3.10  then  conda activate tifviewer  and run build.bat again.
 goto :error
 
+:venv_locked
+echo.
+echo %VENV% is in use and cannot be removed: a python.exe from it is still running
+echo or an editor uses it as interpreter. Close those, or end them in PowerShell with
+echo   Get-Process python* ^| Where-Object { $_.Path -like '*%VENV%*' } ^| Stop-Process
+echo then run build.bat again.
+goto :error
+
 :qt_broken
 echo.
 echo PySide6 / Qt cannot be loaded with this Python - "DLL load failed ... procedure not found".
@@ -76,7 +87,7 @@ echo Cause: this Python installation - e.g. Anaconda base - ships an older MSVC 
 echo Fix, either:
 echo   1. Install Python 3.10 x64 from python.org and run build.bat from a console without conda activated.
 echo   2. conda create -n tifviewer -c conda-forge python=3.10   then   conda activate tifviewer   and run build.bat.
-echo .venv is recreated automatically for the new Python.
+echo %VENV% is recreated automatically for the new Python.
 goto :error
 
 :error
