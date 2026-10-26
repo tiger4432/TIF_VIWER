@@ -17,12 +17,13 @@ from PySide6.QtWidgets import (
     QTextEdit, QAbstractSpinBox
 )
 from PySide6.QtGui import QSurfaceFormat, QAction, QImage, QPainter, QKeySequence
-from PySide6.QtCore import Qt, QTimer, QEvent
+from PySide6.QtCore import Qt, QTimer, QEvent, QPointF
 
 # Imports from sat_widgets
 from sat_widgets.core_data import TiffStack, MosaicTiffStack, GridConfig, BondingMap, to_uint16, ImageNormalizer, CoordinateTransform
 from sat_widgets.void_manager import VoidManager, VoidTypeDialog
 from sat_widgets.gl_widget import GLImageWidget, TiledImage
+from sat_widgets.layer_loader import LayerLoader
 from sat_widgets.exporter import ExportManager
 from sat_widgets.patch_viewer import PatchViewer
 from sat_widgets.roi_inspector import ROIInspector
@@ -54,6 +55,16 @@ class MainWindow(QMainWindow):
         self.current_z = 0 # Loaded layer index (0..n-1). Void data uses absolute layer numbers.
         self.layer_offset = 0 # Absolute number of the first loaded layer
         self.layer_cache = OrderedDict() # GPU TiledImage per layer index, LRU order
+        # Background loading (see sat_widgets/layer_loader.py)
+        self.layer_loader = None
+        self.layer_proxies = {} # z -> uploaded low-resolution preview (TiledImage)
+        self._ram_layers = {} # z -> decoded tiles of a neighbour layer that did not fit the GPU budget
+        self._upload_queue = [] # TiledImages with tiles waiting for upload (current layer first)
+        self._upload_timer = QTimer(self)
+        self._upload_timer.setSingleShot(True)
+        self._upload_timer.setInterval(0)
+        self._upload_timer.timeout.connect(self._upload_step)
+        self._layer_dir = 1 # Last browsing direction (+1 / -1): prefetched first
         self.layer_calib_data = {} # Cache for calibration data {z: (rows, cols, 2)}
         self.rois = [] # Pre-calculated ROIs [{'label':.., 'x':.., 'y':.., 'bbox':[(x,y)*4]}, ...]
         
@@ -869,7 +880,7 @@ class MainWindow(QMainWindow):
             self.populate_void_types()
         self.update_void_ui()
 
-        self.preload_gpu_cache()
+        self._start_layer_loader()
         self.glw.update()
 
     def auto_level(self):
@@ -1096,6 +1107,7 @@ class MainWindow(QMainWindow):
 
     def _close_data(self):
         """Releases the current stack, its GPU textures and per-layer data."""
+        self._stop_layer_loader()
         self._clear_gpu_cache()
         if self.full_data is not None:
             self.full_data.close()
@@ -1125,14 +1137,15 @@ class MainWindow(QMainWindow):
     def _evict_gpu_cache(self, keep, incoming=0):
         """Drops least recently used layers until the cache fits the budget. GL context must be current."""
         budget = self.sb_gpu_cache.value() * 1024 * 1024
-        total = sum(t.nbytes for t in self.layer_cache.values()) + incoming
+        layer_bytes = self._layer_gpu_bytes() # Layers still uploading count at their full size
+        total = sum(max(t.nbytes, layer_bytes) for t in self.layer_cache.values()) + incoming
         for z in list(self.layer_cache.keys()):
             if total <= budget:
                 break
             if z in keep:
                 continue
             t = self.layer_cache.pop(z)
-            total -= t.nbytes
+            total -= max(t.nbytes, layer_bytes)
             t.cleanup()
 
     def _auto_level(self, z):
@@ -1190,9 +1203,9 @@ class MainWindow(QMainWindow):
             # 4. Auto-Leveling (subsample of the first layer)
             self._auto_level(0)
 
-            # 5. Show first layer, then fill the GPU cache within its budget
+            # 5. Show first layer, then load the others in the background (GPU cache budget)
             self.load_layer(0)
-            self.preload_gpu_cache()
+            self._start_layer_loader()
 
         except Exception as e:
             traceback.print_exc()
@@ -1245,13 +1258,155 @@ class MainWindow(QMainWindow):
             if self.current_z in self.layer_cache:
                 self.layer_cache.move_to_end(self.current_z)
 
+    # ---------------- Layer loading: background decode, previews, time-sliced uploads ----------------
+    def _start_layer_loader(self):
+        """Background loading for the open stack; stacks that cannot be reopened preload instead."""
+        self._stop_layer_loader()
+        if self.full_data is None or not self.full_data.supports_reopen:
+            self.preload_gpu_cache()
+            return
+        loader = LayerLoader(self.full_data, TiledImage.TILE_SIZE, parent=self)
+        loader.loaded.connect(lambda z, tiles, proxy, L=loader: self._on_layer_decoded(L, z, tiles, proxy))
+        self.layer_loader = loader
+        self._schedule_layer_loads()
+
+    def _stop_layer_loader(self):
+        if self.layer_loader is not None:
+            self.layer_loader.stop()
+            self.layer_loader = None
+        self._ram_layers.clear()
+        self._upload_queue.clear()
+        self.glw.proxy_image = None
+        if self.layer_proxies:
+            self.glw.makeCurrent()
+            for p in self.layer_proxies.values():
+                p.cleanup()
+            self.glw.doneCurrent()
+            self.layer_proxies.clear()
+
+    def layers_loading(self):
+        """True while layers are decoded or uploaded in the background."""
+        return bool(self._upload_queue) or (self.layer_loader is not None and self.layer_loader.busy())
+
+    def _has_layer_data(self, z):
+        if z in self._ram_layers:
+            return True
+        t = self.layer_cache.get(z)
+        return t is not None and all(tile.is_uploaded or tile.loader is not None for tile in t.tiles)
+
+    def _schedule_layer_loads(self):
+        """
+        Decode jobs by distance from the current layer (browsing direction first): full tiles for
+        the layers the GPU budget holds and for the direct neighbours, a preview for the others.
+        """
+        L = self.layer_loader
+        if L is None or self.full_data is None:
+            return
+        n, cur, d = len(self.full_data), self.current_z, self._layer_dir
+        order = [cur]
+        for k in range(1, n):
+            order += [z for z in (cur + d * k, cur - d * k) if 0 <= z < n]
+        fit = max(1, (self.sb_gpu_cache.value() * 1024 * 1024) // max(1, self._layer_gpu_bytes()))
+        full = set(order[:fit]) | {z for z in (cur - 1, cur, cur + 1) if 0 <= z < n}
+        for z in list(self._ram_layers): # RAM only holds the direct neighbours
+            if abs(z - cur) > 1:
+                del self._ram_layers[z]
+        jobs = []
+        for z in order:
+            if z in full:
+                if not self._has_layer_data(z):
+                    jobs.append((z, True))
+            elif z not in self.layer_proxies and z not in self.layer_cache:
+                jobs.append((z, False))
+        L.request(jobs)
+
+    def _on_layer_decoded(self, loader, z, tiles, proxy):
+        loader.ack()
+        if loader is not self.layer_loader or self.full_data is None:
+            return # Result of a closed file
+        w, h = self.full_data.width, self.full_data.height
+        if z not in self.layer_proxies:
+            p = TiledImage.proxy(w, h, proxy)
+            self.glw.makeCurrent()
+            p.upload_all()
+            self.glw.doneCurrent()
+            self.layer_proxies[z] = p
+            if z == self.current_z and self.glw.tiled_image is not None and not self.glw.tiled_image.fully_uploaded:
+                self.glw.proxy_image = p
+                self.glw.update()
+        if tiles is None:
+            return
+        t = self.layer_cache.get(z)
+        if t is not None: # Waiting in the GPU cache (the current layer, or reserved earlier)
+            t.set_tile_data(tiles)
+            self._queue_upload(t, front=(z == self.current_z))
+        elif (len(self.layer_cache) + 1) * self._layer_gpu_bytes() <= self.sb_gpu_cache.value() * 1024 * 1024:
+            t = TiledImage.pending(w, h)
+            t.set_tile_data(tiles)
+            self.layer_cache[z] = t
+            self.layer_cache.move_to_end(z, last=False) # Prefetched: not "recently used" yet
+            self._queue_upload(t)
+        elif abs(z - self.current_z) <= 1:
+            self._ram_layers[z] = tiles # Instant switch to the neighbour (upload only)
+
+    def _queue_upload(self, tiled, front=False):
+        if tiled in self._upload_queue:
+            self._upload_queue.remove(tiled)
+        if front:
+            self._upload_queue.insert(0, tiled)
+        else:
+            self._upload_queue.append(tiled)
+        self._upload_timer.start()
+
+    def _next_tile(self, tiled):
+        todo = [t for t in tiled.tiles if not t.is_uploaded and t.loader is not None]
+        if not todo:
+            return None
+        if tiled is self.glw.tiled_image and len(todo) > 1:
+            # What is on screen first
+            cx, cy = self.glw.deskew_to_raw(*self.glw.get_image_coords(QPointF(self.glw.width() / 2, self.glw.height() / 2)))
+            todo.sort(key=lambda t: (t.x + t.w / 2 - cx) ** 2 + (t.y + t.h / 2 - cy) ** 2)
+        return todo[0]
+
+    def _upload_step(self):
+        """Uploads tiles for ~15 ms, then lets the UI paint and handle input before the next ones."""
+        deadline = time.perf_counter() + 0.015
+        uploaded = False
+        self.glw.makeCurrent()
+        try:
+            while self._upload_queue and time.perf_counter() < deadline:
+                tiled = self._upload_queue[0]
+                tile = self._next_tile(tiled) if any(tiled is t for t in self.layer_cache.values()) else None
+                if tile is None: # Done, waiting for data, or evicted
+                    self._upload_queue.pop(0)
+                    continue
+                tile.upload()
+                uploaded = True
+        finally:
+            self.glw.doneCurrent()
+        if uploaded:
+            self.glw.update()
+        if self._upload_queue:
+            self._upload_timer.start()
+
     def load_layer(self, z_index):
         if self.full_data is None:
             return
 
         tiled = self.layer_cache.get(z_index)
+        background = self.layer_loader is not None
         if tiled is not None:
             self.layer_cache.move_to_end(z_index)
+        elif background:
+            # Shown at once: preview (if decoded already) under the tiles as they arrive
+            self.glw.makeCurrent()
+            self._evict_gpu_cache(keep={z_index}, incoming=self._layer_gpu_bytes())
+            self.glw.doneCurrent()
+            tiled = TiledImage.pending(self.full_data.width, self.full_data.height)
+            ram = self._ram_layers.pop(z_index, None)
+            if ram is not None:
+                tiled.set_tile_data(ram)
+            self.layer_cache[z_index] = tiled
         else:
             print(f"Loading Layer {z_index} (Abs {self.abs_layer(z_index)})...")
             # Make room first, then stream the tiles to the GPU (set_tiled_image uploads)
@@ -1261,9 +1416,16 @@ class MainWindow(QMainWindow):
             tiled = TiledImage.from_stack(self.full_data, z_index)
             self.layer_cache[z_index] = tiled
 
-        # Set Image (uploads if needed)
-        self.glw.set_tiled_image(tiled, cleanup_old=False)
-        self.full_data.release_cache()
+        if background:
+            self.glw.proxy_image = self.layer_proxies.get(z_index)
+            self.glw.set_tiled_image(tiled, cleanup_old=False, upload=False)
+            if not tiled.fully_uploaded:
+                self._queue_upload(tiled, front=True)
+            self._schedule_layer_loads()
+        else:
+            # Set Image (uploads if needed)
+            self.glw.set_tiled_image(tiled, cleanup_old=False)
+            self.full_data.release_cache()
         
         # Keep the cache within the budget (it may have been lowered meanwhile)
         self.glw.makeCurrent()
@@ -1277,6 +1439,8 @@ class MainWindow(QMainWindow):
         self.update()
 
     def on_layer_changed(self, val):
+        if val != self.current_z:
+            self._layer_dir = 1 if val > self.current_z else -1
         self.current_z = val
         abs_layer = self.abs_layer(val)
         self.glw.current_layer = abs_layer # Void data is keyed by absolute layer

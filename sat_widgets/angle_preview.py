@@ -17,10 +17,11 @@ With a bonding map the nearest bonded cell is used, so edge cells without a chip
 """
 import math
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from PIL import Image
-from PySide6.QtCore import Qt, QTimer, QRectF, QPointF, Signal
+from PySide6.QtCore import Qt, QTimer, QRectF, QPointF, Signal, QObject
 from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor
 from PySide6.QtWidgets import QGridLayout, QLabel, QVBoxLayout, QWidget, QSizePolicy
 
@@ -65,6 +66,57 @@ def preview_cells(grid_cfg, points, bonding_map=None):
     return out
 
 
+class _RegionReader(QObject):
+    """
+    Reads preview regions on a background thread with its own reader of the stack (sparse strip
+    reads: only the rows of the region are decoded), so a layer switch never decodes a whole
+    layer on the GUI thread.
+    """
+    done = Signal(object, object) # key, (x0, y0, float 'F' image) or None
+
+    def __init__(self, stack, parent=None):
+        super().__init__(parent)
+        self.stack = stack
+        self._reader = None
+        self._closed = False
+        self._pool = ThreadPoolExecutor(1)
+        self.pending = set()
+
+    def request(self, key, z, x0, y0, w, h):
+        if key in self.pending:
+            return
+        self.pending.add(key)
+        self._pool.submit(self._job, key, z, x0, y0, w, h)
+
+    def _job(self, key, z, x0, y0, w, h):
+        if self._closed:
+            return
+        try:
+            if self._reader is None:
+                self._reader = self.stack.reopen()
+                self._reader.sparse_reads = True
+            arr = to_uint16(self._reader.read_region(z, x0, y0, w, h))
+            self._reader.release_cache()
+            # Float image: bilinear warp is correct (PIL's I;16 bilinear is not); the window
+            # level is applied after warping, on the small output
+            res = (x0, y0, Image.fromarray(arr.astype(np.float32)))
+        except Exception as e:
+            print(f"[AnglePreview] read failed: {e}")
+            res = None
+        if not self._closed:
+            self.done.emit(key, res)
+
+    def _close_reader(self):
+        if self._reader is not None:
+            self._reader.close()
+            self._reader = None
+
+    def close(self):
+        self._closed = True
+        self._pool.submit(self._close_reader)
+        self._pool.shutdown(wait=False)
+
+
 class _Tile(QWidget):
     clicked = Signal(int, int) # col, row
 
@@ -74,6 +126,7 @@ class _Tile(QWidget):
         lay.setContentsMargins(2, 2, 2, 2)
         self.title = QLabel("-")
         self.title.setStyleSheet("font-weight: bold;")
+        self.title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred) # Text never resizes the dock
         self.image = QLabel()
         self.image.setAlignment(Qt.AlignCenter)
         self.image.setMinimumSize(200, 200)
@@ -101,6 +154,10 @@ class _Tile(QWidget):
         self.title.setText(title)
         self.cell = cell
         self.image.setPixmap(pixmap)
+
+    def set_loading(self, title, cell):
+        self.title.setText(title) # The previous picture stays until the region is read
+        self.cell = cell
 
 
 class AnglePreview(QWidget):
@@ -137,6 +194,7 @@ class AnglePreview(QWidget):
         self._regions = {} # (z, row, col) -> (x0, y0, float 'F' image of the raw region)
         self._settings_cache = None
         self._stack = None
+        self._reader = None # _RegionReader of self._stack
         self._lut, self._lut_key = None, None
 
     def _add_tile(self):
@@ -181,6 +239,12 @@ class AnglePreview(QWidget):
         if stack is not self._stack: # New image: drop cached regions
             self._stack = stack
             self._regions.clear()
+            if self._reader is not None:
+                self._reader.close()
+            self._reader = None
+            if stack.supports_reopen:
+                self._reader = _RegionReader(stack, self)
+                self._reader.done.connect(lambda key, res, r=self._reader: self._on_region(r, key, res))
         grid = glw.grid_cfg
         points, view_scale = self._settings()
         cells = preview_cells(grid, points, glw.bonding_map)
@@ -189,8 +253,12 @@ class AnglePreview(QWidget):
 
         refs = mw.void_manager.reference_bboxes(grid, glw.coord_transform)
         for tile, (name, row, col) in zip(self.tiles, cells):
-            pix, _ = self._render(stack, mw.current_z, grid, row, col, view_scale, refs, tile.side())
-            tile.set_content(f"{name}  (X{col:02d}, Y{row:02d})", (row, col), pix)
+            out = self._render(stack, mw.current_z, grid, row, col, view_scale, refs, tile.side())
+            title = f"{name}  (X{col:02d}, Y{row:02d})"
+            if out is None: # Region still loading in the background
+                tile.set_loading(title + "  loading...", (row, col))
+            else:
+                tile.set_content(title, (row, col), out[0])
         ms = (time.perf_counter() - t0) * 1000.0
         self.last_refresh_ms = ms
         self.info.setText(f"Angle {grid.angle:.3f}°  |  {ms:.0f} ms  |  grid lines should run along the chip edges. Click a patch to go there.")
@@ -208,12 +276,26 @@ class AnglePreview(QWidget):
         y0 = max(0, int(math.floor(ry0 - margin)))
         x1 = min(stack.width, int(math.ceil(rx1 + margin)))
         y1 = min(stack.height, int(math.ceil(ry1 + margin)))
+        if self._reader is not None:
+            self._reader.request(key, z, x0, y0, max(1, x1 - x0), max(1, y1 - y0))
+            return None, True
         arr = to_uint16(stack.read_region(z, x0, y0, max(1, x1 - x0), max(1, y1 - y0)))
         # Float image: bilinear warp is correct (PIL's I;16 bilinear is not); the window level is
         # applied after warping, on the small output
         hit = (x0, y0, Image.fromarray(arr.astype(np.float32)))
         self._regions[key] = hit
         return hit, True
+
+    def _on_region(self, reader, key, res):
+        reader.pending.discard(key)
+        if reader is not self._reader:
+            return # Region of a closed image
+        if res is not None:
+            self._regions[key] = res
+            # Only the current layer's regions are kept (float regions are large)
+            for k in [k for k in self._regions if k[0] not in (key[0], self.mw.current_z)]:
+                del self._regions[k]
+        self.schedule_update()
 
     def _render(self, stack, z, grid, row, col, view_scale, refs, size):
         glw = self.mw.glw
@@ -227,8 +309,11 @@ class AnglePreview(QWidget):
                    [(x0, y0), (cx + half, y0), (cx + half, cy + half), (x0, cy + half)]]
         xs = [p[0] for p in corners]
         ys = [p[1] for p in corners]
-        (rx0, ry0, region), did_read = self._region(stack, z, row, col, min(xs), min(ys), max(xs), max(ys),
-                                                    margin=max(grid.pitch_x, grid.pitch_y))
+        hit, did_read = self._region(stack, z, row, col, min(xs), min(ys), max(xs), max(ys),
+                                     margin=max(grid.pitch_x, grid.pitch_y))
+        if hit is None:
+            return None
+        rx0, ry0, region = hit
 
         # Warp at display size, then window level -> 8-bit on the small output only
         quad = []

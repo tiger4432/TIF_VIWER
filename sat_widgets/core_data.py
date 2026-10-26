@@ -119,6 +119,12 @@ class ImageStack:
         """Drops decoded frame data kept for repeated region reads."""
         pass
 
+    supports_reopen = False
+
+    def reopen(self):
+        """Independent reader of the same layers (for a background thread)."""
+        raise NotImplementedError
+
     def close(self):
         pass
 
@@ -204,6 +210,9 @@ class TiffStack(ImageStack):
         self._volume = None # (N, H, W[, C]) when all frames live in one page/block
         self._memmaps = OrderedDict() # phys_idx -> np.memmap
         self._frame_cache = None # (phys_idx, ndarray)
+        # Sparse reads: a region of a compressed, striped page is decoded from only the strips it
+        # covers (no frame cache). For readers doing a few small reads per layer (previews).
+        self.sparse_reads = False
 
         n = w = h = None
         dtype = None
@@ -300,12 +309,45 @@ class TiffStack(ImageStack):
         return arr
 
     def read_region(self, z, x, y, w, h, step=1):
-        frame = self._frame(self._phys(z))
         x0, y0 = max(0, x), max(0, y)
+        if self.sparse_reads and step == 1:
+            region = self._read_strips(self._phys(z), x0, y0, x + w - x0, y + h - y0)
+            if region is not None:
+                return region
+        frame = self._frame(self._phys(z))
         return _slice2d(frame, x0, y0, x + w - x0, y + h - y0, step)
+
+    def _read_strips(self, idx, x, y, w, h):
+        """Region decoded from the strips covering rows y .. y+h, or None if not applicable."""
+        if self._tf is None or self._volume is not None or idx in self._memmaps:
+            return None
+        if self._frame_cache is not None and self._frame_cache[0] == idx:
+            return None # Already decoded
+        page = self._tf.pages[idx]
+        if (page.is_tiled or page.samplesperpixel != 1 or getattr(page, 'is_memmappable', False)
+                or len(page.dataoffsets) < 2):
+            return None
+        rps = page.rowsperstrip
+        y1 = min(y + h, page.imagelength)
+        if y >= y1:
+            return None
+        fh = self._tf.filehandle
+        parts = []
+        for i in range(y // rps, (y1 - 1) // rps + 1):
+            fh.seek(page.dataoffsets[i])
+            seg, _, _ = page.decode(fh.read(page.databytecounts[i]), i)
+            parts.append(seg.reshape(-1, page.imagewidth))
+        block = parts[0] if len(parts) == 1 else np.concatenate(parts)
+        s0 = (y // rps) * rps
+        return block[y - s0:y1 - s0, x:x + w]
 
     def release_cache(self):
         self._frame_cache = None
+
+    supports_reopen = True
+
+    def reopen(self):
+        return TiffStack(self.path, self.frame_start, self.frame_count)
 
     def close(self):
         self._frame_cache = None
@@ -462,6 +504,11 @@ class MosaicTiffStack(ImageStack):
         arr = self._layer(z)
         x0, y0 = max(0, x), max(0, y)
         return arr[y0:y + h:step, x0:x + w:step]
+
+    supports_reopen = True
+
+    def reopen(self):
+        return MosaicTiffStack(self.path)
 
     def close(self):
         self.layer_cache.clear()

@@ -24,21 +24,25 @@ class Tile:
     Pixel data is pulled from `loader` at upload time and released right after,
     so at most one tile is held in CPU memory while a layer is uploaded.
     """
-    def __init__(self, x, y, width, height, loader):
+    def __init__(self, x, y, width, height, loader, one_shot=False, linear=False):
         self.x = x  # Global X position
         self.y = y  # Global Y position
         self.w = width
         self.h = height
-        self.loader = loader # () -> (h, w) uint8 / uint16 array
+        self.loader = loader # () -> uint8 / uint16 array; None = data not available yet
+        self.one_shot = one_shot # Drop the loader (and its data) after the upload
+        self.linear = linear # Linear filtering (downscaled preview textures)
         self.tex_id = None
         self.is_uploaded = False
         self.nbytes = 0 # GPU memory used
 
     def upload(self):
-        if self.is_uploaded:
+        if self.is_uploaded or self.loader is None:
             return
 
         data = self.loader()
+        if self.one_shot:
+            self.loader = None
         if data.dtype == np.uint8:
             # 8-bit: half the VRAM. Sampled values are v/255, which the shader scales by 65535
             # -> v * 257, the same 16-bit domain as before.
@@ -54,14 +58,16 @@ class Tile:
         glBindTexture(GL_TEXTURE_2D, self.tex_id)
 
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
+        filt = GL_LINEAR if self.linear else GL_NEAREST
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filt)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filt)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
 
+        # The texture may be smaller than the area it covers (preview): drawn over (x, y, w, h)
         glTexImage2D(
             GL_TEXTURE_2D, 0, internal_fmt,
-            self.w, self.h, 0,
+            data.shape[1], data.shape[0], 0,
             GL_RED, gl_type, data
         )
 
@@ -96,13 +102,37 @@ class TiledImage:
             for x in range(0, self.w, self.TILE_SIZE):
                 h_chunk = min(self.TILE_SIZE, self.h - y)
                 w_chunk = min(self.TILE_SIZE, self.w - x)
-                loader = (lambda x=x, y=y, w=w_chunk, h=h_chunk: read_tile(x, y, w, h))
+                loader = (lambda x=x, y=y, w=w_chunk, h=h_chunk: read_tile(x, y, w, h)) if read_tile else None
                 self.tiles.append(Tile(x, y, w_chunk, h_chunk, loader))
 
     @classmethod
     def from_stack(cls, stack, z):
         """Tiles of layer z of an ImageStack, read region by region (never the full layer)."""
         return cls(stack.width, stack.height, lambda x, y, w, h: stack.get_tile(z, x, y, w, h))
+
+    @classmethod
+    def pending(cls, width, height):
+        """Tiles without data yet (set_tile_data when the background decode is done)."""
+        return cls(width, height, None)
+
+    def set_tile_data(self, arrays):
+        """arrays: one (h, w) array per tile, in tile order. Each is released after its upload."""
+        for t, a in zip(self.tiles, arrays):
+            if not t.is_uploaded:
+                t.loader = (lambda a=a: a)
+                t.one_shot = True
+
+    @classmethod
+    def proxy(cls, width, height, image: np.ndarray):
+        """Low-resolution preview covering the full width x height with one (small) texture."""
+        obj = cls.__new__(cls)
+        obj.w, obj.h = width, height
+        obj.tiles = [Tile(0, 0, width, height, (lambda: image), one_shot=True, linear=True)]
+        return obj
+
+    @property
+    def fully_uploaded(self):
+        return all(t.is_uploaded for t in self.tiles)
 
     @classmethod
     def from_array(cls, image: np.ndarray):
@@ -140,6 +170,7 @@ class GLImageWidget(QOpenGLWidget):
         super().__init__()
         self.setMouseTracking(True) # Enable hover events
         self.tiled_image: TiledImage = None
+        self.proxy_image: TiledImage = None # Preview of the layer while its tiles are loading
         
         self.win_lo = 0.0
         self.win_hi = 1.0
@@ -441,17 +472,11 @@ class GLImageWidget(QOpenGLWidget):
                     
                     // Map Params (Colors)
                     if (has_map == 1) {
-                            if (c >= 0 && c < grid_cols && r >= 0 && r < grid_rows) {
-                                  // Map Lookup: Flip Y for texture lookup?
-                                  // We previously handled map vertically?
-                                  // Lets assume (row, col) matches Map Texture (row, col) with V inverted?
-                                  // Re-use logic: map is uploaded row-by-row. R=0 at V=0?
-                                  // If BondingMap.data_map[0] is R=0.
-                                  // If we upload it, Row 0 goes to V=0 (Bottom).
-                                  // So mapUV should be (r+0.5)/rows => V=Low.
-                                  // So same as Calib.
-                                  vec2 mapUV = vec2((float(c) + 0.5) / float(grid_cols), (float(r) + 0.5) / float(grid_rows));
-                                  vec4 mapCol = texture(map_tex, mapUV);
+                            // Exact map cell (row r, col c), as BondingMap.get_key: the map may
+                            // have another size than the grid, so it is not stretched over it
+                            ivec2 mapSize = textureSize(map_tex, 0);
+                            if (c >= 0 && c < mapSize.x && r >= 0 && r < mapSize.y) {
+                                  vec4 mapCol = texelFetch(map_tex, ivec2(c, r), 0);
                                   if (mapCol.a > 0.0) {
                                       // Blend map color
                                       overlayColor = mix(overlayColor, mapCol, 0.5); // Tint
@@ -509,7 +534,7 @@ class GLImageWidget(QOpenGLWidget):
         glEnableVertexAttribArray(1)
         
 
-    def set_tiled_image(self, tiled_img: TiledImage, cleanup_old: bool = True):
+    def set_tiled_image(self, tiled_img: TiledImage, cleanup_old: bool = True, upload: bool = True):
         # Cleanup old if requested
         if cleanup_old and self.tiled_image and self.tiled_image != tiled_img:
             self.tiled_image.cleanup()
@@ -522,10 +547,11 @@ class GLImageWidget(QOpenGLWidget):
            self.coord_transform.img_h != self.tiled_image.h:
                self.coord_transform = CoordinateTransform(self.grid_cfg.angle, self.tiled_image.w, self.tiled_image.h)
         
-        # Context must be current for upload
-        self.makeCurrent()
-        self.tiled_image.upload_all()
-        self.doneCurrent()
+        # Context must be current for upload (upload=False: the caller uploads tile by tile)
+        if upload:
+            self.makeCurrent()
+            self.tiled_image.upload_all()
+            self.doneCurrent()
         
         self.update()
 
@@ -594,8 +620,13 @@ class GLImageWidget(QOpenGLWidget):
         glBindVertexArray(self.vao)
         glActiveTexture(GL_TEXTURE0)
         
+        # Low-resolution preview under tiles that are not uploaded yet (layer still loading)
+        tiles = self.tiled_image.tiles
+        if self.proxy_image is not None and not self.tiled_image.fully_uploaded:
+            tiles = self.proxy_image.tiles + tiles
+
         # Draw each tile
-        for tile in self.tiled_image.tiles:
+        for tile in tiles:
             if not tile.is_uploaded:
                 continue
                 
