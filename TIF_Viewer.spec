@@ -4,6 +4,11 @@
 from PyInstaller.utils.hooks import collect_submodules
 
 hiddenimports = collect_submodules("imagecodecs") # tifffile imports codecs lazily
+try: # Optional PatchCore scorer (build with WITH_PATCHCORE=1, see docs/PATCHCORE.md)
+    import onnxruntime # noqa: F401
+    hiddenimports.append("onnxruntime")
+except ImportError:
+    pass
 
 a = Analysis(
     ["tif_view_GL.py"],

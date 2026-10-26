@@ -29,6 +29,8 @@ Parameters (config.json "void_detect", defaults in DEFAULTS):
     max_area_frac    blobs larger than this fraction of the chip are ignored (misaligned / broken chip)
     work_size        longest side of the working chip image (pixels)
     template_cells   chips used to build the golden chip
+    method           "die_to_die" (default) or "patchcore" (CNN features, optional: needs
+                     onnxruntime and models/*.onnx, see docs/PATCHCORE.md; pc_* parameters)
 """
 import math
 
@@ -43,6 +45,7 @@ DEFAULTS = {
     "max_area_frac": 0.2,
     "work_size": 256,
     "template_cells": 200,
+    "method": "die_to_die", # or "patchcore" (optional, sat_widgets/patchcore.py)
 }
 
 
@@ -251,6 +254,7 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
     min_area = max(2, int((p["min_size_px"] / factor) ** 2 * math.pi / 4))
     max_area = p["max_area_frac"] * size[0] * size[1]
     gap = max(2, int(round(0.05 * max(size))))
+    pc = None
 
     for z, layer in enumerate(layer_numbers):
         # 1. Aligned, normalized chips of this layer
@@ -275,32 +279,27 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
         if len(chips) < 3:
             continue
 
-        # 2. Golden chip: median of the sample, then again after matching the sample to it
-        keys = list(chips)
-        rng = np.random.default_rng(0)
-        sample = keys if len(keys) <= p["template_cells"] else \
-            [keys[i] for i in rng.choice(len(keys), p["template_cells"], replace=False)]
-        golden0 = np.median(np.stack([chips[k] for k in sample]).astype(np.float32), axis=0)
-        match0 = _Matcher(golden0)
-        matched = np.stack([match0.apply(chips[k].astype(np.float32)) for k in sample])
-        golden = np.median(matched, axis=0)
-        # Per-pixel chip-to-chip spread of the matched chips (larger at layout edges)
-        spread = np.median(np.abs(matched - golden), axis=0) * 1.4826
-        del matched
-        spread = _filt(spread, ImageFilter.MaxFilter(3))
-        spread = np.maximum(spread, 0.5 * float(np.median(spread)) + 1e-3)
-        # Local range of the golden chip: a pixel inside the 3x3 min..max of the golden chip is
-        # not a defect (1 px shifts, slightly different edges)
-        gmin = _filt(golden, ImageFilter.MinFilter(3))
-        gmax = _filt(golden, ImageFilter.MaxFilter(3))
-        match = _Matcher(golden)
+        if p["method"] == "patchcore":
+            # Optional scorer (sat_widgets/patchcore.py): CNN features, position-aware nearest neighbour
+            if pc is None:
+                from . import patchcore
+                pc = patchcore.PatchCore(p)
+            if progress is not None and not progress(step, n_steps, f"Layer {layer}: PatchCore scoring"):
+                return None
+            if p.get("pc_match", False):
+                # Same brightness / contrast / shading matching as die-to-die before the CNN
+                match = _golden(chips, p)[3]
+                chips = {k: match.apply(c.astype(np.float32)) for k, c in chips.items()}
+            items = pc.score_layer(chips, size).items()
+            threshold = float(p.get("pc_threshold", 10.0))
+        else:
+            items = _die_to_die(chips, p)
+            threshold = p["threshold"]
 
         # 3. Blobs per chip
         count = 0
-        for cell in keys:
-            m = match.apply(chips[cell].astype(np.float32))
-            dev = (np.maximum(m - gmax, 0) + np.maximum(gmin - m, 0)) / spread
-            mask = dev > p["threshold"]
+        for cell, dev in items:
+            mask = dev > threshold
             if not mask.any():
                 continue
             mask = _open(mask)
@@ -334,3 +333,34 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
     finally:
         vm.end_change()
     return {"added": len(found), "per_layer": per_layer}
+
+
+def _golden(chips, p):
+    """Golden chip, per-pixel spread, 3x3 min / max of the golden chip and its matcher."""
+    # Golden chip: median of the sample, then again after matching the sample to it
+    keys = list(chips)
+    rng = np.random.default_rng(0)
+    sample = keys if len(keys) <= p["template_cells"] else \
+        [keys[i] for i in rng.choice(len(keys), p["template_cells"], replace=False)]
+    golden0 = np.median(np.stack([chips[k] for k in sample]).astype(np.float32), axis=0)
+    match0 = _Matcher(golden0)
+    matched = np.stack([match0.apply(chips[k].astype(np.float32)) for k in sample])
+    golden = np.median(matched, axis=0)
+    # Per-pixel chip-to-chip spread of the matched chips (larger at layout edges)
+    spread = np.median(np.abs(matched - golden), axis=0) * 1.4826
+    del matched
+    spread = _filt(spread, ImageFilter.MaxFilter(3))
+    spread = np.maximum(spread, 0.5 * float(np.median(spread)) + 1e-3)
+    # Local range of the golden chip: a pixel inside the 3x3 min..max of the golden chip is
+    # not a defect (1 px shifts, slightly different edges)
+    gmin = _filt(golden, ImageFilter.MinFilter(3))
+    gmax = _filt(golden, ImageFilter.MaxFilter(3))
+    return spread, gmin, gmax, _Matcher(golden)
+
+
+def _die_to_die(chips, p):
+    """Yields (cell, deviation map): |chip - golden| / spread after matching, see the module doc."""
+    spread, gmin, gmax, match = _golden(chips, p)
+    for cell in chips:
+        m = match.apply(chips[cell].astype(np.float32))
+        yield cell, (np.maximum(m - gmax, 0) + np.maximum(gmin - m, 0)) / spread

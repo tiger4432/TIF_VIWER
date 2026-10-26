@@ -370,10 +370,20 @@ class MainWindow(QMainWindow):
         btn_next_det = QPushButton("Next Detected")
         btn_next_det.setToolTip("Go to the next detected void that was not reviewed (edited) yet, layer by layer")
         btn_next_det.clicked.connect(self.next_detected_void)
+        # Scorer: die-to-die (default) or the optional PatchCore (onnxruntime + models/*.onnx)
+        self.cb_detect_method = QComboBox()
+        self.cb_detect_method.addItem("Die-to-die", "die_to_die")
+        self.cb_detect_method.addItem("PatchCore", "patchcore")
+        self.cb_detect_method.setToolTip("Die-to-die: pixel comparison with the median chip (fast, exact outlines).\n"
+                                         "PatchCore: CNN features (optional, slower, coarse outlines), see docs/PATCHCORE.md.")
+        self._detect_thr = {}
+        self.cb_detect_method.currentIndexChanged.connect(self._on_detect_method)
         h_detect.addWidget(btn_detect)
+        h_detect.addWidget(self.cb_detect_method)
         h_detect.addWidget(self.sb_detect_thr)
         h_detect.addWidget(btn_next_det)
         v_layout_void.addLayout(h_detect)
+        self._init_detect_method()
         
         dock_layout.addWidget(self.gb_void)
         
@@ -1093,6 +1103,29 @@ class MainWindow(QMainWindow):
         self.glw.fit_to_cell(nxt[1], nxt[0])
         self.statusBar().showMessage(f"Estimated bbox {cells.index(nxt) + 1}/{len(cells)}: X{nxt[1]:02d} Y{nxt[0]:02d}")
         
+    def _init_detect_method(self):
+        from sat_widgets import patchcore
+        cfg = self._config().get("void_detect", {})
+        reason = patchcore.available(cfg)
+        item = self.cb_detect_method.model().item(1)
+        item.setEnabled(not reason)
+        item.setToolTip(reason or "CNN features, position-aware nearest neighbour (CPU)")
+        method = cfg.get("method", "die_to_die")
+        self.cb_detect_method.setCurrentIndex(1 if method == "patchcore" and not reason else 0)
+        self._on_detect_method()
+
+    def _on_detect_method(self, *_):
+        """Each method keeps its own threshold (config.json "void_detect": threshold / pc_threshold)."""
+        from sat_widgets import patchcore
+        cfg = self._config().get("void_detect", {})
+        method = self.cb_detect_method.currentData()
+        if getattr(self, "_detect_last", None):
+            self._detect_thr[self._detect_last] = self.sb_detect_thr.value()
+        default = cfg.get("pc_threshold", patchcore.DEFAULTS["pc_threshold"]) if method == "patchcore" else \
+            cfg.get("threshold", void_detect.DEFAULTS["threshold"])
+        self.sb_detect_thr.setValue(float(self._detect_thr.get(method, default)))
+        self._detect_last = method
+
     def detect_voids(self):
         """Rough automatic void detection on all loaded layers (see sat_widgets/void_detect.py)."""
         if self.full_data is None or self.glw.tiled_image is None:
@@ -1107,7 +1140,8 @@ class MainWindow(QMainWindow):
         cells = [(r, c) for r in range(cfg.rows) for c in range(cfg.cols) if bmap is None or bmap.get_key(r, c)]
         refs = vm.reference_bboxes(cfg, self.glw.coord_transform)
         params = dict(self._config().get("void_detect", {}))
-        params["threshold"] = self.sb_detect_thr.value()
+        params["method"] = self.cb_detect_method.currentData()
+        params["pc_threshold" if params["method"] == "patchcore" else "threshold"] = self.sb_detect_thr.value()
         layers = [self.abs_layer(z) for z in range(len(self.full_data))]
 
         progress = QProgressDialog("Detecting voids...", "Cancel", 0, 1000, self)

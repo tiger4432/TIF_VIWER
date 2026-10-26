@@ -10,7 +10,9 @@ set "VENV=.venv-dev"
 
 git pull --ff-only || echo WARNING: git pull failed - running the local code.
 
-call tools\setup_venv.bat %VENV% requirements.txt requirements-dev.txt || goto :error
+set "REQS=requirements.txt requirements-dev.txt"
+if "%WITH_PATCHCORE%"=="1" set "REQS=%REQS% requirements-patchcore.txt"
+call tools\setup_venv.bat %VENV% %REQS% || goto :error
 call %VENV%\Scripts\activate.bat || goto :error
 
 if /i not "%~1"=="watch" goto :run

@@ -289,6 +289,7 @@ Void Marking 패널의 **Detect Voids**는 대략적인 보이드를 자동으�
 - 찾은 보이드는 점선으로 그려지고, **Next Detected**로 레이어·칸 순서대로 돌아볼 수 있습니다. 수정(E)하면 실선이 됩니다. 전체 실행은 Ctrl+Z 한 번으로 되돌립니다.
 - 민감도는 Thr 칸(기본 6, 낮을수록 민감)으로 조절합니다. 나머지 값은 `config.json`의 `"void_detect"`로 바꿀 수 있습니다: `threshold`, `min_size_px`(가장 작은 보이드 지름), `max_area_frac`, `work_size`, `template_cells`.
 - 기준 bbox를 먼저 그리면(Detect BBOX) 칩 정렬이 정확해집니다.
+- 방법 상자에서 **PatchCore**(CNN 특징 기반, CPU, 선택 설치)를 고를 수도 있습니다. 검토 결과와 운영 셋업(오프라인 설치, 빌드, 설정, 임계값 보정)은 [docs/PATCHCORE.md](docs/PATCHCORE.md)를 보세요. 이 데이터에서는 기본 방식(Die-to-die)이 더 정확하고 빠릅니다.
 - 14900×14900 샘플(841칩)에서 레이어당 약 16초, 생성기의 정답(보이드 92개, 코너 박리 51개)을 모두 찾았고 모두 처음 나타난 레이어에 마킹했습니다(추가 검출 5). 칩마다 밝기·대비·감마·기울기를 크게 다르게 만든 합성 데이터에서도 98%를 찾았습니다.
 
 ## 자동 BBOX (Detect BBOX)

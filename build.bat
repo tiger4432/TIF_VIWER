@@ -6,7 +6,10 @@ setlocal
 cd /d "%~dp0"
 set "VENV=.venv-build"
 
-call tools\setup_venv.bat %VENV% requirements.txt requirements-build.txt || goto :error
+REM set WITH_PATCHCORE=1 before build.bat to include the optional PatchCore scorer (onnxruntime)
+set "REQS=requirements.txt requirements-build.txt"
+if "%WITH_PATCHCORE%"=="1" set "REQS=%REQS% requirements-patchcore.txt"
+call tools\setup_venv.bat %VENV% %REQS% || goto :error
 call %VENV%\Scripts\activate.bat || goto :error
 
 pyinstaller --noconfirm --clean TIF_Viewer.spec || goto :error
@@ -15,6 +18,8 @@ REM Editable deployment files live next to the exe
 copy /Y config.json dist\TIF_Viewer\ >nul || goto :error
 copy /Y products.json dist\TIF_Viewer\ >nul || goto :error
 copy /Y deploy.json dist\TIF_Viewer\ >nul || goto :error
+REM PatchCore models (used only when PatchCore is selected and onnxruntime is in the build)
+if exist models xcopy /E /I /Y /Q models dist\TIF_Viewer\models >nul
 
 echo.
 echo Build OK: dist\TIF_Viewer\TIF_Viewer.exe
