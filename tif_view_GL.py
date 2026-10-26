@@ -1151,6 +1151,9 @@ class MainWindow(QMainWindow):
         cells = [(r, c) for r in range(cfg.rows) for c in range(cfg.cols) if bmap is None or bmap.get_key(r, c)]
         refs = vm.reference_bboxes(cfg, self.glw.coord_transform)
         params = dict(self._config().get("void_detect", {}))
+        rules = (getattr(self, "current_product", None) or {}).get("type_rules")
+        if rules is not None: # Per product (products.json) wins over config.json
+            params["type_rules"] = rules
         params["method"], model = self.cb_detect_method.currentData()
         if model:
             params["pc_model"] = model
@@ -1176,7 +1179,9 @@ class MainWindow(QMainWindow):
         self.glw.refresh_hover()
         self.update_void_ui()
         per = ", ".join(f"L{l}: {n}" for l, n in result["per_layer"].items())
-        msg = f"Detect Voids: {result['added']} new voids ({per}). Dashed until reviewed; 'Next Detected' walks through them."
+        kinds = ", ".join(f"{t}: {n}" for t, n in result.get("types", {}).items())
+        msg = (f"Detect Voids: {result['added']} new voids ({per}; {kinds}). "
+               "Dashed until reviewed; 'Next Detected' walks through them.")
         if not refs:
             msg += " No reference bboxes: chips were aligned on the grid cells."
         self.statusBar().showMessage(msg)

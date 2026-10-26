@@ -285,12 +285,40 @@ Void Marking 패널의 **Detect Voids**는 대략적인 보이드를 자동으�
    그다음 차이가 Thr(흩어짐 배수)를 넘는 곳을 찾습니다. **밝은 쪽과 어두운 쪽 모두** 잡습니다. layout 선에 잘려 둘로 나뉜 덩어리는 하나로 합칩니다.
 4. **0 레이어부터 아래로** 진행하며, 같은 보이드는 **처음 나타난 레이어에 한 번만** 마킹합니다. 이미 마킹된 곳(어느 레이어든)은 건너뜁니다.
 
-- 마킹 타입은 Void Marking에서 선택한 타입입니다(bbox 제외).
+- **타입 자동 구분:** layout 위치와 모양으로 타입을 정하는 규칙을 선언할 수 있습니다(아래). 규칙이 없거나 맞는 규칙이 없으면 Void Marking에서 선택한 타입(bbox 제외)으로 마킹합니다.
 - 찾은 보이드는 점선으로 그려지고, **Next Detected**로 레이어·칸 순서대로 돌아볼 수 있습니다. 수정(E)하면 실선이 됩니다. 전체 실행은 Ctrl+Z 한 번으로 되돌립니다.
 - 민감도는 Thr 칸(기본 6, 낮을수록 민감)으로 조절합니다. 나머지 값은 `config.json`의 `"void_detect"`로 바꿀 수 있습니다: `threshold`, `min_size_px`(가장 작은 보이드 지름), `max_area_frac`, `work_size`, `template_cells`.
 - 기준 bbox를 먼저 그리면(Detect BBOX) 칩 정렬이 정확해집니다.
 - 방법 상자에서 **PatchCore**(CNN 특징 기반, CPU, 선택 설치)를 고를 수도 있습니다. 검토 결과와 운영 셋업(오프라인 설치, 빌드, 설정, 임계값 보정)은 [docs/PATCHCORE.md](docs/PATCHCORE.md)를 보세요. 이 데이터에서는 기본 방식(Die-to-die)이 더 정확하고 빠릅니다.
 - 14900×14900 샘플(841칩)에서 레이어당 약 16초, 생성기의 정답(보이드 92개, 코너 박리 51개)을 모두 찾았고 모두 처음 나타난 레이어에 마킹했습니다(추가 검출 5). 칩마다 밝기·대비·감마·기울기를 크게 다르게 만든 합성 데이터에서도 98%를 찾았습니다.
+
+### 자동 마킹 타입 규칙 (`type_rules`)
+
+선택한 제품의 `products.json`에 `"type_rules"`를 적으면 그 제품에서 쓰고, 없으면 `config.json`의 `"void_detect"` → `"type_rules"`를 씁니다. 위에서부터 **처음으로 조건이 모두 맞는 규칙**의 타입으로 마킹합니다. 타입 이름은 선언한 타입 이름이고, 코드에 고정된 타입은 없습니다.
+
+```json
+"type_rules": [
+    {"type": "CornerDelam", "near": {"box": "die", "part": "corner", "within": 15}, "polarity": "bright"},
+    {"type": "PadVoid", "in": "pad", "max_size_um": 40},
+    {"type": "LongVoid", "min_aspect": 3},
+    {"type": "DieVoid", "in": "die"}
+]
+```
+
+| 조건 | 의미 |
+|---|---|
+| `in` / `not_in` | 덩어리 중심이 그 이름의 layout 박스 안 / 밖(이름 하나 또는 목록). `bbox`는 기준 bbox 전체 |
+| `overlaps` | 덩어리 범위가 그 박스와 겹침 |
+| `near` | `{"box": 이름, "part": "corner" 또는 "edge", "within": px}`: 그 박스의 코너 / 테두리에서 이 거리 안 (`within_um`도 가능) |
+| `min_size` / `max_size` | 지름(범위의 긴 변), px. `_um`을 붙이면 Scale 기준 um |
+| `min_aspect` / `max_aspect` | 긴 변 / 짧은 변 |
+| `min_fill` / `max_fill` | 덩어리 화소 / 범위 넓이 (타원 약 0.79, 사각형 약 1, 불규칙·가는 곡선은 낮음) |
+| `polarity` | `"bright"` / `"dark"`: 기준 칩보다 밝음 / 어두움 (Die-to-die만) |
+
+- layout 박스 좌표는 점선 layout처럼 실제 그린 bbox 크기에 맞춰 계산합니다.
+- 규칙의 타입이 `snap: "bbox_corner"`이면 가까운 bbox 코너(snap_offset 반영)에 붙이고, 크기는 덩어리 범위의 먼 코너까지로 맞춥니다(손으로 코너에서 그린 것과 같음).
+- 선언에 없는 타입 이름의 규칙은 건너뜁니다. 상태줄에 타입별 개수가 나옵니다.
+- 14900 샘플(2레이어)에서 다이 안 보이드 46개와 코너 박리 26개를 모두 맞는 타입으로 구분했고, 코너 박리의 크기 오차는 중앙값 1.1 px였습니다.
 
 ## 자동 BBOX (Detect BBOX)
 

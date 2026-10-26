@@ -29,6 +29,8 @@ Parameters (config.json "void_detect", defaults in DEFAULTS):
     max_area_frac    blobs larger than this fraction of the chip are ignored (misaligned / broken chip)
     work_size        longest side of the working chip image (pixels)
     template_cells   chips used to build the golden chip
+    type_rules       void type from the layout position and shape (sat_widgets/void_classify.py);
+                     products.json "type_rules" of the selected product win
     method           "die_to_die" (default) or "patchcore" (CNN features, optional: needs
                      onnxruntime and models/*.onnx, see docs/PATCHCORE.md; pc_* parameters)
 """
@@ -38,6 +40,7 @@ import numpy as np
 from PIL import Image, ImageFilter
 
 from .core_data import to_gray
+from .void_classify import Classifier
 
 DEFAULTS = {
     "threshold": 6.0,
@@ -255,6 +258,8 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
     max_area = p["max_area_frac"] * size[0] * size[1]
     gap = max(2, int(round(0.05 * max(size))))
     pc = None
+    classifier = Classifier(p.get("type_rules"), void_manager.layout, void_manager.types, void_manager.um_per_px)
+    types = {}
 
     for z, layer in enumerate(layer_numbers):
         # 1. Aligned, normalized chips of this layer
@@ -290,7 +295,7 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
                 # Same brightness / contrast / shading matching as die-to-die before the CNN
                 match = _golden(chips, p)[3]
                 chips = {k: match.apply(c.astype(np.float32)) for k, c in chips.items()}
-            items = pc.score_layer(chips, size).items()
+            items = ((cell, dev, None) for cell, dev in pc.score_layer(chips, size).items())
             threshold = float(p.get("pc_threshold", 10.0))
         else:
             items = _die_to_die(chips, p)
@@ -298,7 +303,7 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
 
         # 3. Blobs per chip
         count = 0
-        for cell, dev in items:
+        for cell, dev, signed in items:
             mask = dev > threshold
             if not mask.any():
                 continue
@@ -316,9 +321,22 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
                 ry = max(1.0, (r1 + 1 - r0) / 2.0 * sy)
                 if overlaps(cell, gx, gy, rx, ry):
                     continue # Marked already, or found on an upper layer
-                score = float(dev[r0:r1 + 1, c0:c1].max())
+                blob = dev[r0:r1 + 1, c0:c1]
+                score = float(blob.max())
+                vtype = type_name
+                extent = (x0 + c0 * sx, y0 + r0 * sy, x0 + c1 * sx, y0 + (r1 + 1) * sy)
+                if classifier:
+                    bw_, bh_ = c1 - c0, r1 + 1 - r0
+                    feat = {"center": (gx, gy),
+                            "extent": extent,
+                            "size": max(bw_ * sx, bh_ * sy),
+                            "aspect": max(bw_ * sx, bh_ * sy) / max(min(bw_ * sx, bh_ * sy), 1e-6),
+                            "fill": area / float(bw_ * bh_),
+                            "polarity": None if signed is None else
+                            ("bright" if float((signed[r0:r1 + 1, c0:c1] * blob).sum()) > 0 else "dark")}
+                    vtype = classifier.type_for(feat, rects[cell], type_name)
                 taken.setdefault(cell, []).append((gx, gy, rx, ry))
-                found.append((layer, gx, gy, rx, ry, score))
+                found.append((layer, gx, gy, rx, ry, score, vtype, cell, extent))
                 count += 1
         per_layer[layer] = count
 
@@ -326,13 +344,23 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
     vm = void_manager
     vm.begin_change()
     try:
-        for layer, gx, gy, rx, ry, score in found:
-            v = vm.add_void(layer, *to_raw(gx, gy), rx, ry, type_name)
+        for layer, gx, gy, rx, ry, score, vtype, cell, extent in found:
+            v = vm.add_void(layer, *to_raw(gx, gy), rx, ry, vtype)
             v["auto"] = "detected"
             v["score"] = round(score, 1)
+            if vm.snap_anchor(v) is not None:
+                # Corner-anchored types: attach to the bbox corner nearest the blob, sized to its
+                # far extent corner (like drawing it from the corner)
+                bx, by, bw, bh = rects[cell]
+                kx, ky = min(((bx, by), (bx + bw, by), (bx + bw, by + bh), (bx, by + bh)),
+                             key=lambda k: math.hypot(k[0] - gx, k[1] - gy))
+                far = max(((extent[0], extent[1]), (extent[2], extent[1]), (extent[2], extent[3]), (extent[0], extent[3])),
+                          key=lambda q: math.hypot(q[0] - kx, q[1] - ky))
+                vm.snap_void(v, grid_cfg, coord_transform, hint=(gx, gy), drag_point=far)
+            types[vtype] = types.get(vtype, 0) + 1
     finally:
         vm.end_change()
-    return {"added": len(found), "per_layer": per_layer}
+    return {"added": len(found), "per_layer": per_layer, "types": types}
 
 
 def _golden(chips, p):
@@ -363,4 +391,5 @@ def _die_to_die(chips, p):
     spread, gmin, gmax, match = _golden(chips, p)
     for cell in chips:
         m = match.apply(chips[cell].astype(np.float32))
-        yield cell, (np.maximum(m - gmax, 0) + np.maximum(gmin - m, 0)) / spread
+        hi, lo = np.maximum(m - gmax, 0), np.maximum(gmin - m, 0)
+        yield cell, (hi + lo) / spread, np.sign(hi - lo) # Sign: brighter / darker than the golden chip

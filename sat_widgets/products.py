@@ -26,6 +26,8 @@ Nothing about a product is defined in code: only the keys present in the file ar
     }
   }
 }
+Optional "type_rules": void types of automatic detection from layout position and shape, see
+sat_widgets/void_classify.py (overrides config.json "void_detect" -> "type_rules").
 The layout is scaled from its design size (chip_size_um, or "design_size" if given) to each
 drawn bbox, so it follows the real bbox even when the scale is slightly off.
 Legacy: "bbox": {"w", "h"} in pixels and "layout.design_size" in any unit still work.
@@ -49,21 +51,27 @@ def load_products(path):
     return products, default
 
 
-def layout_boxes(layout):
-    """Expands layout['boxes'] to a list of (x, y, w, h) in layout design units."""
+def layout_named_boxes(layout):
+    """Expands layout['boxes'] to [(name, x, y, w, h)] in layout design units (repeats share the name)."""
     if not layout:
         return []
     design_w, design_h = layout.get("design_size", (0, 0))
     out = []
-    for box in layout.get("boxes", []):
+    for i, box in enumerate(layout.get("boxes", [])):
+        name = box.get("name", f"box{i}")
         if "inset" in box:
             inset = box["inset"]
             ix, iy = layout[inset] if isinstance(inset, str) else inset
-            out.append((ix, iy, design_w - 2 * ix, design_h - 2 * iy))
+            out.append((name, ix, iy, design_w - 2 * ix, design_h - 2 * iy))
             continue
         x, y, w, h = box["rect"]
         rep = box.get("repeat") or {}
         for r in range(int(rep.get("rows", 1))):
             for c in range(int(rep.get("cols", 1))):
-                out.append((x + c * rep.get("dx", 0), y + r * rep.get("dy", 0), w, h))
+                out.append((name, x + c * rep.get("dx", 0), y + r * rep.get("dy", 0), w, h))
     return out
+
+
+def layout_boxes(layout):
+    """Expands layout['boxes'] to a list of (x, y, w, h) in layout design units."""
+    return [b[1:] for b in layout_named_boxes(layout)]
