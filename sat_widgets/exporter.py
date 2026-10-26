@@ -213,6 +213,7 @@ class ExportManager(QObject):
                             "rows": cfg.rows,
                             "cols": cfg.cols,
                             "angle": cfg.angle,
+                            "image_size": [self.data_stack.width, self.data_stack.height],
                             "um_per_px": self.void_manager.um_per_px or None
                         },
                         "patches": patch_metadata_list

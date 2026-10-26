@@ -367,8 +367,9 @@ class MosaicTiffStack(ImageStack):
     Virtual Stack acting as the ORIGINAL RAW Image, rebuilt from an exported project folder.
     Strategy: "Pre-assemble Deskewed -> Warp to Raw".
     1. Parses patches.json.
-    2. Assembles a layer on demand by pasting the patches at 'bbox_deskewed' and rotating the
-       canvas back to the raw orientation. Only MAX_CACHED_LAYERS layers are kept in memory.
+    2. Assembles a layer on demand by pasting the patches at 'bbox_deskewed' and warping the
+       canvas into the original raw frame (same size and rotation center as the exported image,
+       so voids.json and the grid line up). Only MAX_CACHED_LAYERS layers are kept in memory.
     """
     MAX_CACHED_LAYERS = 2
 
@@ -381,77 +382,56 @@ class MosaicTiffStack(ImageStack):
         self.patches = data.get("patches", [])
         self.angle = self.grid_cfg.get("angle", 0.0)
 
-        # 1. Analyze Geometry
-        self.layers = set()
         self.patches_by_layer = {}
-
-        max_dx, max_dy = 0, 0
-
-        # Sample for Alignment (Grid/Deskewed -> Raw)
-        offsets_x, offsets_y = [], []
-        rad = np.radians(self.angle)
-        cos_a, sin_a = np.cos(rad), np.sin(rad)
-
         for p in self.patches:
-            z = p["layer"]
-            self.layers.add(z)
-            self.patches_by_layer.setdefault(z, []).append(p)
-
-            # Deskewed Bounds
-            bd = p.get("bbox_deskewed", [])
-            if bd:
-                pts = np.array(bd)
-                max_dx = max(max_dx, pts[:, 0].max())
-                max_dy = max(max_dy, pts[:, 1].max())
-
-                # Alignment Calculation (Center Comparison)
-                br = p.get("bbox_raw", [])
-                if br:
-                    pts_r = np.array(br)
-                    rcx = (pts_r[:, 0].min() + pts_r[:, 0].max()) / 2.0
-                    rcy = (pts_r[:, 1].min() + pts_r[:, 1].max()) / 2.0
-
-                    dcx = (pts[:, 0].min() + pts[:, 0].max()) / 2.0
-                    dcy = (pts[:, 1].min() + pts[:, 1].max()) / 2.0
-
-                    rdx = dcx * cos_a - dcy * sin_a
-                    rdy = dcx * sin_a + dcy * cos_a
-
-                    offsets_x.append(rcx - rdx)
-                    offsets_y.append(rcy - rdy)
-
-        # Deskewed canvas size
-        self.deskew_w = int(max_dx + 2000)
-        self.deskew_h = int(max_dy + 2000)
-
-        # Relative index z -> absolute layer number
-        self.layer_ids = sorted(self.layers) if self.layers else [0]
+            self.patches_by_layer.setdefault(p["layer"], []).append(p)
+        self.layer_ids = sorted(self.patches_by_layer) or [0]
         self.n_frames = self.frame_count = len(self.layer_ids)
         self.layer_offset = self.layer_ids[0]
         self.dtype = np.dtype(np.uint8)
 
-        # Alignment Params
-        if offsets_x:
-            self.off_x = np.median(offsets_x)
-            self.off_y = np.median(offsets_y)
-        else:
-            self.off_x = 0.0
-            self.off_y = 0.0
-        self.cos_a = cos_a
-        self.sin_a = sin_a
+        # The layers are rebuilt in the ORIGINAL raw frame (same size and rotation center), so
+        # the raw void coordinates of voids.json and the grid line up exactly
+        self.width, self.height = self._original_size()
+        self.transform = CoordinateTransform(self.angle, self.width, self.height)
+        max_dx = max((pt[0] for p in self.patches for pt in p.get("bbox_deskewed", [])), default=0)
+        max_dy = max((pt[1] for p in self.patches for pt in p.get("bbox_deskewed", [])), default=0)
+        self.deskew_w = int(max(max_dx, self.width) + 2)
+        self.deskew_h = int(max(max_dy, self.height) + 2)
 
         self.layer_cache = OrderedDict() # layer_id -> (H, W) uint8
-
-        # Image size = size of an assembled (rotated) layer
-        self.height, self.width = self._layer(0).shape
         print(f"[Mosaic] {self.n_frames} layers, size {self.width}x{self.height}, angle {self.angle}")
+
+    def _original_size(self):
+        """
+        Size of the image the patches were exported from: patches.json "image_size", or (older
+        exports) solved from the patches' raw / deskewed corners, which are related by a rotation
+        about the image center: raw = c + R (deskew - c).
+        """
+        size = self.grid_cfg.get("image_size")
+        if size:
+            return int(size[0]), int(size[1])
+        pairs = [(np.asarray(p["bbox_raw"], float), np.asarray(p["bbox_deskewed"], float))
+                 for p in self.patches if p.get("bbox_raw") and p.get("bbox_deskewed")]
+        if not pairs:
+            return 1, 1
+        raw = np.concatenate([r for r, _ in pairs])
+        desk = np.concatenate([d for _, d in pairs])
+        a = np.radians(self.angle)
+        R = np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]])
+        if abs(a) > 1e-6:
+            A = np.tile(np.eye(2) - R, (len(raw), 1))
+            b = (raw - desk @ R.T).reshape(-1)
+            c = np.linalg.lstsq(A, b, rcond=None)[0]
+            return max(1, int(round(2 * c[0]))), max(1, int(round(2 * c[1])))
+        return int(np.ceil(raw[:, 0].max())), int(np.ceil(raw[:, 1].max()))
 
     def layer_number(self, z):
         return self.layer_ids[z]
 
     def _build_layer(self, layer_id):
-        print(f"Building Deskewed Layer {layer_id}...")
-        canvas = Image.new("L", (self.deskew_w, self.deskew_h), 0)
+        print(f"Building Layer {layer_id} from patches...")
+        canvas = Image.new("L", (self.deskew_w, self.deskew_h), 0) # Deskewed (grid) space
 
         for p in self.patches_by_layer.get(layer_id, []):
             bd = p.get("bbox_deskewed", [])
@@ -460,19 +440,22 @@ class MosaicTiffStack(ImageStack):
             path = os.path.join(self.base_dir, p["filename"])
             try:
                 with Image.open(path) as img:
-                    # Crop Title Bar
                     if img.height > 40:
-                        img = img.crop((0, 40, img.width, img.height))
+                        img = img.crop((0, 40, img.width, img.height)) # Title bar
                     if img.mode != "L":
                         img = img.convert("L")
                     pts = np.array(bd)
-                    canvas.paste(img, (int(pts[:, 0].min()), int(pts[:, 1].min())))
+                    canvas.paste(img, (int(round(pts[:, 0].min())), int(round(pts[:, 1].min()))))
             except Exception as e:
                 print(f"[Mosaic] Failed to load patch {path}: {e}")
 
-        if self.angle:
-            canvas = canvas.rotate(-self.angle, expand=True)
-        return np.array(canvas)
+        # Deskewed canvas -> raw frame: every raw pixel samples the canvas at raw_to_deskew(x, y)
+        t = self.transform
+        cx, cy, ci, si = t.img_cx, t.img_cy, t.cos_inv, t.sin_inv
+        coeffs = (ci, -si, cx - ci * cx + si * cy,
+                  si, ci, cy - si * cx - ci * cy)
+        raw = canvas.transform((self.width, self.height), Image.AFFINE, coeffs, resample=Image.BILINEAR)
+        return np.array(raw)
 
     def _layer(self, z):
         if z < 0:
@@ -489,16 +472,10 @@ class MosaicTiffStack(ImageStack):
         return arr
 
     def deskew_to_raw(self, gx, gy):
-        rx = (gx * self.cos_a - gy * self.sin_a) + self.off_x
-        ry = (gx * self.sin_a + gy * self.cos_a) + self.off_y
-        return rx, ry
+        return self.transform.deskew_to_raw(gx, gy)
 
     def raw_to_deskew(self, rx, ry):
-        dx = rx - self.off_x
-        dy = ry - self.off_y
-        gx = dx * self.cos_a + dy * self.sin_a
-        gy = -dx * self.sin_a + dy * self.cos_a
-        return gx, gy
+        return self.transform.raw_to_deskew(rx, ry)
 
     def read_region(self, z, x, y, w, h, step=1):
         arr = self._layer(z)

@@ -237,6 +237,7 @@ Grid 패널의 **Scale (um/px)**은 1픽셀의 실제 크기입니다. 값이 �
 ## 본딩맵
 
 - 엑셀에서 복사한 맵을 붙여넣고 "Import Map Data"를 누릅니다.
+- **Open Project:** Export 폴더(patches.json + raw 패치 + voids.json)를 다시 열면 패치를 원본 이미지와 같은 좌표계(같은 크기, 같은 회전 중심)로 다시 맞춰 붙입니다. 그래서 voids.json의 마킹과 그리드가 그대로 맞습니다. patches.json에 원본 크기(`image_size`)를 저장하고, 이전 Export는 패치 좌표에서 원본 크기를 계산합니다.
 - overlay 패치에는 마킹과 함께 제품 layout(점선)도 그립니다. PNG는 가벼운 압축(파일 약 15% 증가)으로 여러 스레드에서 저장해, 이전보다 약 8배 빠릅니다.
 - Export 이미지(raw, overlay, mask, merged)는 **LEG(본딩맵 값)가 있는 칸만** 저장합니다. 본딩맵이 없으면 이미지 Export를 시작하지 않습니다. 붙여넣은 맵은 `bonding_map.txt`(그대로 다시 붙여넣을 수 있음), Reject Values는 `bonding_map_reject.txt`로 함께 저장합니다.
 - **Reject Values:** 쉼표로 구분한 값(예: `X, NG`)과 일치하는 칸은 본딩되지 않은 칸으로 처리합니다. ROI, Export, 칸 이동, 캘리브레이션, 각도 미리보기에서 모두 빠집니다. 값을 바꾸고 Enter를 누르면 바로 다시 적용합니다.
