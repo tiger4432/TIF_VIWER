@@ -1,13 +1,12 @@
 @echo off
 REM Builds dist\TIF_Viewer\TIF_Viewer.exe with PyInstaller (Windows x64, Python 3.10 - 3.13).
-REM Python used to create .venv, in this order:
+REM Python used for .venv, in this order:
 REM   1. %PYTHON% if set           e.g.  set PYTHON=C:\Python310\python.exe
 REM   2. the py launcher           py -3.10
 REM   3. python on PATH            e.g. an activated conda environment
+REM An existing .venv made with a different Python is recreated.
 setlocal
 cd /d "%~dp0"
-
-if exist .venv\Scripts\python.exe goto :venv_ready
 
 set "PYEXE="
 if defined PYTHON set PYEXE="%PYTHON%"
@@ -29,7 +28,16 @@ set "PYEXE=python"
 %PYEXE% -c "import sys; sys.exit(0 if (3, 10) <= sys.version_info[:2] <= (3, 13) and sys.maxsize > 2**32 else 1)"
 if errorlevel 1 goto :bad_python
 echo Using Python: %PYEXE%
-%PYEXE% -c "import sys; print(sys.version)"
+%PYEXE% -c "import sys; print(sys.version); print(sys.base_prefix)"
+
+if not exist .venv\pyvenv.cfg goto :make_venv
+REM Reuse .venv only if it was created from this Python installation
+%PYEXE% -c "import os, sys; cfg = {k.strip(): v.strip() for k, v in (l.split('=', 1) for l in open(r'.venv\pyvenv.cfg') if '=' in l)}; base = os.path.dirname(getattr(sys, '_base_executable', sys.executable)); same = os.path.normcase(os.path.abspath(cfg.get('home', ''))) == os.path.normcase(os.path.abspath(base)); sys.exit(0 if same else 1)"
+if not errorlevel 1 goto :venv_ready
+echo .venv was created with another Python - recreating it.
+rmdir /s /q .venv || goto :error
+
+:make_venv
 %PYEXE% -m venv .venv || goto :error
 
 :venv_ready
@@ -64,11 +72,11 @@ goto :error
 :qt_broken
 echo.
 echo PySide6 / Qt cannot be loaded with this Python - "DLL load failed ... procedure not found".
-echo Cause: Anaconda base Python ships an older MSVC runtime - msvcp140.dll - that Qt 6 cannot use.
+echo Cause: this Python installation - e.g. Anaconda base - ships an older MSVC runtime, msvcp140.dll, that Qt 6 cannot use.
 echo Fix, either:
-echo   1. Install Python 3.10 x64 from python.org, open a new console without conda activated.
-echo   2. conda create -n tifviewer -c conda-forge python=3.10   then   conda activate tifviewer
-echo Then delete the .venv folder - rmdir /s /q .venv - and run build.bat again.
+echo   1. Install Python 3.10 x64 from python.org and run build.bat from a console without conda activated.
+echo   2. conda create -n tifviewer -c conda-forge python=3.10   then   conda activate tifviewer   and run build.bat.
+echo .venv is recreated automatically for the new Python.
 goto :error
 
 :error
