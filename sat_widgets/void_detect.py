@@ -7,8 +7,10 @@ background:
 
 1. Each (bonded) cell is cut out aligned on its reference bbox (the drawn bbox is the reference;
    the cell rect when there is none), reduced to a working size and normalized (median / MAD).
-   For the comparison, each chip's gain and offset are fitted to the golden chip robustly
-   (defect pixels excluded), so big defects do not make the whole layout look different.
+   For the comparison each chip is matched to the golden chip: a monotone intensity curve
+   (brightness, contrast, gamma differ from chip to chip) and planar shading across the chip,
+   fitted robustly (defect pixels excluded). A pixel inside the 3x3 min..max range of the golden
+   chip counts as normal, so 1 px shifts and slightly different edges are tolerated.
 2. Per layer, the golden chip is the per-pixel median over (a sample of) all chips, and the
    per-pixel spread is the median absolute deviation from it. Layout edges vary more from chip
    to chip (registration), so they get a larger spread and do not trigger.
@@ -111,29 +113,86 @@ def _normalize(a):
     return (a - med) / mad
 
 
-def _fit_gain(chip, golden):
+class _Matcher:
     """
-    chip ~ a * golden + b, fitted robustly (pixels of large residual, i.e. defects, are dropped
-    and the fit repeated), so a big defect does not skew the brightness match of the whole chip.
+    Maps a chip onto the golden chip, so chips that look a bit different compare equal:
+    - intensity curve (brightness, contrast, gamma): the golden chip's pixels are grouped in
+      classes by value (die, pads, lines, bumps ... each structure level is a class), and each
+      class maps the chip's median over the class to the class' golden level. Medians per class:
+      defects are a minority in every class, small structures (a pad) keep their own point.
+      Piecewise linear between the points, linear beyond the ends (defects are not clipped);
+    - planar shading across the chip (offset and gain planes), fitted robustly on what is left.
+    Both are estimated twice, alternately.
     """
-    x = golden.ravel()
-    y = chip.ravel()
-    keep = np.ones(x.shape, bool)
-    a, b = 1.0, 0.0
-    for _ in range(3):
-        xs, ys = x[keep], y[keep]
-        if xs.size < 16:
-            break
-        vx = float(xs.var())
-        if vx < 1e-9:
-            a, b = 1.0, float(np.median(ys - xs))
-        else:
-            a = float(((xs - xs.mean()) * (ys - ys.mean())).mean() / vx)
-            b = float(ys.mean() - a * xs.mean())
-        res = y - (a * x + b)
-        mad = float(np.median(np.abs(res[keep][::5]))) * 1.4826 + 1e-6
-        keep = np.abs(res) < 3.0 * mad
-    return a, b
+    LEVELS = 16
+    MIN_CLASS = 0.003 # Fraction of the chip
+
+    def __init__(self, golden):
+        self.golden = golden
+        h, w = golden.shape
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+        self.fx, self.fy = (xx / w - 0.5).ravel(), (yy / h - 0.5).ravel()
+        g = golden.ravel()
+        self.gc = g - float(g.mean())
+        lo, hi = np.percentile(g, [0.5, 99.5])
+        cls = np.clip(((g - lo) / max(hi - lo, 1e-9) * self.LEVELS).astype(int), 0, self.LEVELS - 1)
+        self.classes = [np.nonzero(cls == k)[0] for k in range(self.LEVELS)]
+        # Each class sampled at 2048 evenly spread pixels: all class medians in one call (speed)
+        self.classes = np.stack([ix[np.linspace(0, len(ix) - 1, 2048).astype(int)]
+                                 for ix in self.classes if len(ix) >= self.MIN_CLASS * g.size]) \
+            if any(len(ix) >= self.MIN_CLASS * g.size for ix in self.classes) else np.zeros((0, 2048), int)
+        self.sub = np.arange(0, g.size, 4) # Shading fit on a subsample (speed)
+        fx, fy, gc = self.fx[self.sub], self.fy[self.sub], self.gc[self.sub]
+        self.X = np.stack([np.ones_like(fx), fx, fy, gc, gc * fx, gc * fy], axis=1)
+        self.gs = g[self.sub]
+
+    def _curve(self, c, target):
+        xs = np.median(c[self.classes], axis=1)
+        ys = np.median(target[self.classes], axis=1)
+        order = np.argsort(xs)
+        xs = xs[order] + np.arange(len(xs)) * 1e-6
+        ys = np.maximum.accumulate(ys[order])
+        return xs, ys
+
+    @staticmethod
+    def _map(v, xs, ys):
+        if len(xs) < 2:
+            return v - xs[0] + ys[0] if len(xs) else v
+        out = np.interp(v, xs, ys)
+        s_all = max((ys[-1] - ys[0]) / max(xs[-1] - xs[0], 1e-9), 1e-3)
+        hi, lo = v > xs[-1], v < xs[0]
+        out[hi] = ys[-1] + (v[hi] - xs[-1]) * s_all # Beyond the ends: overall slope
+        out[lo] = ys[0] + (v[lo] - xs[0]) * s_all
+        return out
+
+    def _shading(self, r):
+        keep = np.ones(r.shape, bool)
+        coef = np.zeros(6)
+        for _ in range(3):
+            if keep.sum() < 32:
+                break
+            Xk = self.X[keep]
+            A = Xk.T @ Xk + np.eye(6) * 1e-6 # Normal equations (6 x 6): fast
+            coef = np.linalg.solve(A, Xk.T @ r[keep])
+            res = r - self.X @ coef
+            mad = float(np.median(np.abs(res[keep]))) * 1.4826 + 1e-6
+            keep = np.abs(res) < 3.0 * mad
+        return coef
+
+    def apply(self, chip):
+        c = chip.ravel()
+        g = self.golden.ravel()
+        shade = np.zeros_like(g)
+        for _ in range(2):
+            xs, ys = self._curve(c, g + shade) # Curve towards golden + current shading
+            coef = self._shading(self._map(c[self.sub], xs, ys) - self.gs)
+            c0, c1, c2, d0, d1, d2 = (float(k) for k in coef)
+            shade = c0 + c1 * self.fx + c2 * self.fy + (d0 + d1 * self.fx + d2 * self.fy) * self.gc
+        return (self._map(c, xs, ys) - shade).reshape(chip.shape).astype(np.float32)
+
+
+def _filt(a, f):
+    return np.asarray(Image.fromarray(np.asarray(a, np.float32)).filter(f))
 
 
 def _open(mask):
@@ -216,24 +275,31 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
         if len(chips) < 3:
             continue
 
-        # 2. Golden chip and per-pixel spread
+        # 2. Golden chip: median of the sample, then again after matching the sample to it
         keys = list(chips)
         rng = np.random.default_rng(0)
         sample = keys if len(keys) <= p["template_cells"] else \
             [keys[i] for i in rng.choice(len(keys), p["template_cells"], replace=False)]
-        stackarr = np.stack([chips[k] for k in sample]).astype(np.float32)
-        golden = np.median(stackarr, axis=0)
-        spread = np.median(np.abs(stackarr - golden), axis=0) * 1.4826
-        del stackarr
-        spread = np.asarray(Image.fromarray(spread).filter(ImageFilter.MaxFilter(3))) # Registration jitter
+        golden0 = np.median(np.stack([chips[k] for k in sample]).astype(np.float32), axis=0)
+        match0 = _Matcher(golden0)
+        matched = np.stack([match0.apply(chips[k].astype(np.float32)) for k in sample])
+        golden = np.median(matched, axis=0)
+        # Per-pixel chip-to-chip spread of the matched chips (larger at layout edges)
+        spread = np.median(np.abs(matched - golden), axis=0) * 1.4826
+        del matched
+        spread = _filt(spread, ImageFilter.MaxFilter(3))
         spread = np.maximum(spread, 0.5 * float(np.median(spread)) + 1e-3)
+        # Local range of the golden chip: a pixel inside the 3x3 min..max of the golden chip is
+        # not a defect (1 px shifts, slightly different edges)
+        gmin = _filt(golden, ImageFilter.MinFilter(3))
+        gmax = _filt(golden, ImageFilter.MaxFilter(3))
+        match = _Matcher(golden)
 
         # 3. Blobs per chip
         count = 0
         for cell in keys:
-            chip = chips[cell].astype(np.float32)
-            a, b = _fit_gain(chip, golden)
-            dev = np.abs(chip - (a * golden + b)) / (max(abs(a), 0.2) * spread)
+            m = match.apply(chips[cell].astype(np.float32))
+            dev = (np.maximum(m - gmax, 0) + np.maximum(gmin - m, 0)) / spread
             mask = dev > p["threshold"]
             if not mask.any():
                 continue
