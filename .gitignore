@@ -4,3 +4,4 @@ build/
 .venv/
 sample_*.tif
 .venv-build/
+.venv-dev/

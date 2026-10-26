@@ -525,6 +525,23 @@ class VoidManager:
         target, _ = self.hit_test(layer, gx, gy, hit_radius, coord_transform)
         return target is not None and self.remove_void(layer, target)
         
+    @staticmethod
+    def boundary_distance(shape, dx, dy, rx, ry, p=2.0):
+        """
+        Distance from the point (dx, dy) relative to the center to the shape outline, and whether
+        it is inside. Rectangle: exact. Ellipse / superellipse: measured along the ray from the
+        center (close to the true distance; exact on the axes).
+        """
+        ax, ay = abs(dx), abs(dy)
+        if shape == "rectangle":
+            if ax <= rx and ay <= ry:
+                return min(rx - ax, ry - ay), True
+            return math.hypot(max(ax - rx, 0.0), max(ay - ry, 0.0)), False
+        t = ((ax / max(rx, 1e-9)) ** p + (ay / max(ry, 1e-9)) ** p) ** (1.0 / p)
+        if t < 1e-9:
+            return min(rx, ry), True
+        return math.hypot(dx, dy) * abs(1.0 - 1.0 / t), t <= 1.0
+
     def hit_test(self, layer, gx, gy, margin=5.0, coord_transform=None, quadrant_ctx=None):
         """
         gx, gy: Query Point (usually Mouse in Screen/Deskewed Space)
@@ -553,31 +570,14 @@ class VoidManager:
             if quadrant and ((gx - cx) * quadrant[0] < -margin or (gy - cy) * quadrant[1] < -margin):
                 continue
             
-            dx = abs(gx - cx)
-            dy = abs(gy - cy)
+            dist, inside = self.boundary_distance(shape, gx - cx, gy - cy, rx, ry,
+                                                  self.p_of(v) if shape == "curve" else 2.0)
+            if not inside and dist > margin:
+                continue
+            # Edge band: the margin, but at most a third of the shape so small voids stay movable
+            band = min(margin, 0.35 * min(rx, ry)) if inside else margin
+            return v, ('edge' if dist <= band else 'center')
 
-            # Inner (move) region: at least half of the shape, so small voids stay movable
-            # when zoomed out (large margin).
-            in_rx = max(rx * 0.5, rx - margin)
-            in_ry = max(ry * 0.5, ry - margin)
-
-            if shape == "rectangle":
-                # Rectangle Test (Axis Aligned in Query Space)
-                if dx <= rx + margin and dy <= ry + margin:
-                     on_edge = (dx > in_rx) or (dy > in_ry)
-                     return v, ('edge' if on_edge else 'center')
-            else:
-                # Ellipse (p = 2) / Curve Test (normalized distance)
-                p = self.p_of(v) if shape == "curve" else 2.0
-                ndx = dx / (rx + margin)
-                ndy = dy / (ry + margin)
-                if ndx**p + ndy**p <= 1.0:
-                    ndx_in = dx / max(0.1, in_rx)
-                    ndy_in = dy / max(0.1, in_ry)
-                    if ndx_in**p + ndy_in**p > 1.0:
-                         return v, 'edge'
-                    return v, 'center'
-                    
         return None, None
 
     def hit_test_all(self, gx, gy, margin=1.0, priority_layer=None, coord_transform=None):

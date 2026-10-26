@@ -22,6 +22,19 @@ pip install -r requirements.txt
 python tif_view_GL.py
 ```
 
+## 개발 실행 (최신 코드 + 실시간 반영)
+
+```bat
+dev.bat              REM git pull 후 소스로 실행
+dev.bat watch        REM 위 + 30초마다 자동 pull (최소화된 "TIF_Viewer auto-pull" 창, 닫으면 중지)
+dev.bat watch 10     REM 10초마다
+```
+
+- **동작:** `git pull` → 개발용 가상환경 `.venv-dev` 준비(`requirements.txt` + `requirements-dev.txt`) → `python -m jurigged -v tif_view_GL.py`로 실행합니다.
+- **실시간 반영:** jurigged가 소스 파일을 감시합니다. 저장하거나 pull로 바뀐 함수/메서드는 실행 중인 프로그램에 바로 적용되고, 콘솔에 `Update ...`로 표시됩니다.
+- **재시작이 필요한 변경:** `__init__`에서 만드는 위젯(새 버튼 등), 클래스 구조 변경이 해당합니다. `config.json`/`products.json` 변경은 "Reload Declarations"로 반영합니다.
+- **Python 선택:** `build.bat`와 같은 규칙(`tools\setup_venv.bat`)을 씁니다.
+
 ## 빌드 가이드 (PyInstaller)
 
 ### 한 번에 빌드
