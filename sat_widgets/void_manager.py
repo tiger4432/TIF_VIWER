@@ -269,8 +269,8 @@ class VoidManager:
             brush = Qt.NoBrush
         else:
             pen = QPen(QColor(r, g, b, 255))
-            if v.get("auto") == "estimated":
-                pen.setStyle(Qt.DashLine) # Auto BBOX could not detect it: needs a review
+            if v.get("auto"):
+                pen.setStyle(Qt.DashLine) # Estimated bbox / detected void: needs a review
             brush = Qt.NoBrush
         pen.setWidthF(width)
         painter.setPen(pen)

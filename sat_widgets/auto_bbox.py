@@ -126,14 +126,14 @@ def detect_box(patch, params=DEFAULTS, expected=None):
 def place_bboxes(stack, z, layer_number, grid_cfg, coord_transform, void_manager, bbox_type,
                  size, cells, params=None, progress=None):
     """
-    Detects and (re)places the bbox of every cell in `cells` [(row, col)] on `layer_number`.
+    Detects and places the bbox of every cell in `cells` [(row, col)] on `layer_number`. All
+    existing bboxes (every cell, every layer) are removed first.
     bbox_type: name of the bbox void type. size: declared (w, h); None -> detected size. One undo step.
     Returns {"detected": n, "estimated": [(r, c)], "failed": [(r, c)]}.
     """
     p = dict(DEFAULTS)
     p.update(params or {})
     to_raw = coord_transform.deskew_to_raw if coord_transform else (lambda x, y: (x, y))
-    to_deskew = coord_transform.raw_to_deskew if coord_transform else (lambda x, y: (x, y))
     pitch = max(grid_cfg.pitch_x, grid_cfg.pitch_y)
     half = 0.5 * p["window_scale"] * pitch
 
@@ -179,11 +179,10 @@ def place_bboxes(stack, z, layer_number, grid_cfg, coord_transform, void_manager
     vm = void_manager
     vm.begin_change()
     try:
-        cellset = set(cells)
-        old = [v for v in vm.voids.get(layer_number, [])
-               if v.get("type") == bbox_type and grid_cfg.cell_at(*to_deskew(v["globalCX"], v["globalCY"])) in cellset]
-        for v in old:
-            vm.remove_void(layer_number, v)
+        # Start over: every existing bbox (all cells, all layers) is replaced
+        for layer, vs in list(vm.voids.items()):
+            for v in [v for v in vs if vm.is_bbox(v)]:
+                vm.remove_void(layer, v)
 
         for (r, c) in cells:
             cx = grid_cfg.start_x + (c + 0.5) * grid_cfg.pitch_x

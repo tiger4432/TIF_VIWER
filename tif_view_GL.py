@@ -29,6 +29,7 @@ from sat_widgets.patch_viewer import PatchViewer
 from sat_widgets.roi_inspector import ROIInspector
 from sat_widgets.angle_preview import AnglePreview
 from sat_widgets.auto_bbox import place_bboxes
+from sat_widgets import void_detect
 from sat_widgets.products import load_products, GRID_KEYS
 from sat_widgets.app_paths import declaration_path, sync_declarations, default_update_manifest
 from sat_widgets.version import APP_VERSION
@@ -354,6 +355,25 @@ class MainWindow(QMainWindow):
         v_layout_void.addWidget(self.lbl_void_count)
         v_layout_void.addLayout(h_layout_void_btns)
         v_layout_void.addWidget(self.btn_clear_voids)
+
+        # Rough automatic detection (die-to-die comparison), marked with the selected type
+        h_detect = QHBoxLayout()
+        btn_detect = QPushButton("Detect Voids")
+        btn_detect.setToolTip("Compare every chip with the median chip of its layer (layout-independent), from the top\n"
+                              "layer down; each void is marked once, on the layer where it first appears, with the\n"
+                              "selected type. Brighter and darker spots both count. Results are dashed until edited.")
+        btn_detect.clicked.connect(self.detect_voids)
+        self.sb_detect_thr = QDoubleSpinBox(); self.sb_detect_thr.setRange(2.0, 50.0); self.sb_detect_thr.setSingleStep(0.5)
+        self.sb_detect_thr.setValue(float(self._config().get("void_detect", {}).get("threshold", void_detect.DEFAULTS["threshold"])))
+        self.sb_detect_thr.setPrefix("Thr ")
+        self.sb_detect_thr.setToolTip("Deviation from the median chip, in units of its chip-to-chip spread. Lower = more sensitive.")
+        btn_next_det = QPushButton("Next Detected")
+        btn_next_det.setToolTip("Go to the next detected void that was not reviewed (edited) yet, layer by layer")
+        btn_next_det.clicked.connect(self.next_detected_void)
+        h_detect.addWidget(btn_detect)
+        h_detect.addWidget(self.sb_detect_thr)
+        h_detect.addWidget(btn_next_det)
+        v_layout_void.addLayout(h_detect)
         
         dock_layout.addWidget(self.gb_void)
         
@@ -1073,6 +1093,69 @@ class MainWindow(QMainWindow):
         self.glw.fit_to_cell(nxt[1], nxt[0])
         self.statusBar().showMessage(f"Estimated bbox {cells.index(nxt) + 1}/{len(cells)}: X{nxt[1]:02d} Y{nxt[0]:02d}")
         
+    def detect_voids(self):
+        """Rough automatic void detection on all loaded layers (see sat_widgets/void_detect.py)."""
+        if self.full_data is None or self.glw.tiled_image is None:
+            return
+        vm = self.void_manager
+        type_name = self.glw.active_type
+        if not type_name or type_name not in vm.types or vm.is_bbox({"type": type_name}):
+            QMessageBox.warning(self, "Detect Voids", "Select the void type to mark with (not the bbox type).")
+            return
+        cfg = self.glw.grid_cfg
+        bmap = self.glw.bonding_map
+        cells = [(r, c) for r in range(cfg.rows) for c in range(cfg.cols) if bmap is None or bmap.get_key(r, c)]
+        refs = vm.reference_bboxes(cfg, self.glw.coord_transform)
+        params = dict(self._config().get("void_detect", {}))
+        params["threshold"] = self.sb_detect_thr.value()
+        layers = [self.abs_layer(z) for z in range(len(self.full_data))]
+
+        progress = QProgressDialog("Detecting voids...", "Cancel", 0, 1000, self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+
+        def step(i, n, text):
+            if i % 20 == 0:
+                progress.setValue(int(1000 * i / max(1, n)))
+                progress.setLabelText(text)
+                QApplication.processEvents()
+            return not progress.wasCanceled()
+
+        result = void_detect.detect_voids(self.full_data, cfg, self.glw.coord_transform, refs, cells,
+                                          layers, vm, type_name, params, step)
+        progress.close()
+        if result is None:
+            return
+        self.glw.refresh_hover()
+        self.update_void_ui()
+        per = ", ".join(f"L{l}: {n}" for l, n in result["per_layer"].items())
+        msg = f"Detect Voids: {result['added']} new voids ({per}). Dashed until reviewed; 'Next Detected' walks through them."
+        if not refs:
+            msg += " No reference bboxes: chips were aligned on the grid cells."
+        self.statusBar().showMessage(msg)
+        print(msg)
+
+    def next_detected_void(self):
+        """Navigates through the detected voids not reviewed yet (layer, row, col order)."""
+        items = []
+        for layer, vs in self.void_manager.voids.items():
+            for v in vs:
+                if v.get("auto") == "detected":
+                    r, c = self.glw.raw_to_cell(v["globalCX"], v["globalCY"])
+                    items.append((layer, r, c))
+        if not items:
+            self.statusBar().showMessage("No detected voids left to review.")
+            return
+        items = sorted(set(items))
+        here = (self.glw.current_layer,) + tuple(self.glw.center_cell())
+        nxt = next((it for it in items if it > here), items[0])
+        layer, r, c = nxt
+        z = next((z for z in range(len(self.full_data)) if self.abs_layer(z) == layer), None)
+        if z is not None and z != self.current_z:
+            self.spin_layer.setValue(z)
+        self.glw.fit_to_cell(c, r)
+        self.statusBar().showMessage(f"Detected void {items.index(nxt) + 1}/{len(items)}: layer {layer}, X{c:02d} Y{r:02d}")
+
     def update_void_ui(self):
         # Update label count (voids are keyed by absolute layer number)
         count = len(self.void_manager.voids.get(self.glw.current_layer, []))
