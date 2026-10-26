@@ -6,7 +6,7 @@ Detect Voids의 선택 방식으로 PatchCore(CNN 특징 기반 이상 탐지)�
 
 - **기본은 지금의 Die-to-die를 유지합니다.** 이 데이터(정렬된 같은 칩의 반복)에서는 Die-to-die가 검출률, 오검출, 경계 정확도, 속도 모두 앞섭니다.
 - PatchCore는 **선택 기능**으로 넣었습니다. 실데이터에서 Die-to-die가 잘 안 되는 경우(예: 칩마다 질감·노이즈 양상이 크게 다름)에 비교해 볼 수 있습니다.
-- 가벼움을 위해 저장소에는 **MobileNetV2 모델(2.4 MB)만** 넣었습니다. PatchCore 안에서는 ResNet50(34 MB)이 더 정확하지만 2배 이상 느립니다. 필요하면 2.6절로 만들 수 있습니다.
+- 저장소에 두 모델을 넣었습니다: **MobileNetV2(2.4 MB, 가벼움)**, **ResNet50(34 MB, PatchCore 중 더 정확, 2배 이상 느림)**. 방법 상자에서 고릅니다.
 - 모두 **CPU 전용**, onnxruntime만 추가(선택)합니다. PyTorch는 쓰지 않습니다.
 
 ## 검토 결과
@@ -40,7 +40,7 @@ Detect Voids의 선택 방식으로 PatchCore(CNN 특징 기반 이상 탐지)�
 
 | 항목 | 내용 |
 |---|---|
-| 백본 | ImageNet 사전학습 **MobileNetV2**(기본, `models/patchcore_mobilenetv2.onnx`, 2.4 MB). ResNet50(34 MB)은 비교용으로만 변환 가능 |
+| 백본 | ImageNet 사전학습 **MobileNetV2**(`models/patchcore_mobilenetv2.onnx`, 2.4 MB) 또는 **ResNet50**(`models/patchcore_resnet50.onnx`, 34 MB) |
 | 실행 | **CPU 전용**, onnxruntime. PyTorch·TensorFlow 없음 |
 | 가중치 | 저장소 `models/`에 ONNX로 포함. **실행 중 다운로드 없음** |
 | 특징 | 중간층 2개(stride 8, 16)를 합치고 3×3 평균 → 128차원 랜덤 투영 |
@@ -56,7 +56,7 @@ Detect Voids의 선택 방식으로 PatchCore(CNN 특징 기반 이상 탐지)�
 
 | 구성 | 위치 | 비고 |
 |---|---|---|
-| 모델 | `models/patchcore_mobilenetv2.onnx` | 저장소에 포함(2.4 MB) |
+| 모델 | `models/patchcore_mobilenetv2.onnx`, `models/patchcore_resnet50.onnx` | 저장소에 포함(2.4 MB, 34 MB). 하나만 배포하려면 다른 파일을 빼면 되고, 없는 모델은 방법 상자에서 비활성화됩니다 |
 | 런타임 | `onnxruntime==1.20.1` (`requirements-patchcore.txt`) | CPU 전용 휠, Windows x64 / Python 3.10 |
 | 프로그램 | 이 저장소 | onnxruntime이 없거나 모델 파일이 없으면 PatchCore 항목만 비활성화되고 나머지는 그대로 동작 |
 
@@ -90,7 +90,7 @@ build.bat
 
 1. 그리드·본딩맵을 맞추고 **Detect BBOX**로 기준 bbox를 그립니다(칩 정렬 기준).
 2. Void Marking에서 마킹할 타입을 고릅니다.
-3. Detect Voids 옆 방법 상자에서 **PatchCore**를 고릅니다. 비활성이면 마우스를 올려 이유(onnxruntime 없음 / 모델 없음)를 확인합니다.
+3. Detect Voids 옆 방법 상자에서 **PatchCore MobileNetV2** 또는 **PatchCore ResNet50**을 고릅니다. 비활성이면 마우스를 올려 이유(onnxruntime 없음 / 모델 없음)를 확인합니다.
 4. Thr(PatchCore 기본 10)를 정하고 **Detect Voids**를 누릅니다. 방법마다 Thr 값을 따로 기억합니다.
 5. 결과는 점선입니다. **Next Detected**로 확인하고, 수정(E)하면 실선이 됩니다. 전체 결과는 Ctrl+Z 한 번으로 되돌립니다.
 
@@ -111,7 +111,7 @@ build.bat
 |---|---|---|
 | `method` | `"die_to_die"` | 시작할 때 고를 방법 |
 | `pc_threshold` | 10 | 레이어 중앙값에서 MAD 몇 배 이상을 이상으로 볼지. 낮을수록 민감 |
-| `pc_model` | `models/patchcore_mobilenetv2.onnx` | 프로그램 폴더 기준 상대 경로 또는 절대 경로 |
+| `pc_model` | `models/patchcore_mobilenetv2.onnx` | `method`가 patchcore일 때 시작할 모델. 프로그램 폴더 기준 상대 경로 또는 절대 경로. 목록에 없는 경로면 방법 상자에 "PatchCore (config.json)"로 추가됩니다 |
 | `pc_input` | 224 | CNN 입력 크기. 특징 격자는 입력/8(224 → 28×28). 키우면 위치가 정밀해지지만 시간은 제곱으로 늘어납니다 |
 | `pc_dims` | 128 | 특징 투영 차원 |
 | `pc_bank_chips` | 64 | 각 위치에서 비교할 다른 칩 수. 늘리면 정확도↑, 시간↑ |

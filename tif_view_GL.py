@@ -372,8 +372,9 @@ class MainWindow(QMainWindow):
         btn_next_det.clicked.connect(self.next_detected_void)
         # Scorer: die-to-die (default) or the optional PatchCore (onnxruntime + models/*.onnx)
         self.cb_detect_method = QComboBox()
-        self.cb_detect_method.addItem("Die-to-die", "die_to_die")
-        self.cb_detect_method.addItem("PatchCore", "patchcore")
+        self.cb_detect_method.addItem("Die-to-die", ("die_to_die", None))
+        self.cb_detect_method.addItem("PatchCore MobileNetV2", ("patchcore", "models/patchcore_mobilenetv2.onnx"))
+        self.cb_detect_method.addItem("PatchCore ResNet50", ("patchcore", "models/patchcore_resnet50.onnx"))
         self.cb_detect_method.setToolTip("Die-to-die: pixel comparison with the median chip (fast, exact outlines).\n"
                                          "PatchCore: CNN features (optional, slower, coarse outlines), see docs/PATCHCORE.md.")
         self._detect_thr = {}
@@ -1104,27 +1105,37 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Estimated bbox {cells.index(nxt) + 1}/{len(cells)}: X{nxt[1]:02d} Y{nxt[0]:02d}")
         
     def _init_detect_method(self):
+        """PatchCore items are enabled when onnxruntime and their model file are there."""
         from sat_widgets import patchcore
         cfg = self._config().get("void_detect", {})
-        reason = patchcore.available(cfg)
-        item = self.cb_detect_method.model().item(1)
-        item.setEnabled(not reason)
-        item.setToolTip(reason or "CNN features, position-aware nearest neighbour (CPU)")
-        method = cfg.get("method", "die_to_die")
-        self.cb_detect_method.setCurrentIndex(1 if method == "patchcore" and not reason else 0)
+        custom = cfg.get("pc_model")
+        if custom and all(self.cb_detect_method.itemData(i)[1] != custom for i in range(self.cb_detect_method.count())):
+            self.cb_detect_method.addItem("PatchCore (config.json)", ("patchcore", custom))
+        start = 0
+        for i in range(1, self.cb_detect_method.count()):
+            model = self.cb_detect_method.itemData(i)[1]
+            reason = patchcore.available({"pc_model": model})
+            item = self.cb_detect_method.model().item(i)
+            item.setEnabled(not reason)
+            item.setToolTip(reason or "CNN features, position-aware nearest neighbour (CPU), see docs/PATCHCORE.md")
+            if not reason and cfg.get("method") == "patchcore" and model == (custom or patchcore.DEFAULTS["pc_model"]):
+                start = i
+        self.cb_detect_method.setCurrentIndex(start)
         self._on_detect_method()
 
     def _on_detect_method(self, *_):
         """Each method keeps its own threshold (config.json "void_detect": threshold / pc_threshold)."""
         from sat_widgets import patchcore
         cfg = self._config().get("void_detect", {})
-        method = self.cb_detect_method.currentData()
-        if getattr(self, "_detect_last", None):
-            self._detect_thr[self._detect_last] = self.sb_detect_thr.value()
+        idx = self.cb_detect_method.currentIndex()
+        method = self.cb_detect_method.currentData()[0]
+        last = getattr(self, "_detect_last", None)
+        if last is not None:
+            self._detect_thr[last] = self.sb_detect_thr.value()
         default = cfg.get("pc_threshold", patchcore.DEFAULTS["pc_threshold"]) if method == "patchcore" else \
             cfg.get("threshold", void_detect.DEFAULTS["threshold"])
-        self.sb_detect_thr.setValue(float(self._detect_thr.get(method, default)))
-        self._detect_last = method
+        self.sb_detect_thr.setValue(float(self._detect_thr.get(idx, default)))
+        self._detect_last = idx
 
     def detect_voids(self):
         """Rough automatic void detection on all loaded layers (see sat_widgets/void_detect.py)."""
@@ -1140,7 +1151,9 @@ class MainWindow(QMainWindow):
         cells = [(r, c) for r in range(cfg.rows) for c in range(cfg.cols) if bmap is None or bmap.get_key(r, c)]
         refs = vm.reference_bboxes(cfg, self.glw.coord_transform)
         params = dict(self._config().get("void_detect", {}))
-        params["method"] = self.cb_detect_method.currentData()
+        params["method"], model = self.cb_detect_method.currentData()
+        if model:
+            params["pc_model"] = model
         params["pc_threshold" if params["method"] == "patchcore" else "threshold"] = self.sb_detect_thr.value()
         layers = [self.abs_layer(z) for z in range(len(self.full_data))]
 
