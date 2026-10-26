@@ -151,6 +151,15 @@ class MainWindow(QMainWindow):
         self.sb_angle = QDoubleSpinBox(); self.sb_angle.setRange(-180, 180); self.sb_angle.setValue(0.0)
         self.sb_angle.setSingleStep(0.1)
         form.addRow("Angle:", self.sb_angle)
+
+        # Pixel size: chip / layout declarations in um -> pixels, um columns of the exports
+        self.sb_um_per_px = QDoubleSpinBox(); self.sb_um_per_px.setRange(0, 100000); self.sb_um_per_px.setDecimals(4)
+        self.sb_um_per_px.setSingleStep(0.1); self.sb_um_per_px.setSuffix(" um/px")
+        self.sb_um_per_px.setSpecialValueText("not set") # 0
+        self.sb_um_per_px.setToolTip("How many um one image pixel is. Converts the product's chip size (um) to the\n"
+                                     "bbox size in pixels and fills the um columns of voids.json / voids.csv.")
+        self.sb_um_per_px.valueChanged.connect(self.on_scale_changed)
+        form.addRow("Scale:", self.sb_um_per_px)
         
         self.slider_opacity = QSlider(Qt.Horizontal)
         self.slider_opacity.setRange(0, 100)
@@ -487,10 +496,11 @@ class MainWindow(QMainWindow):
             print(f"No products defined ({declaration_path('products.json')})")
 
     def apply_product(self, name):
-        """Applies the declared grid values, bbox default size and layout of a product."""
+        """Applies the declared grid values, scale, bbox default size and layout of a product."""
         prod = self.products.get(name)
         if prod is None:
             return
+        self.current_product = prod
         
         # Grid: only declared keys
         grid = prod.get("grid", {})
@@ -502,19 +512,51 @@ class MainWindow(QMainWindow):
                 spin[key].setValue(grid[key])
                 spin[key].blockSignals(False)
         
-        # Default size of the bbox type (not written to config.json)
-        bbox = prod.get("bbox")
-        if bbox:
-            for t in self.void_manager.types.values():
-                if t.get("name", "").strip().lower() == self.void_manager.BBOX_TYPE_NAME:
-                    t["def_w"], t["def_h"] = bbox.get("w", t.get("def_w", 0.0)), bbox.get("h", t.get("def_h", 0.0))
-        
-        # Layout inside each bbox (also provides snap offsets such as SL)
-        self.glw.layout = prod.get("layout")
-        self.void_manager.layout = prod.get("layout")
+        if "um_per_px" in prod:
+            self.sb_um_per_px.blockSignals(True)
+            self.sb_um_per_px.setValue(float(prod["um_per_px"]))
+            self.sb_um_per_px.blockSignals(False)
+        self.void_manager.um_per_px = self.sb_um_per_px.value()
+        self._apply_bbox_size()
+
+        # Layout inside each bbox (also provides snap offsets such as SL). Declared in chip
+        # units (um when chip_size_um is given) and scaled to each drawn bbox.
+        layout = prod.get("layout")
+        chip = prod.get("chip_size_um")
+        if layout and chip and "design_size" not in layout:
+            layout = dict(layout, design_size=list(chip))
+        self.glw.layout = layout
+        self.void_manager.layout = layout
         
         self.update_grid_params()
         print(f"Product: {name}")
+
+    def _apply_bbox_size(self):
+        """
+        Default size of the bbox type (session only, not written to config.json):
+        chip_size_um / scale, or the legacy "bbox": {"w", "h"} in pixels.
+        No scale -> 0 (drag to size; Auto BBOX uses the detected size).
+        """
+        prod = getattr(self, "current_product", None) or {}
+        chip = prod.get("chip_size_um")
+        if chip:
+            s = self.sb_um_per_px.value()
+            w, h = (chip[0] / s, chip[1] / s) if s > 0 else (0.0, 0.0)
+        elif prod.get("bbox"):
+            w, h = prod["bbox"].get("w", 0.0), prod["bbox"].get("h", 0.0)
+        else:
+            return
+        name = self._bbox_type_name()
+        if name is not None:
+            t = self.void_manager.types[name]
+            t["def_w"], t["def_h"] = float(w), float(h)
+
+    def on_scale_changed(self, value):
+        self.void_manager.um_per_px = value
+        self._apply_bbox_size()
+        if self.glw.void_mode:
+            self.glw.update_cursor_style()
+        self.glw.update()
 
     def undo_void_change(self):
         if self.void_manager.undo():
@@ -821,6 +863,7 @@ class MainWindow(QMainWindow):
         if os.path.exists(v_json):
             # Virtual Raw Strategy: Mosaic is the Raw Image. Voids are in Raw Coords.
             self.void_manager.load_from_file(v_json, self.glw.grid_cfg, self.glw.coord_transform, self.layer_offset)
+            self._scale_from_file()
             self.void_manager.reset_history()
             self.populate_void_types()
         self.update_void_ui()
@@ -886,10 +929,18 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Load Voids JSON", "", "JSON (*.json)")
         if path:
             self.void_manager.load_from_file(path, self.glw.grid_cfg, self.glw.coord_transform, self.layer_offset)
+            self._scale_from_file()
             self.populate_void_types() # Refresh types
             self.update_void_ui()
             self.glw.update()
             
+    def _scale_from_file(self):
+        """A voids.json saved with a scale sets the Scale field."""
+        s = self.void_manager.file_um_per_px
+        if s and s > 0 and abs(s - self.sb_um_per_px.value()) > 1e-9:
+            self.sb_um_per_px.setValue(s)
+            print(f"Scale from file: {s} um/px")
+
     def populate_void_types(self):
         self.cb_void_type.blockSignals(True)
         self.cb_void_type.clear()

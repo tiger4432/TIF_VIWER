@@ -111,6 +111,8 @@ class VoidManager:
         
         # Layout of the selected WF product (products.json); provides named snap offsets like SL
         self.layout = None
+        self.um_per_px = 0.0 # Pixel size (um); 0 = not set -> um fields empty
+        self.file_um_per_px = None # Scale stored in the last loaded voids.json
 
         # Output field/column names (see output_columns.py; overridable in config.json)
         self.json_fields, self.csv_columns = output_columns.resolve()
@@ -712,6 +714,8 @@ class VoidManager:
         output_columns.py. coord_transform is required for correct cells when the grid is rotated.
         """
         refs = self.reference_bboxes(grid_cfg, coord_transform)
+        s = self.um_per_px if self.um_per_px and self.um_per_px > 0 else None
+        um = lambda px: px * s if s is not None and px is not None else None
         records = []
         for layer in sorted(self.voids):
             for v in self.voids[layer]:
@@ -749,6 +753,9 @@ class VoidManager:
                     "bbox_rel_x": gx - bbox[0] if bbox else None,
                     "bbox_rel_y": gy - bbox[1] if bbox else None,
                 })
+                rec = records[-1]
+                for k in ("center_x", "center_y", "radius_x", "radius_y", "bbox_rel_x", "bbox_rel_y"):
+                    rec[k + "_um"] = um(rec[k])
         return records
 
     def save_to_file(self, path, grid_cfg, bonding_map=None, coord_transform=None):
@@ -763,6 +770,7 @@ class VoidManager:
         data = {
             "version": 3,
             "layer_numbering": "absolute",
+            "um_per_px": self.um_per_px or None,
             "types": self.types, # ID -> {name, color}
             "voids": [
                 {name: rec[key] for key, name in self.json_fields.items() if name}
@@ -802,6 +810,7 @@ class VoidManager:
             legacy_names = {} # Old files: type number -> name
             count = 0
             legacy_layers = True
+            self.file_um_per_px = None
 
             # Determine format
             if isinstance(raw_data, list):
@@ -809,6 +818,7 @@ class VoidManager:
                 void_list = raw_data
             elif isinstance(raw_data, dict):
                 legacy_layers = raw_data.get("layer_numbering") != "absolute"
+                self.file_um_per_px = raw_data.get("um_per_px")
                 # Types stored in the file: declarations (config.json) win; types the
                 # declaration does not know are added so their voids keep color and shape
                 if "types" in raw_data:

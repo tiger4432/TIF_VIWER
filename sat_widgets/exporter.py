@@ -206,7 +206,8 @@ class ExportManager(QObject):
                             "pitch_y": cfg.pitch_y,
                             "rows": cfg.rows,
                             "cols": cfg.cols,
-                            "angle": cfg.angle
+                            "angle": cfg.angle,
+                            "um_per_px": self.void_manager.um_per_px or None
                         },
                         "patches": patch_metadata_list
                     }

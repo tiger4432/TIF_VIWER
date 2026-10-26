@@ -18,6 +18,7 @@ p: exponent of "curve" (superellipse) voids, empty for other shapes.
 bbox_rel_x / bbox_rel_y: void center relative to the top-left corner of the cell's reference
 bbox (the "bbox" type marking on the topmost layer of that cell), in grid-aligned pixels.
 Empty when the cell has no bbox.
+*_um: the same values in um (pixels x Scale). Empty while the scale is not set.
 """
 
 # voids.json, per void
@@ -39,6 +40,12 @@ JSON_FIELDS = {
     "global_y": "globalCY",
     "bbox_rel_x": "bboxRelX",
     "bbox_rel_y": "bboxRelY",
+    "center_x_um": "centerXUm",
+    "center_y_um": "centerYUm",
+    "radius_x_um": "radiusXUm",
+    "radius_y_um": "radiusYUm",
+    "bbox_rel_x_um": "bboxRelXUm",
+    "bbox_rel_y_um": "bboxRelYUm",
 }
 
 # voids.csv
@@ -57,6 +64,12 @@ CSV_COLUMNS = {
     "p": "P",
     "bbox_rel_x": "BBoxRelX",
     "bbox_rel_y": "BBoxRelY",
+    "center_x_um": "RelativeX_um",
+    "center_y_um": "RelativeY_um",
+    "radius_x_um": "RadiusX_um",
+    "radius_y_um": "RadiusY_um",
+    "bbox_rel_x_um": "BBoxRelX_um",
+    "bbox_rel_y_um": "BBoxRelY_um",
 }
 
 

@@ -8,11 +8,11 @@ Nothing about a product is defined in code: only the keys present in the file ar
     "<product name>": {
       "grid": {"rows": 10, "cols": 12, "pitch_x": 500, "pitch_y": 500,
                "start_x": 100, "start_y": 100, "angle": 0.0},      # any subset
-      "bbox": {"w": 480, "h": 480},          # default size of the 'bbox' void type
-      "layout": {
-        "design_size": [480, 480],           # bbox size the layout numbers refer to; the layout
-                                             # is scaled to each actual (drawn) bbox
-        "SL": [20, 20],                      # scribe line x, y. Void types declaring
+      "um_per_px": 2.0,                      # optional: pixel size, sets the Scale field
+      "chip_size_um": [960, 960],            # real chip (bbox) size in um. Default size of the
+                                             # 'bbox' void type = chip_size_um / Scale
+      "layout": {                            # in um from the chip top-left (with chip_size_um)
+        "SL": [40, 40],                      # scribe line x, y. Void types declaring
                                              # "snap_offset": "SL" are fitted from the bbox corner
                                              # shifted inward by this
         "style": {"color": [0, 200, 255], "alpha": 200, "width": 1, "dash": [4, 4]},
@@ -26,6 +26,9 @@ Nothing about a product is defined in code: only the keys present in the file ar
     }
   }
 }
+The layout is scaled from its design size (chip_size_um, or "design_size" if given) to each
+drawn bbox, so it follows the real bbox even when the scale is slightly off.
+Legacy: "bbox": {"w", "h"} in pixels and "layout.design_size" in any unit still work.
 """
 import json
 

@@ -175,14 +175,14 @@ voids.json의 필드와 voids.csv의 컬럼 이름을 exe를 다시 빌드하지
   "products": {
     "WF_A": {
       "grid": {"rows": 10, "cols": 12, "pitch_x": 500, "pitch_y": 500},
-      "bbox": {"w": 480, "h": 480},
+      "um_per_px": 2.0,
+      "chip_size_um": [960, 960],
       "layout": {
-        "design_size": [480, 480],
-        "SL": [20, 20],
+        "SL": [40, 40],
         "style": {"color": [0,200,255], "alpha": 200, "width": 1, "dash": [4, 4]},
         "boxes": [
           {"name": "die", "inset": "SL"},
-          {"name": "pad", "rect": [40, 40, 80, 40], "repeat": {"cols": 4, "rows": 1, "dx": 100, "dy": 0}}
+          {"name": "pad", "rect": [80, 80, 160, 80], "repeat": {"cols": 4, "rows": 1, "dx": 200, "dy": 0}}
         ]
       }
     }
@@ -190,12 +190,20 @@ voids.json의 필드와 voids.csv의 컬럼 이름을 exe를 다시 빌드하지
 }
 ```
 
-- **`grid`:** 적은 키만 적용합니다. 쓸 수 있는 키는 `rows`, `cols`, `pitch_x`, `pitch_y`, `start_x`, `start_y`, `angle`입니다.
-- **`bbox`:** 이름이 `bbox`인 타입의 기본 크기를 정합니다.
+칩 크기와 layout은 **실제 칩 치수(um)**로 선언합니다.
+
+- **`grid`:** 적은 키만 적용합니다. 쓸 수 있는 키는 `rows`, `cols`, `pitch_x`, `pitch_y`, `start_x`, `start_y`, `angle`입니다(이미지 픽셀).
+- **`um_per_px`:** 1픽셀이 몇 um인지입니다. 생략할 수 있고, 적으면 제품을 고를 때 Grid 패널의 **Scale** 칸에 들어갑니다. Scale은 화면에서 직접 바꿀 수도 있습니다.
+- **`chip_size_um`:** 실제 칩(bbox) 크기(um)입니다. `bbox` 타입의 기본 크기는 `chip_size_um / Scale` 픽셀로 정해지고, Scale을 바꾸면 따라 바뀝니다. Scale이 비어 있으면 bbox는 드래그로 그리고, Auto BBOX는 검출한 크기를 씁니다.
 - **`layout`:** 각 칸의 기준 bbox 안에 점선으로 그리는 세부 박스입니다.
-  - 좌표는 bbox 좌상단을 기준으로 `design_size` 단위로 적습니다. 실제로 그린 bbox 크기에 맞춰 늘거나 줄어듭니다.
-  - `SL`은 스크라이브 라인 폭(x, y)입니다. `snap_offset: "SL"`인 타입은 bbox 코너에서 이만큼 안쪽 지점을 기준으로 그립니다.
+  - 좌표는 칩 좌상단 기준 um입니다. 실제로 그린 bbox 크기에 맞춰 늘거나 줄어들므로, Scale이 조금 틀려도 bbox를 따라갑니다.
+  - `SL`은 스크라이브 라인 폭(x, y, um)입니다. `snap_offset: "SL"`인 타입은 bbox 코너에서 이만큼 안쪽 지점을 기준으로 그립니다.
   - 박스는 `"inset": "SL"`(bbox를 SL만큼 안쪽으로 줄인 영역), `"rect": [x, y, w, h]`, `"repeat"`(배열 반복)로 정의합니다.
+- 이전 형식(`"bbox": {"w", "h"}` 픽셀 + `layout.design_size`)도 그대로 읽습니다.
+
+### 축척 (Scale)
+
+Grid 패널의 **Scale (um/px)**은 1픽셀의 실제 크기입니다. 값이 있으면 voids.json / voids.csv에 um 컬럼(`RelativeX_um`, `RelativeY_um`, `RadiusX_um`, `RadiusY_um`, `BBoxRelX_um`, `BBoxRelY_um`)을 채웁니다. 이 컬럼 이름도 `output_columns`로 바꿀 수 있습니다. voids.json과 patches.json에 `um_per_px`를 함께 저장하고, 그 voids.json을 불러오면 Scale 칸에 값을 다시 넣습니다.
 
 ### 업데이트 알림
 
