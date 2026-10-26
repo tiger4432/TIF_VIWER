@@ -3,26 +3,32 @@ import sys
 import os
 import numpy as np
 import time
+import traceback
+from collections import OrderedDict
 from datetime import datetime
-import json 
+import json
 
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QSpinBox, QSlider, QLabel, QToolBar, QDockWidget, QGroupBox, 
-    QFormLayout, QPushButton, QDoubleSpinBox, QPlainTextEdit, 
-    QFileDialog, QProgressDialog, QCheckBox, QRadioButton, 
-    QButtonGroup, QComboBox, QDialog, QScrollArea 
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QSpinBox, QSlider, QLabel, QToolBar, QDockWidget, QGroupBox,
+    QFormLayout, QPushButton, QDoubleSpinBox, QPlainTextEdit,
+    QFileDialog, QProgressDialog, QCheckBox, QRadioButton,
+    QButtonGroup, QComboBox, QDialog, QScrollArea, QMessageBox
 )
-from PySide6.QtGui import QSurfaceFormat, QAction, QImage, QPainter
+from PySide6.QtGui import QSurfaceFormat, QAction, QImage, QPainter, QKeySequence
 from PySide6.QtCore import Qt, QTimer
 
 # Imports from sat_widgets
-from sat_widgets.core_data import LazyTiffStack, MosaicTiffStack, GridConfig, BondingMap, to_gray2d_uint16, ImageNormalizer, CoordinateTransform
+from sat_widgets.core_data import TiffStack, MosaicTiffStack, GridConfig, BondingMap, to_uint16, ImageNormalizer, CoordinateTransform
 from sat_widgets.void_manager import VoidManager, VoidTypeDialog
 from sat_widgets.gl_widget import GLImageWidget, TiledImage
 from sat_widgets.exporter import ExportManager
 from sat_widgets.patch_viewer import PatchViewer
 from sat_widgets.roi_inspector import ROIInspector
+from sat_widgets.products import load_products, GRID_KEYS
+from sat_widgets.app_paths import app_file
+from sat_widgets.version import APP_VERSION
+from sat_widgets.updater import UpdateChecker, show_update_dialog
 
 # ==================================================================================
 # 4. Main Window
@@ -30,18 +36,18 @@ from sat_widgets.roi_inspector import ROIInspector
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Tiled TIF Viewer (OpenGl Mosaic)")
+        self.setWindowTitle(f"Tiled TIF Viewer (OpenGl Mosaic) v{APP_VERSION}")
         self.resize(1280, 720)
         
         self.calib_timer = QTimer()
         self.calib_timer.setSingleShot(True)
         self.calib_timer.timeout.connect(self.calculate_calibration)
         
-        self.full_data = None #(Z, H, W) or (H, W) or LazyTiffStack
+        self.full_data = None # ImageStack (TiffStack / MosaicTiffStack)
 
-        self.current_z = 0
-        self.layer_offset = 0 # Absolute offset of loaded layers
-        self.layer_cache = {} # Cache for TiledImage objects
+        self.current_z = 0 # Loaded layer index (0..n-1). Void data uses absolute layer numbers.
+        self.layer_offset = 0 # Absolute number of the first loaded layer
+        self.layer_cache = OrderedDict() # GPU TiledImage per layer index, LRU order
         self.layer_calib_data = {} # Cache for calibration data {z: (rows, cols, 2)}
         self.rois = [] # Pre-calculated ROIs [{'label':.., 'x':.., 'y':.., 'bbox':[(x,y)*4]}, ...]
         
@@ -100,6 +106,13 @@ class MainWindow(QMainWindow):
         dock_content = QWidget()
         dock_layout = QVBoxLayout(dock_content)
         
+        # 0. WF Product (products.json): grid size, bbox size and bbox layout
+        gb_product = QGroupBox("WF Product")
+        form_product = QFormLayout(gb_product)
+        self.cb_product = QComboBox()
+        form_product.addRow("Product:", self.cb_product)
+        dock_layout.addWidget(gb_product)
+
         # 1. Grid Controls
         gb_grid = QGroupBox("Grid Configuration")
         form = QFormLayout(gb_grid)
@@ -154,6 +167,11 @@ class MainWindow(QMainWindow):
         self.sb_end_layer = QSpinBox(); self.sb_end_layer.setRange(0, 100); self.sb_end_layer.setValue(1)
         form_load.addRow("Start Limit:", self.sb_start_layer)
         form_load.addRow("End Limit:", self.sb_end_layer)
+
+        # GPU memory for cached layers (least recently used layers are dropped beyond this)
+        self.sb_gpu_cache = QSpinBox(); self.sb_gpu_cache.setRange(256, 65536); self.sb_gpu_cache.setSingleStep(256)
+        self.sb_gpu_cache.setValue(2048); self.sb_gpu_cache.setSuffix(" MB")
+        form_load.addRow("GPU Cache:", self.sb_gpu_cache)
         
         dock_layout.addWidget(gb_load)
         
@@ -216,8 +234,9 @@ class MainWindow(QMainWindow):
         self.glw.cursor_moved.connect(self.on_cursor_moved)
         
         # 3.5 Void Marking Control
-        self.void_manager = VoidManager()
+        self.void_manager = VoidManager(app_file("config.json"))
         self.glw.void_manager = self.void_manager
+        self.glw.voids_changed.connect(self.update_void_ui)
         self.glw.void_type_shortcut_triggered.connect(self.on_void_type_shortcut)
         
         self.gb_void = QGroupBox("Void Marking")
@@ -304,6 +323,12 @@ class MainWindow(QMainWindow):
         self.action_void_edit.triggered.connect(self.set_void_mode_edit)
         self.addAction(self.action_void_edit)
         
+        # Undo of void marking changes (add / move / resize / erase / clear / load / p)
+        self.action_undo = QAction("Undo Void Change", self)
+        self.action_undo.setShortcut(QKeySequence.Undo) # Text boxes with focus keep their own Ctrl+Z
+        self.action_undo.triggered.connect(self.undo_void_change)
+        self.addAction(self.action_undo)
+
         self.action_void_erase = QAction("Void Erase Mode", self)
         self.action_void_erase.setShortcut("r")
         self.action_void_erase.triggered.connect(self.set_void_mode_erase)
@@ -363,6 +388,75 @@ class MainWindow(QMainWindow):
         # Sync initial state
         self.on_window_changed()
         self.update_grid_params()
+        
+        # WF products (declared in products.json next to the program)
+        self.load_product_list()
+        self.cb_product.currentTextChanged.connect(self.apply_product)
+        if self.cb_product.count() > 0:
+            self.apply_product(self.cb_product.currentText())
+        
+        # Newer build available? (location declared in config.json "update.manifest")
+        self.update_checker = UpdateChecker(APP_VERSION, self._config().get("update", {}).get("manifest"), self)
+        self.update_checker.update_available.connect(lambda m: show_update_dialog(self, APP_VERSION, m))
+        QTimer.singleShot(1500, self.update_checker.start)
+
+    def _config(self):
+        try:
+            with open(app_file("config.json"), "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    # -----------------------------------------------
+    # WF Products
+    # -----------------------------------------------
+    def load_product_list(self):
+        self.products, default = load_products(app_file("products.json"))
+        self.cb_product.blockSignals(True)
+        self.cb_product.clear()
+        self.cb_product.addItems(list(self.products))
+        if default:
+            self.cb_product.setCurrentText(default)
+        self.cb_product.blockSignals(False)
+        self.cb_product.setEnabled(bool(self.products))
+        if not self.products:
+            print(f"No products defined ({app_file('products.json')})")
+
+    def apply_product(self, name):
+        """Applies the declared grid values, bbox default size and layout of a product."""
+        prod = self.products.get(name)
+        if prod is None:
+            return
+        
+        # Grid: only declared keys
+        grid = prod.get("grid", {})
+        spin = {"start_x": self.sb_grid_x, "start_y": self.sb_grid_y, "pitch_x": self.sb_pitch_x,
+                "pitch_y": self.sb_pitch_y, "rows": self.sb_rows, "cols": self.sb_cols, "angle": self.sb_angle}
+        for key in GRID_KEYS:
+            if key in grid:
+                spin[key].blockSignals(True)
+                spin[key].setValue(grid[key])
+                spin[key].blockSignals(False)
+        
+        # Default size of the bbox type (not written to config.json)
+        bbox = prod.get("bbox")
+        if bbox:
+            for t in self.void_manager.types.values():
+                if t.get("name", "").strip().lower() == self.void_manager.BBOX_TYPE_NAME:
+                    t["def_w"], t["def_h"] = bbox.get("w", t.get("def_w", 0.0)), bbox.get("h", t.get("def_h", 0.0))
+        
+        # Layout inside each bbox (also provides snap offsets such as SL)
+        self.glw.layout = prod.get("layout")
+        self.void_manager.layout = prod.get("layout")
+        
+        self.update_grid_params()
+        print(f"Product: {name}")
+
+    def undo_void_change(self):
+        if self.void_manager.undo():
+            self.glw.active_void = None
+            self.glw.update()
+            self.update_void_ui()
 
     def toggle_grid(self, checked):
         self.chk_grid_show.setText(f"Show Grid: {'ON' if checked else 'OFF'}")
@@ -599,22 +693,25 @@ class MainWindow(QMainWindow):
             print("patches.json not found!")
             return
             
+        if not self._confirm_discard_voids():
+            return
+
         # 1. Init Mosaic Stack
         try:
-            self.full_data = MosaicTiffStack(p_json)
-            self.layer_offset = self.full_data.layer_offset
-            self.layer_cache.clear()
+            stack = MosaicTiffStack(p_json)
         except Exception as e:
-            print(f"Failed to load project: {e}")
+            traceback.print_exc()
+            QMessageBox.critical(self, "Open Project", f"Failed to load project:\n{e}")
             return
-            
+
+        self._close_data()
+        self.full_data = stack
+        self.layer_offset = stack.layer_number(0)
+        self.void_manager.replace_all()
+
         # 2. Setup UI
-        frames = len(self.full_data)
-        self.spin_layer.setRange(0, frames - 1)
-        self.spin_layer.setValue(0)
-        self.spin_layer.setEnabled(True)
-        self.current_z = 0
-        
+        self._setup_layer_controls()
+
         # 3. Apply Grid Config from Stack
         # MosaicStack .grid_cfg is a dict
         gcfg = self.full_data.grid_cfg
@@ -636,23 +733,19 @@ class MainWindow(QMainWindow):
         self.glw.grid_cfg.cols = self.sb_cols.value()
         self.glw.grid_cfg.angle = self.sb_angle.value()
         
-        # self.glw.update_grid_buffer() # Method does not exist, update() is sufficient
-        self.glw.update()
+        # 4. Load Initial Layer (also sets up the coordinate transform for the void loader)
+        self.load_layer(0)
 
-        # 4. Load Voids (Raw)
+        # 5. Load Voids (Raw)
         v_json = os.path.join(folder, "voids.json")
         if os.path.exists(v_json):
-            # Virtual Raw Strategy: Mosaic is the Raw Image.
-            # Voids are in Raw Coords.
-            # Load directly without transformation.
-            self.void_manager.load_from_file(v_json, self.glw.grid_cfg)
+            # Virtual Raw Strategy: Mosaic is the Raw Image. Voids are in Raw Coords.
+            self.void_manager.load_from_file(v_json, self.glw.grid_cfg, self.glw.coord_transform, self.layer_offset)
+            self.void_manager.reset_history()
+            self.populate_void_types()
+        self.update_void_ui()
 
-        
-        # 5. Load Initial Layer
-        self.current_z = 0
-        self.load_layer(0)
-        
-        # Auto Level (Optional, or standard default)
+        self.preload_gpu_cache()
         self.glw.update()
 
     def auto_level(self):
@@ -692,7 +785,7 @@ class MainWindow(QMainWindow):
     def load_voids(self):
         path, _ = QFileDialog.getOpenFileName(self, "Load Voids JSON", "", "JSON (*.json)")
         if path:
-            self.void_manager.load_from_file(path, self.glw.grid_cfg, self.glw.coord_transform)
+            self.void_manager.load_from_file(path, self.glw.grid_cfg, self.glw.coord_transform, self.layer_offset)
             self.populate_void_types() # Refresh types
             self.update_void_ui()
             self.glw.update()
@@ -745,253 +838,240 @@ class MainWindow(QMainWindow):
             
     def clear_voids(self):
         # Clear CURRENT LAYER Only
-        self.void_manager.clear_layer(self.current_z)
+        self.void_manager.clear_layer(self.glw.current_layer)
+        self.update_void_ui()
         self.glw.active_void = None
         self.glw.setFocus()
         self.glw.update()
         
     def clear_chip_voids(self):
         self.glw.clear_current_chip_voids()
+        self.update_void_ui()
         self.glw.setFocus()
         
     def update_void_ui(self):
-        # Update label count
-        if self.current_z in self.void_manager.voids:
-            count = len(self.void_manager.voids[self.current_z])
-        else:
-            count = 0
+        # Update label count (voids are keyed by absolute layer number)
+        count = len(self.void_manager.voids.get(self.glw.current_layer, []))
         self.lbl_void_count.setText(f"Voids: {count}")
+
+    # -----------------------------------------------
+    # Data / Layer Management
+    # -----------------------------------------------
+    def abs_layer(self, z):
+        """Absolute layer number of loaded layer index z (void data and file names use this)."""
+        if self.full_data is not None:
+            return self.full_data.layer_number(z)
+        return self.layer_offset + z
+
+    def _confirm_discard_voids(self):
+        """Asks before replacing existing void markings. Returns False to abort."""
+        if not any(self.void_manager.voids.values()):
+            return True
+        ret = QMessageBox.question(
+            self, "Void Markings",
+            "Current void markings will be cleared (save them first if needed).\nContinue?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        return ret == QMessageBox.Yes
+
+    def _clear_gpu_cache(self):
+        if self.layer_cache:
+            self.glw.makeCurrent()
+            for t in self.layer_cache.values():
+                t.cleanup()
+            self.glw.doneCurrent()
+        self.layer_cache.clear()
+
+    def _close_data(self):
+        """Releases the current stack, its GPU textures and per-layer data."""
+        self._clear_gpu_cache()
+        if self.full_data is not None:
+            self.full_data.close()
+        self.full_data = None
+        self.layer_calib_data.clear()
+
+    def _setup_layer_controls(self):
+        n = len(self.full_data)
+        self.spin_layer.blockSignals(True)
+        self.spin_layer.setRange(0, max(0, n - 1))
+        self.spin_layer.setValue(0)
+        self.spin_layer.setEnabled(n > 1)
+        self.spin_layer.blockSignals(False)
+
+        # valueChanged is blocked above -> sync layer state explicitly
+        self.current_z = 0
+        self.glw.current_layer = self.abs_layer(0)
+        self.glw.active_void = None
+        self.spin_layer.setSuffix(f" (Abs: {self.glw.current_layer})")
+        self.update_void_ui()
+
+    def _layer_gpu_bytes(self):
+        # Gray uint8 sources (incl. 8-bit RGB) are uploaded as GL_R8, everything else as GL_R16
+        bpp = 1 if self.full_data.dtype == np.uint8 else 2
+        return self.full_data.width * self.full_data.height * bpp
+
+    def _evict_gpu_cache(self, keep, incoming=0):
+        """Drops least recently used layers until the cache fits the budget. GL context must be current."""
+        budget = self.sb_gpu_cache.value() * 1024 * 1024
+        total = sum(t.nbytes for t in self.layer_cache.values()) + incoming
+        for z in list(self.layer_cache.keys()):
+            if total <= budget:
+                break
+            if z in keep:
+                continue
+            t = self.layer_cache.pop(z)
+            total -= t.nbytes
+            t.cleanup()
+
+    def _auto_level(self, z):
+        """Sets the window to the min/max of a subsample of layer z."""
+        try:
+            sample = self.full_data.get_sample(z)
+            vmin, vmax = int(sample.min()), int(sample.max())
+
+            self.slider_lo.blockSignals(True)
+            self.slider_hi.blockSignals(True)
+            self.slider_lo.setValue(vmin)
+            self.slider_hi.setValue(vmax)
+            self.slider_lo.blockSignals(False)
+            self.slider_hi.blockSignals(False)
+
+            self.on_window_changed()
+            print(f"Auto-Leveled to [{vmin}, {vmax}]")
+        except Exception as e:
+            print(f"Auto-Level failed: {e}")
 
     def open_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Open", "", "TIFF (*.tif *.tiff)")
         if not path:
             return
-            
-        # Get Load Limits
+        if not self._confirm_discard_voids():
+            return
+
+        # Get Load Limits (inclusive range of absolute layer numbers)
         req_start = self.sb_start_layer.value()
         req_end = self.sb_end_layer.value()
-        
+
         print(f"Loading {path}...")
         print(f"Requested Range: {req_start} to {req_end}")
-        
+
         try:
-            # 1. Cleanup previous file handle
-            if hasattr(self.full_data, 'close'):
-                self.full_data.close()
-            self.full_data = None
-            
-            # 2. Create Lazy Stack (PIL Path)
-            lazy_stack = LazyTiffStack(path)
-            
-            # Apply Limits
-            # req_start is 0-indexed index. req_end is inclusive? 
-            # UI Default: Start 0, End 10.
-            # Range: [Start, End]. Count = End - Start + 1?
-            # Or is End exclusive? "End Limit". Usually inclusive in user speak?
-            # Let's assume inclusive for now or match previous logical intent.
-            # If default is 0 to 10.
+            # 1. Release the previous file
+            self._close_data()
+
+            # 2. Open (only headers are read here; pixels are read per tile on demand)
             if req_start <= req_end:
-                 count = req_end - req_start + 1
-                 lazy_stack.set_range(req_start, count)
-                 print(f"Applied Layer Limit: Start {req_start}, Count {count}")
-            
-            print(f"Opened with Lazy Loading (Instant). Shape: {lazy_stack.shape}")
-            
-            self.full_data = lazy_stack
-            self.layer_offset = req_start # Store simple offset for reference if needed
-            
-            # Slice if requested?
-            # LazyTiffStack doesn't support sophisticated slicing view yet, but we can just use indices.
-            # If user requested range 0..10, we just map logic to that.
-            # For simplicity, we expose the whole file, but 'open_file' logic usually sets limits.
-            # Let's trust LazyStack to expose everything, and user navigates.
-            
-            # Check limits
-            req_start = self.sb_start_layer.value()
-            req_end = self.sb_end_layer.value()
-            
-            # If we want to restrict range, we could wrap LazyStack or just ignore?
-            # The previous logic "Loaded Series [s..e]".
-            # With Lazy Load, we can just say "Available: 0..N".
-            # The 'spin_layer' range will define what is accessible.
-            
-            # Determine Num Layers
-            num_layers = len(lazy_stack)
-            
-            # Setup layer spinner
-            self.spin_layer.blockSignals(True)
-            if num_layers > 1:
-                self.spin_layer.setRange(0, num_layers - 1)
-                self.spin_layer.setValue(0)
-                self.spin_layer.setEnabled(True)
-            elif num_layers == 1:
-                # Could be (1, H, W, C) or (1, H, W)
-                # LazyStack ndim is base + 1
-                if lazy_stack.ndim == 4: # (1, H, W, C)
-                     # Treat C as channels of single layer?
-                     # But spin_layer controls 'Z'.
-                     self.spin_layer.setRange(0, 0)
-                     self.spin_layer.setEnabled(False)
-                else:
-                     self.spin_layer.setRange(0, 0)
-                     self.spin_layer.setEnabled(False)
-            
-            self.spin_layer.blockSignals(False)
-            
-            # Clear cache
-            for t in self.layer_cache.values():
-                t.cleanup()
-            self.layer_cache.clear()
-            self.layer_calib_data.clear()
-            
-            # Auto-Leveling (Estimate from first visual layer)
-            try:
-                # Accessing [0] loads the first layer from disk
-                sample_layer = to_gray2d_uint16(self.full_data, 0)
-                
-                # Subsample for speed (max 10k items)
-                h, w = sample_layer.shape
-                step = int(max(1, np.sqrt((h*w)/10000)))
-                # Ensure 2D slicing works on numpy array
-                stats_slice = sample_layer[::step, ::step]
-                
-                vmin, vmax = np.min(stats_slice), np.max(stats_slice)
-                
-                # Set sliders
-                self.slider_lo.blockSignals(True)
-                self.slider_hi.blockSignals(True)
-                self.slider_lo.setValue(int(vmin))
-                self.slider_hi.setValue(int(vmax))
-                self.slider_lo.blockSignals(False)
-                self.slider_hi.blockSignals(False)
-                
-                self.on_window_changed()
-                print(f"Auto-Leveled to [{vmin}, {vmax}]")
-                
-            except Exception as e:
-                print(f"Auto-Level failed: {e}")
-                # traceback.print_exc()
+                stack = TiffStack(path, req_start, req_end - req_start + 1)
+            else:
+                stack = TiffStack(path)
+            print(f"Opened ({stack.backend}): layers {stack.layer_number(0)}..{stack.layer_number(len(stack) - 1)}, "
+                  f"{stack.width}x{stack.height}, {stack.dtype}")
 
-            # Preload GPU Cache? 
-            # With lazy loading, preloading defeats the purpose of "Low RAM", 
-            # BUT it puts it in VRAM. VRAM is faster.
-            # User output showed "Preloading..."
-            self.preload_gpu_cache()
-            
+            self.full_data = stack
+            self.layer_offset = stack.layer_number(0)
+            self.void_manager.replace_all()
+
+            # 3. UI / State
+            self._setup_layer_controls()
+
+            # 4. Auto-Leveling (subsample of the first layer)
+            self._auto_level(0)
+
+            # 5. Show first layer, then fill the GPU cache within its budget
             self.load_layer(0)
-            
-        except Exception as e:
-            print(f"Error loading file: {e}")
-            import traceback
-            traceback.print_exc()
-            
+            self.preload_gpu_cache()
 
+        except Exception as e:
+            traceback.print_exc()
+            QMessageBox.critical(self, "Open TIF", f"Error loading file:\n{e}")
 
     def preload_gpu_cache(self):
-        # Preloads all loaded layers into GPU memory to enable instant switching.
+        """Uploads further layers while they fit into the GPU cache budget (instant layer switching)."""
         if self.full_data is None:
             return
-            
-        # Determine number of layers to process
-        # If it's a single 2D image, nothing extra to do really, but let's handle consistent logic
-        task_count = 0
-        if self.full_data.ndim == 2 or (self.full_data.ndim == 3 and self.full_data.shape[-1] in (3,4)):
-            task_count = 1
-        elif self.full_data.ndim == 3: # (Z, H, W)
-            task_count = self.full_data.shape[0]
-        elif self.full_data.ndim == 4: # (Z, H, W, C)
-            task_count = self.full_data.shape[0]
-            
-        if task_count <= 1:
-            return
 
-        print(f"Preloading {task_count} layers to VRAM...")
-        
-        progress = QProgressDialog("Preloading layers to GPU...", "Cancel", 0, task_count, self)
+        n_layers = len(self.full_data)
+        budget = self.sb_gpu_cache.value() * 1024 * 1024
+        n_fit = min(n_layers, max(1, budget // max(1, self._layer_gpu_bytes())))
+        todo = [z for z in range(n_fit) if z not in self.layer_cache]
+        if not todo:
+            return
+        if n_fit < n_layers:
+            print(f"GPU cache budget fits {n_fit}/{n_layers} layers; others are loaded on demand.")
+
+        print(f"Preloading {len(todo)} layers to VRAM...")
+
+        progress = QProgressDialog("Preloading layers to GPU...", "Cancel", 0, len(todo), self)
         progress.setWindowModality(Qt.WindowModal)
         progress.resize(400, 100)
         progress.show()
-        
-        # We need a GL context active to upload textures.
-        # GLImageWidget.makeCurrent() is called inside set_tiled_image -> upload_all
-        # But here we want to upload without setting it as CURRENT display image immediately.
-        # We can manually create TiledImage and call upload().
-        # Note: TiledImage.upload() does NOT require the widget to be the *current* widget for painting,
-        # but it DOES require a valid OpenGL context to be current on the thread.
-        # Since we are in the main thread and the widget is initialized, we can use it.
-        
-        self.glw.makeCurrent()
-        
+
         try:
-            for i in range(task_count):
+            for i, z in enumerate(todo):
                 if progress.wasCanceled():
                     print("Preloading canceled.")
                     break
-                    
+
                 progress.setValue(i)
-                # progress.setLabelText(f"Uploading Layer {i+1}/{task_count}...") # Optional update
-                QApplication.processEvents() 
-                
-                # Check if already cached (e.g. if we reload or something)
-                if i in self.layer_cache:
-                    continue
-                    
-                # Create TiledImage
-                img_2d = to_gray2d_uint16(self.full_data, i)
-                tiled = TiledImage(img_2d)
-                
-                # Upload
-                # TiledImage.upload() makes GL calls. Context must be current.
-                # We made it current above.
-                tiled.upload_all()
-                
-                self.layer_cache[i] = tiled
-                
-            progress.setValue(task_count)
-            
+                QApplication.processEvents()
+
+                # Uploading needs a current GL context (processEvents may have painted in between)
+                tiled = TiledImage.from_stack(self.full_data, z)
+                self.glw.makeCurrent()
+                try:
+                    tiled.upload_all()
+                finally:
+                    self.glw.doneCurrent()
+                self.layer_cache[z] = tiled
+
+            progress.setValue(len(todo))
         finally:
-            self.glw.doneCurrent()
+            progress.close()
+            self.full_data.release_cache()
+            # Keep the displayed layer most recently used
+            if self.current_z in self.layer_cache:
+                self.layer_cache.move_to_end(self.current_z)
 
     def load_layer(self, z_index):
         if self.full_data is None:
             return
-            
-        tiled = None
-        # Check Cache
-        if z_index in self.layer_cache:
-            # print(f"Cache Hit for Layer {z_index}")
-            tiled = self.layer_cache[z_index]
-        else:
-            print(f"Processing Layer {z_index}...")
-            # Handle MosaicTiffStack specialized loading
-            img_2d = to_gray2d_uint16(self.full_data, z_index)
-            tiled = TiledImage(img_2d)
-            self.layer_cache[z_index] = tiled
-            print("Uploading to GPU...")
 
-        # Set Image
+        tiled = self.layer_cache.get(z_index)
+        if tiled is not None:
+            self.layer_cache.move_to_end(z_index)
+        else:
+            print(f"Loading Layer {z_index} (Abs {self.abs_layer(z_index)})...")
+            # Make room first, then stream the tiles to the GPU (set_tiled_image uploads)
+            self.glw.makeCurrent()
+            self._evict_gpu_cache(keep={z_index}, incoming=self._layer_gpu_bytes())
+            self.glw.doneCurrent()
+            tiled = TiledImage.from_stack(self.full_data, z_index)
+            self.layer_cache[z_index] = tiled
+
+        # Set Image (uploads if needed)
         self.glw.set_tiled_image(tiled, cleanup_old=False)
+        self.full_data.release_cache()
         
+        # Keep the cache within the budget (it may have been lowered meanwhile)
+        self.glw.makeCurrent()
+        self._evict_gpu_cache(keep={z_index})
+        self.glw.doneCurrent()
+
         # Update Calibration Texture for this layer
         calib = self.layer_calib_data.get(z_index, None)
         self.glw.update_calib_texture(calib)
-        
+
         self.update()
 
     def on_layer_changed(self, val):
         self.current_z = val
-        self.glw.current_layer = val # Sync with GL Widget for Void Manager
-        
-        # Update label to show absolute index
-        # Assuming we have access to the label widget? 
-        # We constructed it in __init__ locally. 
-        # Can't easily access. Let's just print or update window title?
-        # Better: Update the spinbox suffix or prefix or tooltip
-        
-        abs_layer = self.layer_offset + val
+        abs_layer = self.abs_layer(val)
+        self.glw.current_layer = abs_layer # Void data is keyed by absolute layer
+        self.glw.active_void = None
+
         self.spin_layer.setSuffix(f" (Abs: {abs_layer})")
-        
+
         self.load_layer(val)
+        self.update_void_ui()
 
     def on_window_changed(self):
         self.glw.win_lo = self.slider_lo.value()
@@ -1035,10 +1115,8 @@ class MainWindow(QMainWindow):
                 progress.setValue(i)
                 QApplication.processEvents()
                 
-            img = to_gray2d_uint16(self.full_data, z_idx)
-            if img is None: continue
-            
-            h, w = img.shape
+            # Only the cell regions are read (no full-layer copy)
+            h, w = self.full_data.height, self.full_data.width
             
             # Grid Loop
             start_x = cfg.start_x
@@ -1057,25 +1135,12 @@ class MainWindow(QMainWindow):
             if win_range < 1: win_range = 1
             
             calib_data = np.zeros((rows, cols, 2), dtype=np.float32)
-            
-            # Rotation pre-calc
-            rad = np.radians(cfg.angle)
-            sin_a = np.sin(rad)
-            cos_a = np.cos(rad)
-            
+
             for r in range(rows):
-                # Optimization? No, need per-cell center
-                
                 for c in range(cols):
-                    # Calculate Rotated Center
-                    cx_rel = (c + 0.5) * pitch_x
-                    cy_rel = (r + 0.5) * pitch_y
-                    
-                    rot_x = cx_rel * cos_a - cy_rel * sin_a
-                    rot_y = cx_rel * sin_a + cy_rel * cos_a
-                    
-                    center_x = start_x + rot_x
-                    center_y = start_y + rot_y
+                    # Cell Center: Deskewed (grid) -> Raw (same transform as the display)
+                    center_x, center_y = self.glw.deskew_to_raw(start_x + (c + 0.5) * pitch_x,
+                                                                start_y + (r + 0.5) * pitch_y)
                     
                     x0 = int(center_x - pitch_x/2)
                     y0 = int(center_y - pitch_y/2)
@@ -1102,14 +1167,10 @@ class MainWindow(QMainWindow):
                             calib_data[r, c, 1] = 0.0
                             continue
                             
-                    roi = img[y0_c:y1_c, x0_c:x1_c]
-                    
-                    # Performance optimization
-                    if roi.size > 10000:
-                        step = int(np.sqrt(roi.size / 10000))
-                        roi_stats = roi[::step, ::step]
-                    else:
-                        roi_stats = roi
+                    # Performance optimization: subsample to ~10k pixels while reading
+                    roi_size = (x1_c - x0_c) * (y1_c - y0_c)
+                    step = int(np.sqrt(roi_size / 10000)) if roi_size > 10000 else 1
+                    roi_stats = to_uint16(self.full_data.read_region(z_idx, x0_c, y0_c, x1_c - x0_c, y1_c - y0_c, max(1, step)))
                     
                     if self.chk_calib_robust.isChecked():
                         mean = np.median(roi_stats)
@@ -1130,7 +1191,9 @@ class MainWindow(QMainWindow):
             
             # Store in cache
             self.layer_calib_data[z_idx] = calib_data
-            
+
+        self.full_data.release_cache()
+
         if progress:
             progress.setValue(len(layers_to_calc))
             
@@ -1156,7 +1219,8 @@ class MainWindow(QMainWindow):
             gl_widget=self.glw,
             calib_data=self.layer_calib_data if self.chk_use_calib.isChecked() else None,
             win_lo=self.glw.win_lo,
-            win_hi=self.glw.win_hi
+            win_hi=self.glw.win_hi,
+            layer_index=self.current_z
         )
         dlg.exec()
 
@@ -1208,10 +1272,13 @@ class MainWindow(QMainWindow):
             
             # Create Manager (Pass MainWindow)
             exporter = ExportManager(self)
-            
+            errors = []
+
             # Connect
             exporter.progress_update.connect(lambda p, msg: (self.pd.setValue(p), self.pd.setLabelText(msg), QApplication.processEvents()))
-            
+            exporter.error_occurred.connect(errors.append)
+            self.pd.canceled.connect(exporter.request_stop)
+
             # Run
             try:
                 # Pass Window Levels for WYSIWYG
@@ -1219,10 +1286,16 @@ class MainWindow(QMainWindow):
                 win_hi = self.glw.win_hi
                 exporter.run_export(out_dir, opts, win_lo, win_hi)
             except Exception as e:
-                print(f"Export Error: {e}")
-                
+                traceback.print_exc()
+                errors.append(str(e))
+
             self.pd.close()
-            print("Export Finished.")
+            if errors:
+                QMessageBox.critical(self, "Export", f"Export failed:\n{errors[0]}")
+            elif exporter.stop_requested:
+                QMessageBox.information(self, "Export", f"Export canceled.\nPartial output: {out_dir}")
+            else:
+                print("Export Finished.")
 
 class ExportDialog(QDialog):
     def __init__(self, parent=None, default_dir=""):

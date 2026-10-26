@@ -1,0 +1,39 @@
+# PyInstaller build definition: pyinstaller --noconfirm --clean TIF_Viewer.spec
+# Output: dist/TIF_Viewer/TIF_Viewer.exe (+ _internal/). config.json and products.json are
+# copied next to the exe by build.bat so they can be edited per deployment.
+from PyInstaller.utils.hooks import collect_submodules
+
+hiddenimports = collect_submodules("imagecodecs") # tifffile imports codecs lazily
+
+a = Analysis(
+    ["tif_view_GL.py"],
+    pathex=[],
+    binaries=[],
+    datas=[],
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=["tkinter"],
+    noarchive=False,
+)
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="TIF_Viewer",
+    debug=False,
+    strip=False,
+    upx=False,
+    console=False, # Windowed (same as the released exe); errors are shown in dialogs
+)
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    name="TIF_Viewer",
+)

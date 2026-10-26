@@ -55,5 +55,12 @@
             "def_w": 480.0,
             "def_h": 480.0
         }
+    },
+    "output_columns": {
+        "csv": {},
+        "json": {}
+    },
+    "update": {
+        "manifest": ""
     }
 }

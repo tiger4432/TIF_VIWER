@@ -6,10 +6,10 @@ from PySide6.QtGui import QImage, QPixmap, QPainter, QKeyEvent, QPen
 from PySide6.QtCore import Qt, QSize
 
 import numpy as np
-from .core_data import ImageNormalizer, to_gray2d_uint16
+from .core_data import ImageNormalizer
 
 class PatchViewer(QDialog):
-    def __init__(self, parent=None, rois=None, data_source=None, grid_cfg=None, gl_widget=None, calib_data=None, win_lo=0, win_hi=65535):
+    def __init__(self, parent=None, rois=None, data_source=None, grid_cfg=None, gl_widget=None, calib_data=None, win_lo=0, win_hi=65535, layer_index=0):
         super().__init__(parent)
         self.setWindowTitle("Patch Viewer")
         self.resize(600, 700)
@@ -22,6 +22,7 @@ class PatchViewer(QDialog):
         self.calib_data = calib_data
         self.win_lo = win_lo
         self.win_hi = win_hi
+        self.layer_index = layer_index # Loaded layer index (not the absolute layer number)
         
         self.current_idx = 0
         
@@ -95,12 +96,8 @@ class PatchViewer(QDialog):
             return
             
         try:
-            # 1. Get Image Layer (Assuming Layer 0 or current? Let's use current from glw?)
-            # Wait, patch viewer usually wants to see what's on screen.
-            # Let's assume current layer of GLWidget.
-            z_idx = self.glw.current_layer
-            # 1. Get Image Info (Dimensions)
-            z_idx = self.glw.current_layer
+            # 1. Layer currently shown in the main view
+            z_idx = self.layer_index
             w, h = 0, 0
             if hasattr(self.data_source, 'width'):
                  w, h = self.data_source.width, self.data_source.height

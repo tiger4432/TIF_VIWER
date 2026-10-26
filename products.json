@@ -1,0 +1,18 @@
+{
+    "default": "SAMPLE_WF",
+    "products": {
+        "SAMPLE_WF": {
+            "grid": {"rows": 5, "cols": 5, "pitch_x": 500, "pitch_y": 500},
+            "bbox": {"w": 480, "h": 480},
+            "layout": {
+                "design_size": [480, 480],
+                "SL": [20, 20],
+                "style": {"color": [0, 200, 255], "alpha": 200, "width": 1, "dash": [4, 4]},
+                "boxes": [
+                    {"name": "die", "inset": "SL"},
+                    {"name": "pad", "rect": [40, 40, 80, 40], "repeat": {"cols": 4, "rows": 1, "dx": 100, "dy": 0}}
+                ]
+            }
+        }
+    }
+}

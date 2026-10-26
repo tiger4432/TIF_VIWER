@@ -2,12 +2,15 @@
 import os
 import csv
 import json
+import time
 import numpy as np
 import math
 from datetime import datetime
 
 from PySide6.QtCore import QObject, Signal, Qt, QRectF, QPointF
 from PySide6.QtGui import QImage, QPainter, QColor, QPen, QTransform, QFont
+
+from .core_data import ImageNormalizer
 
 class ExportManager(QObject):
     progress_update = Signal(int, str) # Percentage, Message
@@ -25,25 +28,29 @@ class ExportManager(QObject):
         # self.grid_cfg = self.main_window.glw.grid_cfg 
         # Access dynamically to ensure freshness during run_export
 
+    def request_stop(self):
+        self.stop_requested = True
+
     def run_export(self, output_dir, options: dict, win_lo=0, win_hi=65535):
         """
         Main export loop.
         options = {'raw': bool, 'overlay': bool, 'mask': bool, 'merged': bool, 
                    'json': bool, 'csv': bool}
         win_lo, win_hi: Normalization range (from UI)
+        - raw:     pure patch per chip and layer
+        - overlay: patch with the void markings drawn on it
+        - mask:    per chip, markings of all exported layers
+        - merged:  per bonding-map value, markings of all chips with that value composited
         """
         self.stop_requested = False
         
         try:
             # 1. Create subdirectories
             subdirs = {}
-            if options.get('raw'): subdirs['raw'] = os.path.join(output_dir, 'raw')
-            if options.get('overlay'): subdirs['overlay'] = os.path.join(output_dir, 'overlay')
-            if options.get('mask'): subdirs['mask'] = os.path.join(output_dir, 'mask')
-            if options.get('merged'): subdirs['merged'] = os.path.join(output_dir, 'merged')
-            
-            for p in subdirs.values():
-                os.makedirs(p, exist_ok=True)
+            for k in ('raw', 'overlay', 'mask', 'merged'):
+                if options.get(k):
+                    subdirs[k] = os.path.join(output_dir, k)
+                    os.makedirs(subdirs[k], exist_ok=True)
 
             # Metadata Exports
             if options.get('json'):
@@ -51,194 +58,137 @@ class ExportManager(QObject):
             if options.get('csv'):
                 self._export_csv(output_dir)
 
-            # 2. Determine Layers
-            num_layers = 1
-            if hasattr(self.data_stack, 'shape'):
-                if len(self.data_stack.shape) == 3:
-                     num_layers = self.data_stack.shape[0]
-                elif len(self.data_stack.shape) == 4:
-                     num_layers = self.data_stack.shape[0] # Z, H, W, C
-            elif hasattr(self.data_stack, '__len__'):
-                 num_layers = len(self.data_stack)
-
-            # 3. Access Configs & ROIs
+            # 2. Layers, Configs & ROIs
+            num_layers = len(self.data_stack)
+            layer_numbers = [self.main_window.abs_layer(i) for i in range(num_layers)]
             cfg = self.main_window.glw.grid_cfg
             rois = self.main_window.rois
-            
             if not rois:
-                # Should not happen if triggered from main window
-                # But just in case
                 self.main_window.update_rois()
                 rois = self.main_window.rois
+            rois = [item for item in rois if item.get('bbox') and self._roi_in_image(item['bbox'])]
             
-            w_pitch = int(cfg.pitch_x)
-            h_pitch = int(cfg.pitch_y)
+            # Same rounding as the extracted patch size (get_poly_crop)
+            w_pitch = int(round(cfg.pitch_x))
+            h_pitch = int(round(cfg.pitch_y))
+
+            # Voids indexed by grid cell once (instead of scanning all voids for every chip)
+            void_index = self._index_voids(cfg)
+            self._refs = self.void_manager.reference_bboxes(cfg, self.main_window.glw.coord_transform)
             
-            total_chips = len(rois) * num_layers
-            if total_chips == 0: total_chips = 1
-            processed = 0
+            want_patch = bool(options.get('raw') or options.get('overlay'))
+            want_marks = bool(options.get('mask') or options.get('merged'))
+            total = (len(rois) * num_layers if want_patch else 0) + (len(rois) if want_marks else 0)
+            self._progress_init(total)
             
-            # Accumulators
-            merged_accumulators = {} 
-            mask_accumulators = {} 
-            
-            # Patch Metadata Collection (List of Dicts)
             patch_metadata_list = []
 
-            # Iterate Layers
-            for layer_idx in range(num_layers):
-                abs_layer = self.main_window.layer_offset + layer_idx
-                if self.stop_requested: break
-                
-                # Create Layer Subdirs (Only for Raw/Overlay)
-                layer_name = f"Layer_{abs_layer:02d}"
-                layer_subdirs = {}
-                for k in ['raw', 'overlay']: # Mask/Merged are top-level
-                    if k in subdirs:
-                        p = os.path.join(subdirs[k], layer_name)
-                        os.makedirs(p, exist_ok=True)
-                        layer_subdirs[k] = p
-                
-                # Get Calibration Map for this layer
-                calib_map = None
-                if self.main_window.layer_calib_data:
-                    calib_map = self.main_window.layer_calib_data.get(layer_idx, None)
-                
-                # Iterate ROIs
-                for item in rois:
+            # 3. Patches (raw / overlay): need image data -> layer by layer
+            if want_patch:
+                for layer_idx, abs_layer in enumerate(layer_numbers):
                     if self.stop_requested: break
                     
-                    r = item['y']
-                    c = item['x']
-                    label = item.get('label', f"{r}_{c}")
-                    bbox_raw = item.get('bbox', [])
+                    layer_name = f"Layer_{abs_layer:02d}"
+                    layer_subdirs = {}
+                    for k in ('raw', 'overlay'):
+                        if k in subdirs:
+                            layer_subdirs[k] = os.path.join(subdirs[k], layer_name)
+                            os.makedirs(layer_subdirs[k], exist_ok=True)
                     
-                    if not bbox_raw: continue
-
-                    # Calibration Params
-                    scale, offset = 1.0, 0.0
-                    if calib_map is not None:
-                         if r < calib_map.shape[0] and c < calib_map.shape[1]:
-                             scale = calib_map[r, c, 0]
-                             offset = calib_map[r, c, 1]
+                    # Calibration Map for this layer (keyed by loaded layer index)
+                    calib_map = self.main_window.layer_calib_data.get(layer_idx) if self.main_window.layer_calib_data else None
                     
-                    # Extract Patch (Unified)
-                    # use layer_idx, bbox_raw
-                    patch_qimg = self._extract_patch_unified(layer_idx, bbox_raw, win_lo, win_hi, scale, offset)
-                    
-                    if patch_qimg is None: continue 
-                    
-                    # For drawing voids, we need Center in Raw Coords.
-                    gx = cfg.start_x + (c + 0.5) * cfg.pitch_x
-                    gy = cfg.start_y + (r + 0.5) * cfg.pitch_y
-                    
-                    # Using GLWidget's descale logic
-                    center_x, center_y = self.main_window.glw.deskew_to_raw(gx, gy)
-                    
-                    # Deskewed BBox (for visual alignment/mosaic)
-                    x0 = cfg.start_x + c * cfg.pitch_x
-                    y0 = cfg.start_y + r * cfg.pitch_y
-                    x1 = x0 + cfg.pitch_x
-                    y1 = y0 + cfg.pitch_y
-                    bbox_deskewed = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
-                    
-                    # Sanitize Filename & Create Title Text
-                    safe_label = "".join([c if c.isalnum() or c in (' ', '_', '-') else '_' for c in label])
-                    
-                    # Titles
-                    title_raw_ov = f"X{c:02d}_Y{r:02d}_L{abs_layer:02d}_LEG:{safe_label}"
-                    title_mask = f"X{c:02d}_Y{r:02d}_LEG:{safe_label}"
-                    
-                    basename = f"X{c:02d}_Y{r:02d}_L{abs_layer:02d}_LEG_{safe_label}"
-                    
-                    # Default filename for metadata (prefer raw, then overlay)
-                    saved_rel_path = ""
-
-                    # A. Raw Export
-                    if options.get('raw'):
-                        fname = f"{basename}.png"
-                        path = os.path.join(layer_subdirs['raw'], fname)
-                        final_img = self._add_title_bar(patch_qimg, title_raw_ov)
-                        if not final_img.save(path):
-                            print(f"Error saving {path}")
-                        else:
-                            # Save relative path for metadata
-                            # raw/Layer_XX/filename.png
-                            saved_rel_path = f"raw/{layer_name}/{fname}"
+                    for item in rois:
+                        if self.stop_requested: break
+                        r, c = item['y'], item['x']
+                        safe_label = self._safe(item.get('label', f"{r}_{c}"))
                         
-                    # B. Overlay (Burn-in)
-                    if options.get('overlay'):
-                        ov_img = patch_qimg.convertToFormat(QImage.Format_ARGB32)
-                        # Pass center_x, center_y (Raw Center)
-                        self._draw_voids(ov_img, layer_idx, center_x, center_y, w_pitch, h_pitch, cfg.angle, mode='overlay')
-                        fname = f"{basename}_overlay.png"
-                        path = os.path.join(layer_subdirs['overlay'], fname)
-                        final_img = self._add_title_bar(ov_img, title_raw_ov)
-                        if not final_img.save(path):
-                            print(f"Error saving {path}")
-                        else:
-                            if not saved_rel_path:
+                        scale, offset = 1.0, 0.0
+                        if calib_map is not None and r < calib_map.shape[0] and c < calib_map.shape[1]:
+                            scale = float(calib_map[r, c, 0])
+                            offset = float(calib_map[r, c, 1])
+                        
+                        patch_qimg = self._extract_patch_unified(layer_idx, item['bbox'], win_lo, win_hi, scale, offset)
+                        self._progress_step(f"Layer {abs_layer}: chip {r}, {c}...")
+                        if patch_qimg is None: continue
+                        
+                        title = f"X{c:02d}_Y{r:02d}_L{abs_layer:02d}_LEG:{safe_label}"
+                        basename = f"X{c:02d}_Y{r:02d}_L{abs_layer:02d}_LEG_{safe_label}"
+                        saved_rel_path = "" # Metadata prefers raw, then overlay
+
+                        # A. Raw Export (grayscale PNG)
+                        if 'raw' in layer_subdirs:
+                            fname = f"{basename}.png"
+                            path = os.path.join(layer_subdirs['raw'], fname)
+                            final_img = self._add_title_bar(patch_qimg, title).convertToFormat(QImage.Format_Grayscale8)
+                            if final_img.save(path):
                                 saved_rel_path = f"raw/{layer_name}/{fname}"
-                        
-                    # C. Mask (Accumulate per Chip)
-                    if options.get('mask'):
-                        key = (c, r)
-                        if key not in mask_accumulators:
+                            else:
+                                print(f"Error saving {path}")
+                            
+                        # B. Overlay (Burn-in)
+                        if 'overlay' in layer_subdirs:
+                            ov_img = patch_qimg.convertToFormat(QImage.Format_ARGB32)
+                            self._draw_chip_voids(ov_img, void_index, cfg, r, c, mode='overlay', current_layer=abs_layer)
+                            fname = f"{basename}_overlay.png"
+                            path = os.path.join(layer_subdirs['overlay'], fname)
+                            if self._add_title_bar(ov_img, title).save(path):
+                                saved_rel_path = saved_rel_path or f"overlay/{layer_name}/{fname}"
+                            else:
+                                print(f"Error saving {path}")
+
+                        # Collect Metadata (Deskewed BBox for visual alignment/mosaic)
+                        if saved_rel_path:
+                            x0, y0 = cfg.cell_origin(r, c)
+                            x1, y1 = x0 + cfg.pitch_x, y0 + cfg.pitch_y
+                            patch_metadata_list.append({
+                                "layer": abs_layer,
+                                "x": c,
+                                "y": r,
+                                "label": safe_label,
+                                "bbox_raw": item['bbox'], # List of (x,y) tuples
+                                "bbox_deskewed": [(x0, y0), (x1, y0), (x1, y1), (x0, y1)],
+                                "filename": saved_rel_path
+                            })
+
+                # Release the frame decoded for patch extraction
+                self.data_stack.release_cache()
+
+            # 4. Mask / Merged: markings only, no image data -> once per chip over all exported layers
+            if want_marks and not self.stop_requested:
+                layers = set(layer_numbers)
+                merged_accumulators = {}
+                for item in rois:
+                    if self.stop_requested: break
+                    r, c = item['y'], item['x']
+                    safe_label = self._safe(item.get('label', f"{r}_{c}"))
+                    self._progress_step(f"Masks: chip {r}, {c}...")
+
+                    if 'mask' in subdirs:
+                        img = QImage(w_pitch, h_pitch, QImage.Format_ARGB32)
+                        img.fill(Qt.transparent)
+                        self._draw_chip_voids(img, void_index, cfg, r, c, mode='mask', layers=layers)
+                        path = os.path.join(subdirs['mask'], f"X{c:02d}_Y{r:02d}_LEG_{safe_label}.png")
+                        if not self._add_title_bar(img, f"X{c:02d}_Y{r:02d}_LEG:{safe_label}").save(path):
+                            print(f"Error saving mask {path}")
+
+                    if 'merged' in subdirs:
+                        img = merged_accumulators.get(safe_label)
+                        if img is None:
                             img = QImage(w_pitch, h_pitch, QImage.Format_ARGB32)
                             img.fill(Qt.transparent)
-                            mask_accumulators[key] = {'img': img, 'label': safe_label, 'title': title_mask}
-                        
-                        self._draw_voids(mask_accumulators[key]['img'], layer_idx, center_x, center_y, w_pitch, h_pitch, cfg.angle, mode='mask')
-                        
-                    # D. Merged Accumulate
-                    if options.get('merged'):
-                        safe_label_merged = "".join([c if c.isalnum() or c in (' ', '_', '-') else '_' for c in label])
-                        title_merged = f"LEG:{safe_label_merged}_MERGED"
-                        
-                        if safe_label_merged not in merged_accumulators:
-                            merged_accumulators[safe_label_merged] = {
-                                'img': QImage(w_pitch, h_pitch, QImage.Format_ARGB32),
-                                'title': title_merged
-                            }
-                            merged_accumulators[safe_label_merged]['img'].fill(Qt.transparent)
-                            
-                        self._draw_voids(merged_accumulators[safe_label_merged]['img'], layer_idx, center_x, center_y, w_pitch, h_pitch, cfg.angle, mode='mask')
+                            merged_accumulators[safe_label] = img
+                        self._draw_chip_voids(img, void_index, cfg, r, c, mode='mask', layers=layers)
 
-                    # Collect Metadata
-                    if saved_rel_path:
-                        meta = {
-                            "layer": abs_layer,
-                            "x": c,
-                            "y": r,
-                            "label": safe_label,
-                            "bbox_raw": bbox_raw, # List of (x,y) tuples
-                            "bbox_deskewed": bbox_deskewed,
-                            "filename": saved_rel_path
-                        }
-                        patch_metadata_list.append(meta)
+                if not self.stop_requested:
+                    for label, img in merged_accumulators.items():
+                        path = os.path.join(subdirs['merged'], f"Merged_Label_{label}.png")
+                        if not self._add_title_bar(img, f"LEG:{label}_MERGED").save(path):
+                            print(f"Error saving merged {path}")
 
-                    processed += 1
-                    if processed % 10 == 0:
-                        self.progress_update.emit(int(processed / total_chips * 100), f"Processing {r}, {c}...")
-
-            # Save Masks
-            if options.get('mask'):
-                for (c, r), data in mask_accumulators.items():
-                    fname = f"X{c:02d}_Y{r:02d}_LEG_{data['label']}.png"
-                    path = os.path.join(subdirs['mask'], fname)
-                    
-                    final_img = self._add_title_bar(data['img'], data['title'])
-                    if not final_img.save(path):
-                        print(f"Error saving mask {path}")
-
-            # Save Merged
-            if options.get('merged'):
-                for label, data in merged_accumulators.items():
-                    img = data['img']
-                    title = data['title']
-                    path = os.path.join(subdirs['merged'], f"Merged_Label_{label}.png")
-                    final_img = self._add_title_bar(img, title)
-                    final_img.save(path)
+            if self.stop_requested:
+                print("Export canceled.")
+                return
             
             # Save Patch Metadata (patches.json)
             if options.get('json'):
@@ -264,6 +214,40 @@ class ExportManager(QObject):
             self.error_occurred.emit(str(e))
             import traceback
             traceback.print_exc()
+
+    @staticmethod
+    def _safe(label):
+        """Sanitized label for file names."""
+        return "".join(ch if ch.isalnum() or ch in (' ', '_', '-') else '_' for ch in label)
+
+    def _roi_in_image(self, bbox):
+        xs = [p[0] for p in bbox]
+        ys = [p[1] for p in bbox]
+        return (max(xs) > 0 and max(ys) > 0 and
+                min(xs) < self.data_stack.width and min(ys) < self.data_stack.height)
+
+    def _progress_init(self, total):
+        self._progress_total = max(1, total)
+        self._progress_done = 0
+        self._progress_last = 0.0
+
+    def _progress_step(self, msg):
+        # Throttled (~20 Hz): every emit runs processEvents for the dialog / Cancel
+        self._progress_done += 1
+        now = time.monotonic()
+        if now - self._progress_last >= 0.05 or self._progress_done >= self._progress_total:
+            self._progress_last = now
+            self.progress_update.emit(int(self._progress_done * 100 / self._progress_total), msg)
+
+    def _index_voids(self, cfg):
+        """{(row, col): [(layer, void, gx, gy)]} with Deskewed centers, computed once per export."""
+        glw = self.main_window.glw
+        index = {}
+        for layer, v_list in self.void_manager.voids.items():
+            for v in v_list:
+                gx, gy = glw.raw_to_deskew(v["globalCX"], v["globalCY"])
+                index.setdefault(cfg.cell_at(gx, gy), []).append((layer, v, gx, gy))
+        return index
 
     def _add_title_bar(self, img: QImage, text: str) -> QImage:
         """
@@ -303,137 +287,79 @@ class ExportManager(QObject):
 
     def _extract_patch_unified(self, z, bbox, win_lo, win_hi, scale, offset):
         """
-        Uses LazyTiffStack.get_poly_crop to extract straightened patch.
+        Uses ImageStack.get_poly_crop to extract straightened patch.
         Returns QImage (Grayscale8).
         """
-        if not hasattr(self.data_stack, 'get_poly_crop'):
-             return None
-             
         roi_raw = self.data_stack.get_poly_crop(z, bbox)
         if roi_raw is None:
              return None
         
-        # Process / Normalize
-        roi_f32 = roi_raw.astype(np.float32)
-        
-        from .core_data import ImageNormalizer
-        from PIL import Image
-        roi_u8 = ImageNormalizer.process(roi_f32, win_lo, win_hi, scale, offset)
-        Image.fromarray(roi_u8).save("roi_u8.png")
+        # Normalize via a 16-bit lookup table (same result as ImageNormalizer.process per pixel)
+        roi_u8 = np.ascontiguousarray(self._lut(win_lo, win_hi, scale, offset)[roi_raw])
         h_roi, w_roi = roi_u8.shape
         # Create QImage copy (Safe)
-        q_src = QImage(roi_u8.data, w_roi, h_roi, w_roi, QImage.Format_Grayscale8).copy()
-        
-        return q_src
+        return QImage(roi_u8.data, w_roi, h_roi, w_roi, QImage.Format_Grayscale8).copy()
 
-    def _draw_voids(self, target_img: QImage, current_layer, cx, cy, w, h, angle, mode='overlay'):
+    def _lut(self, win_lo, win_hi, scale, offset):
+        key = (win_lo, win_hi, scale, offset)
+        cache = self.__dict__.setdefault('_lut_cache', {})
+        lut = cache.get(key)
+        if lut is None:
+            if len(cache) > 256:
+                cache.clear()
+            lut = ImageNormalizer.process(np.arange(65536, dtype=np.float32), win_lo, win_hi, scale, offset)
+            cache[key] = lut
+        return lut
+
+    def _draw_chip_voids(self, target_img: QImage, void_index, cfg, r, c, mode='overlay', current_layer=None, layers=None):
         """
-        Draws voids relevant to this chip onto the target QImage.
-        mode: 'overlay' (draw normally), 'mask' (hollow outlines, specific colors)
+        Draws the voids around chip (r, c) onto an image centered on the chip.
+        mode 'overlay': all layers; current_layer solid, other layers as ghosts.
+        mode 'mask':    only `layers`, solid, without antialiasing (pure type colors).
         """
+        w, h = target_img.width(), target_img.height()
+        pcx, pcy = w / 2, h / 2
+        gx_chip = cfg.start_x + (c + 0.5) * cfg.pitch_x
+        gy_chip = cfg.start_y + (r + 0.5) * cfg.pitch_y
+
         painter = QPainter(target_img)
-        painter.setRenderHint(QPainter.Antialiasing)
-        
-        pcx = target_img.width() / 2
-        pcy = target_img.height() / 2
-        
-        # Calculate Chip Center in Deskewed Space using Main Window GL Widget
-        gx_chip, gy_chip = self.main_window.glw.raw_to_deskew(cx, cy)
-        
-        # Decide which layers to draw
-        layers_to_draw = []
-        if mode == 'overlay':
-            layers_to_draw = self.void_manager.voids.keys()
-        else:
-            layers_to_draw = [current_layer]
-            
-        for layer_key in layers_to_draw:
-            voids = self.void_manager.voids.get(layer_key, [])
-            is_active_layer = (layer_key == current_layer)
-            
-            for v in voids:
-                vx, vy = v["globalCX"], v["globalCY"]
-                
-                # Transform Void to Deskewed
-                gx_void, gy_void = self.main_window.glw.raw_to_deskew(vx, vy)
-                
-                # Relative Position
-                dx = gx_void - gx_chip
-                dy = gy_void - gy_chip
-                
-                px = pcx + dx
-                py = pcy + dy
-                
-                # Bounds check
-                if not (-w < (px-pcx) < w and -h < (py-pcy) < h):
-                    continue
-                
-                tid = v.get("type_id", 0)
-                type_data = self.void_manager.types.get(tid, {"color": (255, 0, 0)})
-                col_rgb = type_data["color"]
-                color = QColor(col_rgb[0], col_rgb[1], col_rgb[2])
-                
-                pen = QPen(color)
-                pen.setWidth(2)
-                
-                rx = v["radiusX"]
-                ry = v["radiusY"]
-                
-                if mode == 'overlay':
-                    if is_active_layer:
-                        pen.setStyle(Qt.SolidLine)
+        painter.setRenderHint(QPainter.Antialiasing, mode != 'mask')
+        ghosts, actives = [], []
+        # Voids whose center is within one pitch of the chip center live in the 3x3 neighbourhood
+        for rr in (r - 1, r, r + 1):
+            for cc in (c - 1, c, c + 1):
+                for layer, v, gx, gy in void_index.get((rr, cc), ()):
+                    dx, dy = gx - gx_chip, gy - gy_chip
+                    if not (-w < dx < w and -h < dy < h):
+                        continue
+                    entry = (v, dx, dy, self.void_manager.quadrant_of(v, gx, gy, self._refs, cfg))
+                    if mode == 'mask':
+                        if layer in layers:
+                            actives.append(entry)
+                    elif layer == current_layer:
+                        actives.append(entry)
                     else:
-                        pen.setStyle(Qt.DotLine) 
-                    painter.setPen(pen)
-                    painter.setBrush(Qt.NoBrush)
-                    
-                elif mode == 'mask':
-                    pen.setStyle(Qt.SolidLine)
-                    painter.setPen(pen)
-                    painter.setBrush(Qt.NoBrush)
-                    
-                # Draw
-                shape = type_data.get("shape", "ellipse")
-                self.void_manager.draw_void_shape(painter, shape, px, py, rx, ry)
-            
+                        ghosts.append(entry)
+        for v, dx, dy, q in ghosts:
+            self.void_manager.paint_void(painter, v, pcx + dx, pcy + dy, style="ghost", width=2, quadrant=q)
+        for v, dx, dy, q in actives:
+            self.void_manager.paint_void(painter, v, pcx + dx, pcy + dy, style="normal", width=2, quadrant=q)
         painter.end()
 
     def _export_json(self, output_dir):
         path = os.path.join(output_dir, "voids.json")
-        # Use main_window properties
-        self.void_manager.save_to_file(path, self.main_window.glw.grid_cfg, self.main_window.glw.bonding_map)
+        # Same as "Save JSON" (the transform is needed for rotated grids)
+        glw = self.main_window.glw
+        self.void_manager.save_to_file(path, glw.grid_cfg, glw.bonding_map, glw.coord_transform)
 
     def _export_csv(self, output_dir):
         path = os.path.join(output_dir, "voids.csv")
-        grid_cfg = self.main_window.glw.grid_cfg
-        bonding_map = self.main_window.glw.bonding_map
+        glw = self.main_window.glw
+        columns = [(key, name) for key, name in self.void_manager.csv_columns.items() if name]
+        records = self.void_manager.void_records(glw.grid_cfg, glw.bonding_map, glw.coord_transform)
         
         with open(path, 'w', newline='') as f:
             writer = csv.writer(f)
-            # Header
-            writer.writerow(["Layer", "CellRow", "CellCol", "Label", "VoidType", "GlobalX", "GlobalY", "RelativeX", "RelativeY", "RadiusX", "RadiusY"])
-            
-            # Iterate
-            for layer, v_list in self.void_manager.voids.items():
-                for v in v_list:
-                    vx, vy = v["globalCX"], v["globalCY"]
-                    
-                    # Determine which cell it belongs to
-                    gx = (vx - grid_cfg.start_x) / grid_cfg.pitch_x
-                    gy = (vy - grid_cfg.start_y) / grid_cfg.pitch_y
-                    c = int(np.floor(gx))
-                    r = int(np.floor(gy))
-                    
-                    chip_x0 = grid_cfg.start_x + c * grid_cfg.pitch_x
-                    chip_y0 = grid_cfg.start_y + r * grid_cfg.pitch_y
-                    rel_x = vx - chip_x0
-                    rel_y = vy - chip_y0
-                    
-                    label = ""
-                    if bonding_map:
-                        label = bonding_map.get_key(r, c)
-                        
-                    tid = v.get("type_id", 0)
-                    tname = self.void_manager.types.get(tid, {}).get("name", "Unknown")
-                    
-                    writer.writerow([layer, r, c, label, tname, vx, vy, rel_x, rel_y, v["radiusX"], v["radiusY"]])
+            writer.writerow([name for _, name in columns])
+            for rec in records:
+                writer.writerow([rec[key] for key, _ in columns])

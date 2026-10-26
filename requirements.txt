@@ -1,0 +1,8 @@
+# Runtime (Python 3.10 x64, the version the released exe is built with)
+numpy==2.2.6
+PySide6==6.10.1
+PyOpenGL==3.1.10
+PyOpenGL-accelerate==3.1.10
+Pillow==11.3.0
+tifffile==2025.5.10
+imagecodecs==2025.3.30   # compressed TIFFs (LZW, JPEG, ...) through tifffile

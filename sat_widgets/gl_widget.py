@@ -8,9 +8,10 @@ from OpenGL.GL import shaders
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
 from PySide6.QtGui import QSurfaceFormat, QAction, QColor, QImage, QPainter, QPen, QCursor, QPixmap
 from PySide6.QtCore import Qt, Signal, QRectF, QTimer, QPointF, Slot
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QToolTip
 
 from .core_data import GridConfig, BondingMap, CoordinateTransform
+from .products import layout_boxes
 
 
 # ==================================================================================
@@ -19,53 +20,59 @@ from .core_data import GridConfig, BondingMap, CoordinateTransform
 class Tile:
     """
     Represents a single GPU texture tile.
+    Pixel data is pulled from `loader` at upload time and released right after,
+    so at most one tile is held in CPU memory while a layer is uploaded.
     """
-    def __init__(self, x, y, width, height, data):
+    def __init__(self, x, y, width, height, loader):
         self.x = x  # Global X position
         self.y = y  # Global Y position
         self.w = width
         self.h = height
-        self.data = np.ascontiguousarray(data, dtype=np.uint16) # CPU copy
+        self.loader = loader # () -> (h, w) uint8 / uint16 array
         self.tex_id = None
         self.is_uploaded = False
+        self.nbytes = 0 # GPU memory used
 
     def upload(self):
-        if self.is_uploaded: 
+        if self.is_uploaded:
             return
-            
+
+        data = self.loader()
+        if data.dtype == np.uint8:
+            # 8-bit: half the VRAM. Sampled values are v/255, which the shader scales by 65535
+            # -> v * 257, the same 16-bit domain as before.
+            internal_fmt, gl_type = GL_R8, GL_UNSIGNED_BYTE
+        else:
+            data = data.astype(np.uint16, copy=False)
+            internal_fmt, gl_type = GL_R16, GL_UNSIGNED_SHORT
+        data = np.ascontiguousarray(data)
+
         if self.tex_id is None:
             self.tex_id = glGenTextures(1)
-            
+
         glBindTexture(GL_TEXTURE_2D, self.tex_id)
-        # 16-bit single channel texture
-        # Internal format: GL_R16 (16-bit Red/Gray)
-        # Format: GL_RED
-        # Type: GL_UNSIGNED_SHORT
-        
+
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
-        
+
         glTexImage2D(
-            GL_TEXTURE_2D, 0, GL_R16, 
-            self.w, self.h, 0, 
-            GL_RED, GL_UNSIGNED_SHORT, self.data
+            GL_TEXTURE_2D, 0, internal_fmt,
+            self.w, self.h, 0,
+            GL_RED, gl_type, data
         )
-        
+
         self.is_uploaded = True
-        
-        # MEMORY OPTIMIZATION: Release CPU copy immediately
-        # We don't need it after upload. If context is lost, we reload from disk (LazyStack).
-        self.data = None
+        self.nbytes = data.nbytes
 
     def cleanup(self):
         if self.tex_id:
             glDeleteTextures([self.tex_id])
             self.tex_id = None
         self.is_uploaded = False
-        self.data = None # Ensure clear
+        self.nbytes = 0
 
 class TiledImage:
     """
@@ -73,39 +80,39 @@ class TiledImage:
     """
     TILE_SIZE = 4096 # Safe for most modern GPUs (limit is usually 8192 or 16384)
 
-    def __init__(self, full_image: np.ndarray):
+    def __init__(self, width, height, read_tile):
         """
-        full_image: (H, W) uint16 numpy array
+        read_tile(x, y, w, h) -> (h, w) uint8/uint16 array. Called once per tile at upload.
         """
-        self.h, self.w = full_image.shape
+        self.w = width
+        self.h = height
         self.tiles = []
-        
-        # Create tiles
+
         for y in range(0, self.h, self.TILE_SIZE):
             for x in range(0, self.w, self.TILE_SIZE):
                 h_chunk = min(self.TILE_SIZE, self.h - y)
                 w_chunk = min(self.TILE_SIZE, self.w - x)
-                
-                # Extract sub-region
-                if hasattr(full_image, 'get_crop'):
-                     # Support for Virtual Stacks (LazyTiffStack, MosaicTiffStack)
-                     # get_crop(z, x, y, w, h). 
-                     # If full_image is a Wrapper (2D), it might expect get_crop(0, ...) or get_crop(x,...)
-                     # We should check call signature? 
-                     # Or assume TiledImage is given a "2D-like" object.
-                     # If it's a LayerWrapper, we added get_crop(z, ...) but ignored z.
-                     # Let's standardize: TiledImage expects 2D access. 
-                     # If get_crop exists, we try get_crop(0, x, y, w, h) or get_crop(x, y, w, h)?
-                     # LazyTiffStack.get_crop(z, x, y, w, h).
-                     # MosaicTiffStack.get_crop(z, x, y, w_ h).
-                     # If we passed 'wrapper', wrapper.get_crop takes (z, ...).
-                     # So we call full_image.get_crop(0, x, y, w_chunk, h_chunk).
-                     sub_img = full_image.get_crop(0, x, y, w_chunk, h_chunk)
-                else:
-                     sub_img = full_image[y:y+h_chunk, x:x+w_chunk]
-                
-                tile = Tile(x, y, w_chunk, h_chunk, sub_img)
-                self.tiles.append(tile)
+                loader = (lambda x=x, y=y, w=w_chunk, h=h_chunk: read_tile(x, y, w, h))
+                self.tiles.append(Tile(x, y, w_chunk, h_chunk, loader))
+
+    @classmethod
+    def from_stack(cls, stack, z):
+        """Tiles of layer z of an ImageStack, read region by region (never the full layer)."""
+        return cls(stack.width, stack.height, lambda x, y, w, h: stack.get_tile(z, x, y, w, h))
+
+    @classmethod
+    def from_array(cls, image: np.ndarray):
+        """(H, W) uint8/uint16 array."""
+        h, w = image.shape[:2]
+        return cls(w, h, lambda x, y, tw, th: image[y:y + th, x:x + tw])
+
+    @property
+    def nbytes(self):
+        return sum(t.nbytes for t in self.tiles)
+
+    @property
+    def estimated_nbytes(self):
+        return sum(t.w * t.h for t in self.tiles) * 2
 
     def upload_all(self):
         for t in self.tiles:
@@ -123,7 +130,8 @@ class GLImageWidget(QOpenGLWidget):
     layer_wheel_changed = Signal(int) # Delta (+1 or -1)
     cursor_moved = Signal(int, int) # Col, Row
     navigation_requested = Signal(int, int) # Col, Row (Request to move view)
-    
+    voids_changed = Signal() # Void data edited (count labels etc.)
+
     def __init__(self):
         super().__init__()
         self.setMouseTracking(True) # Enable hover events
@@ -142,8 +150,15 @@ class GLImageWidget(QOpenGLWidget):
         self.void_mode = False # Active State: "DRAW" | "EDIT" | "ERASE" | False
         self.selected_void_tool = "DRAW" # Selected Tool: "DRAW" | "EDIT" | "ERASE"
         self.active_type_id = 0
-        self.current_layer = 0
+        self.current_layer = 0 # Absolute layer number
+        self.active_void = None
+        self.active_void_action = None
+        self._void_txn = False # Inside a VoidManager change (mouse press .. release)
+        self._snap_hint = None
         
+        # Chip layout of the selected WF product, drawn inside each cell's reference bbox
+        self.layout = None
+
         # Auto-Calibration
         self.calib_tex = None # GL Texture for (Scale, Offset) per cell
         self.calib_data_shape = (0, 0) # (Rows, Cols)
@@ -597,6 +612,18 @@ class GLImageWidget(QOpenGLWidget):
         if self.coord_transform:
             return self.coord_transform.deskew_to_raw(gx, gy)
         return gx, gy
+
+    def raw_to_cell(self, rx, ry, inside_only=False):
+        """
+        Grid cell (row, col) containing the Raw (absolute image) point (rx, ry).
+        The grid is rotated by grid_cfg.angle relative to the raw image.
+        inside_only: return None when the point is outside the grid.
+        """
+        gx, gy = self.raw_to_deskew(rx, ry)
+        row, col = self.grid_cfg.cell_at(gx, gy)
+        if inside_only and not self.grid_cfg.contains(row, col):
+            return None
+        return row, col
             
     # -----------------------------------------------
     # Mouse Interaction
@@ -605,6 +632,10 @@ class GLImageWidget(QOpenGLWidget):
         delta = e.angleDelta().y()
         modifiers = e.modifiers()
         
+        # Edit tool (E) + hovering a curve void: the wheel adjusts its exponent p
+        if self._wheel_edit_curve(e, delta, modifiers):
+            return
+
         # Reconfiguration (User Request 2025-12-28)
         # No Modifier: Zoom
         # Ctrl or Shift: Layer Change
@@ -647,6 +678,20 @@ class GLImageWidget(QOpenGLWidget):
             
             self.zoom = new_zoom
             self.update()
+
+    def _wheel_edit_curve(self, e, delta, modifiers):
+        if (self.selected_void_tool != "EDIT" or not self.void_manager or not self.tiled_image
+                or modifiers & (Qt.ControlModifier | Qt.ShiftModifier) or delta == 0):
+            return False
+        gx, gy = self.get_image_coords(e.position())
+        v, _ = self.void_manager.hit_test(self.current_layer, gx, gy, margin=10.0/self.zoom, coord_transform=self.raw_to_deskew, quadrant_ctx=self._quadrant_ctx())
+        if v is None or self.void_manager.shape_of(v) != "curve":
+            return False
+        p = self.void_manager.set_p(v, self.void_manager.p_of(v) * (1.1 ** (delta / 120.0)))
+        QToolTip.showText(e.globalPosition().toPoint(), f"p = {p:.2f}", self)
+        self.voids_changed.emit()
+        self.update()
+        return True
 
     def mouseDoubleClickEvent(self, e):
         if not self.grid_cfg.visible or self.tiled_image is None:
@@ -842,95 +887,71 @@ class GLImageWidget(QOpenGLWidget):
              painter = QPainter(self)
              painter.setRenderHint(QPainter.Antialiasing)
              
-             # Current Layer Voids
-             layer_voids = self.void_manager.voids.get(self.current_layer, [])
-             
-             # Draw Helper
-             def to_screen(gx, gy):
-                 # gx, gy are RAW storage coordinates.
-                 # 1. Convert to Deskewed (Visual) coordinates.
-                 #    This step APPLIES the Grid Angle Rotation.
-                 dx, dy = self.raw_to_deskew(gx, gy)
-                 
-                 # Now map Deskewed -> Screen
-                 view_w = self.width()
-                 view_h = self.height()
-                 cx = view_w / 2
-                 cy = view_h / 2
-                 
-                 if self.coord_transform:
-                     img_cx = self.coord_transform.img_cx
-                     img_cy = self.coord_transform.img_cy
-                 else:
-                     img_cx = 500
-                     img_cy = 500
-                 
-                 # Pan is in Deskewed Space (separation from image center)
-                 screen_x = (dx - img_cx + self.pan_x) * self.zoom + cx
-                 screen_y = (dy - img_cy + self.pan_y) * self.zoom + cy
-                 return screen_x, screen_y
+             # Chip layout inside each cell's reference bbox
+             self._draw_layout(painter)
 
-             # Iterate All Layers
-             # First Pass: Ghost Voids (Other Layers)
-             for layer_idx, v_list in self.void_manager.voids.items():
+             # First Pass: Ghost Voids (Other Layers), then Current Layer Voids on top
+             vm = self.void_manager
+             refs = vm.reference_bboxes(self.grid_cfg, self.coord_transform)
+
+             def paint(v, style):
+                 # Raw (storage) -> Deskewed (visual, applies the grid rotation) -> Screen
+                 dx, dy = self.raw_to_deskew(v["globalCX"], v["globalCY"])
+                 sx, sy = self.deskew_to_screen(dx, dy)
+                 vm.paint_void(painter, v, sx, sy, self.zoom, style=style,
+                               quadrant=vm.quadrant_of(v, dx, dy, refs, self.grid_cfg))
+
+             for layer_idx, v_list in vm.voids.items():
                  if layer_idx == self.current_layer:
                      continue
-                     
                  for v in v_list:
-                     sx, sy = to_screen(v["globalCX"], v["globalCY"])
-                     srx = v["radiusX"] * self.zoom
-                     sry = v["radiusY"] * self.zoom
-                     
-                     tid = v.get("type_id", 0)
-                     if tid not in self.void_manager.types: tid = 0
-                     type_data = self.void_manager.types.get(tid, {"color": (255, 255, 0)})
-                     col_rgb = type_data["color"]
-                     
-                     # Ghost Style: Dotted, Lower Opacity
-                     pen = QPen(QColor(col_rgb[0], col_rgb[1], col_rgb[2], 128))
-                     pen.setStyle(Qt.DotLine)
-                     pen.setWidth(1)
-                     painter.setPen(pen)
-                     painter.setBrush(Qt.NoBrush)
-                     
-                     painter.setBrush(Qt.NoBrush)
-                     
-                     shape = self.void_manager.types.get(tid, {}).get("shape", "ellipse")
-                     self.void_manager.draw_void_shape(painter, shape, sx, sy, srx, sry)
+                     paint(v, "ghost")
 
-             # Second Pass: Current Layer Voids (On Top)
-             layer_voids = self.void_manager.voids.get(self.current_layer, [])
-             
-             for v in layer_voids:
-                 sx, sy = to_screen(v["globalCX"], v["globalCY"])
-                 srx = v["radiusX"] * self.zoom
-                 sry = v["radiusY"] * self.zoom
-                 
-                 # Determine Color
-                 tid = v.get("type_id", 0)
-                 # Safety check
-                 if tid not in self.void_manager.types: tid = 0
-                 type_data = self.void_manager.types.get(tid, {"color": (255, 255, 0)})
-                 col_rgb = type_data["color"]
-                 
-                 if v == getattr(self, 'active_void', None):
-                     # Active: Red border, Type fill
-                     pen = QPen(QColor(255, 0, 0, 255))
-                     pen.setStyle(Qt.SolidLine)
-                     painter.setPen(pen) 
-                     painter.setBrush(QColor(col_rgb[0], col_rgb[1], col_rgb[2], 100))
-                 else:
-                     # Normal: Type border, no fill
-                     pen = QPen(QColor(col_rgb[0], col_rgb[1], col_rgb[2], 255))
-                     pen.setStyle(Qt.SolidLine)
-                     painter.setPen(pen)
-                     painter.setBrush(Qt.NoBrush)
-                     
-                 # Draw Shape
-                 shape = self.void_manager.types.get(tid, {}).get("shape", "ellipse")
-                 self.void_manager.draw_void_shape(painter, shape, sx, sy, srx, sry)
+             active = getattr(self, 'active_void', None)
+             for v in vm.voids.get(self.current_layer, []):
+                 paint(v, "active" if v is active else "normal")
 
              painter.end()
+
+    def deskew_to_screen(self, dx, dy):
+        """Deskewed (grid space) point -> widget pixel position."""
+        if self.coord_transform:
+            img_cx, img_cy = self.coord_transform.img_cx, self.coord_transform.img_cy
+        else:
+            img_cx, img_cy = 500, 500
+        return ((dx - img_cx + self.pan_x) * self.zoom + self.width() / 2,
+                (dy - img_cy + self.pan_y) * self.zoom + self.height() / 2)
+
+    def _draw_layout(self, painter):
+        """
+        Draws the selected product's layout (dashed sub-boxes, see products.json) inside every
+        cell's reference bbox. Layout coordinates are in layout.design_size units relative to the
+        bbox top-left and are scaled to the actual bbox (the drawn bbox is the reference).
+        """
+        layout = self.layout
+        if not layout or not self.void_manager:
+            return
+        boxes = layout_boxes(layout)
+        if not boxes:
+            return
+        style = layout.get("style", {})
+        col = style.get("color", [0, 200, 255])
+        pen = QPen(QColor(col[0], col[1], col[2], style.get("alpha", 200)))
+        pen.setWidthF(style.get("width", 1.0))
+        dash = style.get("dash", [4, 4])
+        if dash:
+            pen.setDashPattern(dash)
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+
+        refs = self.void_manager.reference_bboxes(self.grid_cfg, self.coord_transform)
+        for (x0, y0, w, h) in refs.values():
+            dw, dh = layout.get("design_size", (w, h))
+            sx, sy = w / dw, h / dh
+            for (bx, by, bw, bh) in boxes:
+                p0 = self.deskew_to_screen(x0 + bx * sx, y0 + by * sy)
+                p1 = self.deskew_to_screen(x0 + (bx + bw) * sx, y0 + (by + bh) * sy)
+                painter.drawRect(QRectF(QPointF(*p0), QPointF(*p1)))
 
     # -----------------------------------------------
     # Mouse Interaction
@@ -968,9 +989,10 @@ class GLImageWidget(QOpenGLWidget):
             self._last_mouse = e.position()
             self.setFocus()
             
-            # Void Interaction
+            # Void Interaction (one undo step per press .. release)
             if self.void_mode and self.void_manager and self.tiled_image:
                 gx, gy = self.get_image_coords(e.position())
+                self._begin_void_change()
                 
                 if self.void_mode == "DRAW":
                     if self.void_manager and self.current_layer is not None:
@@ -1020,6 +1042,10 @@ class GLImageWidget(QOpenGLWidget):
                                 
                                 self.active_void = self.void_manager.add_void(self.current_layer, cx_raw, cy_raw, def_w/2.0, def_h/2.0, self.active_type_id)
                                 
+                            # Snap types: attach to the bbox corner nearest to the click
+                            self._snap_hint = (gx, gy)
+                            self.void_manager.snap_void(self.active_void, self.grid_cfg, self.coord_transform, hint=self._snap_hint)
+                            
                             # Switch to Move mode immediately
                             self.active_void_action = 'center'
                             
@@ -1029,32 +1055,32 @@ class GLImageWidget(QOpenGLWidget):
                             # Center/Pos is rx, ry
                             self.active_void = self.void_manager.add_void(self.current_layer, rx, ry, 1.0, 1.0, self.active_type_id)
                             self.active_void_action = 'sizing'
+                            self._snap_hint = (gx, gy) # Snap types: corner nearest to the press point
 
+                    self.voids_changed.emit()
                     self.update()
                     return # Consume event
                     
                 elif self.void_mode == "EDIT":
-                    # Hit Test (Global) - Pass Deskew Transform
-                    # Mouse (gx, gy) is Deskewed.
-                    v, action, layer = self.void_manager.hit_test_all(gx, gy, margin=10.0/self.zoom, priority_layer=self.current_layer, coord_transform=self.raw_to_deskew)
+                    # Hit Test on the current layer (ghost voids of other layers are reference only)
+                    # Mouse (gx, gy) is Deskewed -> pass the Raw -> Deskew transform.
+                    v, action = self.void_manager.hit_test(self.current_layer, gx, gy, margin=10.0/self.zoom, coord_transform=self.raw_to_deskew, quadrant_ctx=self._quadrant_ctx())
                     if v:
                         self.active_void = v
                         self.active_void_action = action # 'center' or 'edge'
-                        # Note: We don't necessarily switch self.current_layer.
-                        # The void object 'v' is a reference, so modifying it works across layers.
+                        # Snap types keep their anchored corner while resizing
+                        self._snap_hint = None
+                        if action == 'edge':
+                            self._snap_hint = self.void_manager.snap_corner_point(v, self.grid_cfg, self.coord_transform)
                         self.update()
                         return
-                        
+
                 elif self.void_mode == "ERASE":
-                    # Hit Test (Global) to find what to delete - Pass Transform
-                    v, action, layer = self.void_manager.hit_test_all(gx, gy, margin=10.0/self.zoom, priority_layer=self.current_layer, coord_transform=self.raw_to_deskew)
-                    
-                    if v and layer is not None:
-                        deleted = self.void_manager.delete_void_at(layer, gx, gy)
-                        if deleted:
-                            self.update()
-                            self.active_void_action = 'erasing'
-                            return
+                    if self._erase_at(gx, gy):
+                        self.active_void_action = 'erasing' # Keep erasing while dragging
+                        self.voids_changed.emit()
+                        self.update()
+                        return
 
     def mouseMoveEvent(self, e):
         # 0. Always calculate grid pos and emit signal
@@ -1134,6 +1160,9 @@ class GLImageWidget(QOpenGLWidget):
                      self.active_void["globalCX"] = cx_raw
                      self.active_void["globalCY"] = cy_raw
                  
+                 # Snap types: span from the bbox corner nearest to the press point to the mouse
+                 self.void_manager.snap_void(self.active_void, self.grid_cfg, self.coord_transform,
+                                             hint=self._snap_hint, drag_point=(gx, gy))
                  self.update()
                  
              elif self.active_void_action == 'center' and self.active_void:
@@ -1152,6 +1181,8 @@ class GLImageWidget(QOpenGLWidget):
                  
                  self.active_void["globalCX"] += raw_dx
                  self.active_void["globalCY"] += raw_dy
+                 # Snap types: re-attach to the nearest bbox corner
+                 self.void_manager.snap_void(self.active_void, self.grid_cfg, self.coord_transform)
                  self.update()
                  
              elif self.active_void_action == 'edge' and self.active_void:
@@ -1160,21 +1191,24 @@ class GLImageWidget(QOpenGLWidget):
                  # Get Center in Deskewed Space (Reference)
                  cx_deskew, cy_deskew = self.raw_to_deskew(self.active_void["globalCX"], self.active_void["globalCY"])
                  
-                 # Unified Resize (Center-to-Edge)
-                 # Works for both Ellipse (Radius) and Rectangle (Half-Width/Height)
-                 # calculated from Center.
-                 new_rx = max(1.0, abs(gx - cx_deskew))
-                 new_ry = max(1.0, abs(gy - cy_deskew))
-                 
-                 self.active_void["radiusX"] = new_rx
-                 self.active_void["radiusY"] = new_ry
+                 if self._snap_hint is not None:
+                     # Snap types: anchored corner stays, size follows the mouse
+                     self.void_manager.snap_void(self.active_void, self.grid_cfg, self.coord_transform,
+                                                 hint=self._snap_hint, drag_point=(gx, gy))
+                 else:
+                     # Unified Resize (Center-to-Edge)
+                     # Works for Ellipse (Radius), Rectangle (Half-Width/Height) and Curve
+                     # calculated from Center.
+                     self.active_void["radiusX"] = max(1.0, abs(gx - cx_deskew))
+                     self.active_void["radiusY"] = max(1.0, abs(gy - cy_deskew))
                  
                  self.update()
                  
              elif self.active_void_action == 'erasing':
-                 # Continuous erase?
-                 self.void_manager.delete_void_at(self.current_layer, gx, gy)
-                 self.update()
+                 # Continuous erase
+                 if self._erase_at(gx, gy):
+                     self.voids_changed.emit()
+                     self.update()
                  
              self._last_mouse = e.position()
              return
@@ -1202,14 +1236,46 @@ class GLImageWidget(QOpenGLWidget):
         self._last_mouse = e.position()
         self.update()
 
+    def _quadrant_ctx(self):
+        return (self.void_manager.reference_bboxes(self.grid_cfg, self.coord_transform), self.grid_cfg)
+
+    def _erase_at(self, gx, gy):
+        """Deletes the topmost void of the current layer under the Deskewed point (gx, gy)."""
+        v, _ = self.void_manager.hit_test(self.current_layer, gx, gy, margin=10.0/self.zoom, coord_transform=self.raw_to_deskew, quadrant_ctx=self._quadrant_ctx())
+        return v is not None and self.void_manager.remove_void(self.current_layer, v)
+
     def mouseReleaseEvent(self, e):
         # Clear interaction state
         self._last_mouse = None
+
+        # A click without dragging in Drag-to-Size mode leaves a 1px void -> discard it
+        if self.active_void_action == 'sizing' and self.active_void is not None:
+            start = getattr(self, '_void_start', None)
+            if start is not None:
+                moved = abs(e.position().x() - start.x()) + abs(e.position().y() - start.y())
+                if moved < 3:
+                    self.void_manager.remove_void(self.current_layer, self.active_void)
         
-        if self.void_mode:
+        changed = self._end_void_change()
+        if self.void_mode or self.active_void_action:
             self.active_void = None
             self.active_void_action = None
+            self._snap_hint = None
             self.update()
+        if changed:
+            self.voids_changed.emit()
+
+    def _begin_void_change(self):
+        if not self._void_txn:
+            self.void_manager.begin_change()
+            self._void_txn = True
+
+    def _end_void_change(self):
+        """Closes the press .. release change. Returns True if it changed void data."""
+        if not self._void_txn:
+            return False
+        self._void_txn = False
+        return self.void_manager.end_change()
         
     
     def set_void_tool(self, tool_name):
@@ -1416,58 +1482,18 @@ class GLImageWidget(QOpenGLWidget):
              img_cx = 500
              img_cy = 500
         
-        # View Center in Global Space
+        # View Center in Deskewed (Grid) Space - pan is defined in this space
         gx = img_cx - self.pan_x
         gy = img_cy - self.pan_y
-        
-        # 2. Determine Grid Cell
-        cfg = self.grid_cfg
-        
-        dx = gx - cfg.start_x
-        dy = gy - cfg.start_y
-        
-        rad = np.radians(-cfg.angle)
-        sin_a = np.sin(rad)
-        cos_a = np.cos(rad)
-        
-        rx = dx * cos_a - dy * sin_a
-        ry = dx * sin_a + dy * cos_a
-        
-        c = int(np.floor(rx / cfg.pitch_x))
-        r = int(np.floor(ry / cfg.pitch_y))
+
+        # 2. Determine Grid Cell (grid is axis-aligned in Deskewed space)
+        r, c = self.grid_cfg.cell_at(gx, gy)
         
         print(f"Clearing voids in Chip ({c}, {r})")
         
-        # 3. Delete voids
-        # 3. Delete voids in ALL layers for this chip
-        rad_inv = np.radians(-cfg.angle)
-        sin_inv = np.sin(rad_inv)
-        cos_inv = np.cos(rad_inv)
-        
-        total_count = 0
-        
-        # Iterate over copy of item keys since we modify the lists
-        for layer, current_voids in list(self.void_manager.voids.items()):
-            to_remove = []
-            for v in current_voids:
-                 vx = v["globalCX"]
-                 vy = v["globalCY"]
-                 
-                 vdx = vx - cfg.start_x
-                 vdy = vy - cfg.start_y
-                 
-                 vrx = vdx * cos_inv - vdy * sin_inv
-                 vry = vdx * sin_inv + vdy * cos_inv
-                 
-                 vc = int(np.floor(vrx / cfg.pitch_x))
-                 vr = int(np.floor(vry / cfg.pitch_y))
-                 
-                 if vc == c and vr == r:
-                     to_remove.append(v)
-            
-            for v in to_remove:
-                self.void_manager.voids[layer].remove(v)
-                total_count += 1
+        # 3. Delete voids in ALL layers for this chip (void centers are stored in Raw space)
+        total_count = self.void_manager.remove_voids_where(
+            lambda layer, v: self.raw_to_cell(v["globalCX"], v["globalCY"]) == (r, c))
                  
         if total_count > 0:
             print(f"Cleared {total_count} voids in Chip ({c}, {r}) across all layers")

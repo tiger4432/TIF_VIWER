@@ -5,256 +5,331 @@ from PySide6.QtGui import QColor
 import json
 import os
 import math
+from collections import OrderedDict
 
-# Use cv2 for speed if available, else fallback? 
-# Let's try to stick to PIL/Numpy to avoid dependency issues unless confirmed.
-# PIL transform is decent.
+# tifffile reads TIFF pages without PIL's extra copies and can memory-map
+# uncompressed pages, so only the pixels that are actually touched are read.
+try:
+    import tifffile
+except ImportError:
+    tifffile = None
 
-def to_gray2d_uint16(arr: np.ndarray, z_index: int = 0) -> np.ndarray:
+# PIL mode -> numpy dtype (fallback path only)
+_PIL_DTYPES = {
+    'I;16': np.uint16, 'I;16L': np.uint16, 'I;16B': np.uint16,
+    'I': np.int32, 'F': np.float32, '1': np.bool_,
+}
+
+
+def to_gray(arr: np.ndarray) -> np.ndarray:
     """
-    Extracts a single 2D grayscale layer from a multi-dim array.
-    Returns (H, W) uint16.
+    Reduces a (H, W), (H, W, C) or planar (C, H, W) array to a single channel.
+    uint8 / uint16 are kept as is (no copy); RGB(A) -> luminance in the source bit depth;
+    any other dtype -> uint16 (clipped).
     """
-    if hasattr(arr, 'get_crop') and not hasattr(arr, '__getitem__'):
-        raise TypeError("Cannot slice Virtual Stack. Use get_crop or set_image(stack).")
+    a = arr
+    if a.ndim == 3:
+        if a.shape[-1] not in (3, 4) and a.shape[0] in (3, 4):
+            a = np.moveaxis(a, 0, -1) # Planar (C, H, W) -> (H, W, C)
+        if a.shape[-1] in (3, 4):
+            rgb = a[..., :3]
+            gray = rgb[..., 0] * np.float32(0.299)
+            gray += rgb[..., 1] * np.float32(0.587)
+            gray += rgb[..., 2] * np.float32(0.114)
+            if a.dtype == np.uint8:
+                return np.clip(np.rint(gray), 0, 255).astype(np.uint8)
+            return np.clip(np.rint(gray), 0, 65535).astype(np.uint16)
+        a = a[..., 0]
 
-    current_frame = arr
-    if hasattr(arr, 'ndim'):
-        if arr.ndim == 4:
-            current_frame = arr[z_index]
-        elif arr.ndim == 3:
-            if arr.shape[-1] not in (3, 4):
-                 current_frame = arr[z_index]
-            else:
-                 pass 
-    elif isinstance(arr, list):
-         current_frame = arr[z_index]
-            
-    # Now current_frame is (H, W) or (H, W, C)
-    
-    # 2. Convert RGB to Gray if needed
-    if hasattr(current_frame, 'ndim') and current_frame.ndim == 3 and current_frame.shape[-1] in (3, 4):
-        rgb = current_frame[..., :3].astype(np.float32)
-        gray = 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
-        if current_frame.dtype == np.uint8:
-            gray = gray * 257.0 
-        current_frame = np.clip(gray, 0, 65535).astype(np.uint16)
-        
-    if hasattr(current_frame, 'ndim') and current_frame.ndim != 2:
-         pass
+    if a.dtype == np.uint8 or a.dtype == np.uint16:
+        return a
+    if a.dtype == np.bool_:
+        return a.astype(np.uint8) * np.uint8(255)
+    return np.clip(a, 0, 65535).astype(np.uint16)
 
-    if hasattr(current_frame, 'dtype') and current_frame.dtype == np.uint8:
-        return (current_frame.astype(np.uint16) * 257)
 
-    return np.array(current_frame).astype(np.uint16, copy=False)
-
-class LazyTiffStack:
-    """Wraps a PIL.Image instance to provide lazy-loading of layers."""
-    def __init__(self, source):
-        if isinstance(source, str):
-            self.img = Image.open(source)
-            self.path = source
-            self.owned = True
-        elif isinstance(source, Image.Image):
-            self.img = source
-            self.path = getattr(source, 'filename', None)
-            self.owned = False
-        else:
-            raise ValueError("Source must be a file path or PIL Image object")
-            
-        self.n_frames = getattr(self.img, 'n_frames', 1)
-        self.width, self.height = self.img.size
-        self.frame_start = 0
-        self.frame_count = self.n_frames
-        self.shape = (self.frame_count, self.height, self.width)
-        self.ndim = 3
-        
-        if self.img.mode == 'I;16': self.dtype = np.uint16
-        elif self.img.mode == 'I': self.dtype = np.uint32
-        elif self.img.mode == 'F': self.dtype = np.float32
-        else: self.dtype = np.uint8
-            
-    def set_range(self, start, count):
-        self.frame_start = max(0, start)
-        self.frame_count = min(count, self.n_frames - self.frame_start)
-        self.shape = (self.frame_count, self.height, self.width)
-        
-    def __getitem__(self, key):
-        if isinstance(key, int):
-            if key < 0: key += self.frame_count
-            if key < 0 or key >= self.frame_count: raise IndexError("Index out of bounds")
-            phys_idx = self.frame_start + key
-            self.img.seek(phys_idx)
-            return np.array(self.img)
-        if isinstance(key, slice):
-            start, stop, step = key.indices(self.frame_count)
-            res = []
-            for i in range(start, stop, step):
-                phys_idx = self.frame_start + i
-                self.img.seek(phys_idx)
-                res.append(np.array(self.img))
-            if not res: return np.zeros((0, self.height, self.width), dtype=self.dtype)
-            return np.stack(res)
-        if isinstance(key, tuple):
-            z = key[0]
-            if isinstance(z, int):
-                phys_idx = self.frame_start + z
-                self.img.seek(phys_idx)
-                arr = np.array(self.img)
-                return arr[key[1:]]
-        return np.array(self.img)
-    
-    def get_crop(self, z, x, y, w, h):
-        phys_idx = self.frame_start + z
-        if phys_idx < 0: phys_idx += self.n_frames
-        self.img.seek(phys_idx)
-        img_w, img_h = self.width, self.height
-        x = max(0, x); y = max(0, y)
-        x2 = min(x + w, img_w); y2 = min(y + h, img_h)
-        if x >= x2 or y >= y2: return np.zeros((h, w), dtype=self.dtype)
-        region = self.img.crop((x, y, x2, y2))
-        arr = np.array(region)
-        out = np.zeros((h, w), dtype=arr.dtype)
-        out_h, out_w = arr.shape[:2]
-        out[0:out_h, 0:out_w] = arr
-        if out.dtype == np.uint8: return (out.astype(np.uint16) * 257)
+def to_uint16(arr: np.ndarray) -> np.ndarray:
+    """Gray uint16 in the 16-bit window/level domain (8-bit data is scaled by 257)."""
+    a = to_gray(arr)
+    if a.dtype == np.uint8:
+        out = a.astype(np.uint16)
+        out *= 257
         return out
+    return a
 
-    def get_poly_crop(self, z, points):
-        """
-        Extracts a patch defined by 4 points (TL, TR, BR, BL) in Raw Coordinates.
-        Returns a straightened (deskewed) numpy array.
-        """
-        # 1. Bounding Box in Raw Space
-        poly = np.array(points) # [[x,y], ...]
-        min_x = int(np.floor(poly[:, 0].min()))
-        min_y = int(np.floor(poly[:, 1].min()))
-        max_x = int(np.ceil(poly[:, 0].max()))
-        max_y = int(np.ceil(poly[:, 1].max()))
-        
-        # Clamp to image bounds
-        img_w, img_h = self.width, self.height
-        min_x = max(0, min_x)
-        min_y = max(0, min_y)
-        max_x = min(img_w, max_x)
-        max_y = min(img_h, max_y)
-        
-        if max_x <= min_x or max_y <= min_y:
-            return None
-            
-        # 2. Extract bounding rect (Raw)
-        phys_idx = self.frame_start + z
-        if phys_idx < 0: phys_idx += self.n_frames
-        self.img.seek(phys_idx)
-        raw_crop_pil = self.img.crop((min_x, min_y, max_x, max_y))
-        
-        # 3. Rotate and Straighten
-        # Calculate angle from TL->TR vector
-        # points expected order: TL, TR, BR, BL
-        p0 = points[0]
-        p1 = points[1]
-        p3 = points[3] # BL
-        
-        # Width/Height of the target patch (Euclidean dist)
-        dst_w = int(np.hypot(p1[0] - p0[0], p1[1] - p0[1]))
-        dst_h = int(np.hypot(p3[0] - p0[0], p3[1] - p0[1]))
-        if dst_w <= 0 or dst_h <= 0: return None
-        
-        # Angle of the edge in Raw Space
-        dx = p1[0] - p0[0]
-        dy = p1[1] - p0[1]
-        angle_rad = np.arctan2(dy, dx)
-        angle_deg = np.degrees(angle_rad)
-        
-        # We need to rotate the RAW content by -angle_deg to make it horizontal
-        # PIL rotate is CCW. 
-        # If line is angled +30 deg (down-right). We rotate by +30 to make it upright? 
-        # No, if line is +30, we rotate by +30 to align X axis? 
-        # Wait. Visualizing: Line is \ (positive slope in Y-down?).
-        # If we Rotate image by Angle, we align axis.
-        # Let's trust standard deskew logic: Rotate by Angle.
-        # But `raw_crop_pil` center is NOT the patch center.
-        # We need to handle translation.
-        
-        # Robust Approach: Use Affine Transform on the BBox Crop
-        # Center of ROI in Raw Coords
-        cx = np.mean(poly[:, 0])
-        cy = np.mean(poly[:, 1])
-        
-        # Center of the Crop Image
-        crop_cx = cx - min_x
-        crop_cy = cy - min_y
-        
-        # Target Center (center of dst)
-        tgt_cx = dst_w / 2.0
-        tgt_cy = dst_h / 2.0
-        
-        # We want to map: Output(xy) -> Input(xy)
-        # Transform Matrix M maps Output -> Input
-        # 1. Output Center -> Origin
-        # 2. Rotate
-        # 3. Translate to Input Center
-        
-        # Using PIL.Image.transform with QUAD is easiest for 4 points
-        # quad argument: 4 points in the Input Image (raw_crop_pil)
-        # mapped to the corners of the Output Image (0,0, w,0, w,h, 0,h)
-        
-        # The points passed to `transform` must be relative to the image being transformed (raw_crop_pil)
-        # So we shift `points` by (min_x, min_y)
-        local_poly = []
-        for p in points:
-            local_poly.append(p[0] - min_x)
-            local_poly.append(p[1] - min_y)
-            
-        # Flatten for quad (TL, BL, BR, TR) order?
-        # PIL.Image.transform method=QUAD
-        # data = (x0, y0, x1, y1, x2, y2, x3, y3) - NW, SW, SE, NE?
-        # Doc: "The QUAD transform maps a quadrilateral (a region defined by four corners) in the *given image* to a rectangle of the given size."
-        # "Data is an 8-tuple (x0, y0, x1, y1, x2, y2, x3, y3) which contain the upper left, lower left, lower right, and upper right corners of the source quadrilateral."
-        # ORDER: TL, BL, BR, TR ??
-        # Wait, standard is usually TL, TR, BR, BL?
-        # Let's check PIL Docs or assume standard order.
-        # StackOverflow: "NW, SW, SE, NE". So TL, BL, BR, TR.
-        # My points are TL, TR, BR, BL.
-        # So I need: p0, p3, p2, p1.
-        
-        quad_data = (
-            local_poly[0], local_poly[1], # TL
-            local_poly[6], local_poly[7], # BL (Index 3 * 2 = 6,7)
-            local_poly[4], local_poly[5], # BR (Index 2)
-            local_poly[2], local_poly[3]  # TR (Index 1)
-        )
-        print(quad_data, dst_w, dst_h, raw_crop_pil.size)
-        out_pil = raw_crop_pil.transform(
-            (dst_w, dst_h),
-            method=3, # Image.QUAD (cannot import Image here easily if not at top)
-            # method 3 is QUAD
-            data=quad_data,
-            resample=2 # Image.BILINEAR or BICUBIC
-        )
-        out = np.array(out_pil)
-        
-        if out.dtype == np.uint8:
-            return (out.astype(np.uint16) * 257)
-            
-        return out
+
+def to_gray2d_uint16(arr, z_index: int = 0) -> np.ndarray:
+    """
+    Extracts a single 2D grayscale layer as (H, W) uint16.
+    Accepts an ImageStack or a numpy array (Z, H, W), (Z, H, W, C), (H, W, C) or (H, W).
+    Prefer ImageStack.read_region / get_crop for large images: this returns the full layer.
+    """
+    if isinstance(arr, ImageStack):
+        return arr.get_crop(z_index, 0, 0, arr.width, arr.height)
+
+    frame = arr
+    if isinstance(arr, list):
+        frame = arr[z_index]
+    elif arr.ndim == 4 or (arr.ndim == 3 and arr.shape[-1] not in (3, 4)):
+        frame = arr[z_index]
+    return to_uint16(np.asarray(frame))
+
+
+def _slice2d(frame, x, y, w, h, step=1):
+    if frame.ndim == 3 and frame.shape[-1] not in (3, 4) and frame.shape[0] in (3, 4):
+        return frame[:, y:y + h:step, x:x + w:step] # Planar (C, H, W)
+    return frame[y:y + h:step, x:x + w:step]
+
+
+class ImageStack:
+    """
+    Common interface of the layer stacks.
+    Layers are addressed by a relative index z (0 .. len-1).
+    layer_number(z) is the absolute layer number (used for void data and file names).
+    """
+    path = None
+    width = 0
+    height = 0
+    frame_count = 0
+    dtype = np.dtype(np.uint16)
+    ndim = 3
+
+    @property
+    def shape(self):
+        return (self.frame_count, self.height, self.width)
 
     def __len__(self):
         return self.frame_count
 
-    def close(self): 
-        if self.owned: 
-            self.img.close()
+    def __getitem__(self, z):
+        # Full layer as uint16. Kept for compatibility; prefer region reads.
+        return self.get_crop(z, 0, 0, self.width, self.height)
+
+    def layer_number(self, z):
+        raise NotImplementedError
+
+    def read_region(self, z, x, y, w, h, step=1):
+        """
+        Native-dtype region of layer z, clipped to the image (may be smaller than w x h).
+        May be a view of a memory map or of a cached frame: do not modify it.
+        """
+        raise NotImplementedError
+
+    def release_cache(self):
+        """Drops decoded frame data kept for repeated region reads."""
+        pass
+
+    def close(self):
+        pass
+
+    def get_tile(self, z, x, y, w, h):
+        """(h, w) contiguous single-channel uint8/uint16 block for GPU upload (zero padded)."""
+        region = to_gray(self.read_region(z, x, y, w, h))
+        if region.shape != (h, w):
+            padded = np.zeros((h, w), dtype=region.dtype)
+            padded[:region.shape[0], :region.shape[1]] = region
+            return padded
+        return np.ascontiguousarray(region)
+
+    def get_crop(self, z, x, y, w, h):
+        """(h, w) uint16 gray crop at (x, y), zero padded outside the image."""
+        out = np.zeros((h, w), dtype=np.uint16)
+        x0, y0 = max(0, x), max(0, y)
+        x1, y1 = min(x + w, self.width), min(y + h, self.height)
+        if x0 >= x1 or y0 >= y1:
+            return out
+        region = to_uint16(self.read_region(z, x0, y0, x1 - x0, y1 - y0))
+        rh, rw = region.shape
+        out[y0 - y:y0 - y + rh, x0 - x:x0 - x + rw] = region
+        return out
+
+    def get_sample(self, z, max_items=10000):
+        """Evenly subsampled uint16 gray view of layer z (for auto-leveling)."""
+        step = int(max(1, np.sqrt((self.width * self.height) / max_items)))
+        return to_uint16(self.read_region(z, 0, 0, self.width, self.height, step))
+
+    def get_poly_crop(self, z, points):
+        """
+        Extracts a patch defined by 4 points (TL, TR, BR, BL) in Raw Coordinates.
+        Returns a straightened (deskewed) uint16 array.
+        """
+        poly = np.asarray(points, dtype=np.float64) # [[x,y], ...]
+
+        # 1. Bounding Box in Raw Space (clamped to the image)
+        min_x = max(0, int(np.floor(poly[:, 0].min())))
+        min_y = max(0, int(np.floor(poly[:, 1].min())))
+        max_x = min(self.width, int(np.ceil(poly[:, 0].max())))
+        max_y = min(self.height, int(np.ceil(poly[:, 1].max())))
+        if max_x <= min_x or max_y <= min_y:
+            return None
+
+        # Size of the target patch (edge lengths)
+        p0, p1, p2, p3 = poly
+        dst_w = int(round(np.hypot(*(p1 - p0))))
+        dst_h = int(round(np.hypot(*(p3 - p0))))
+        if dst_w <= 0 or dst_h <= 0:
+            return None
+
+        # 2. Extract bounding rect (Raw)
+        region = to_gray(self.read_region(z, min_x, min_y, max_x - min_x, max_y - min_y))
+
+        # 3. Straighten with a QUAD transform. PIL's bilinear resampling is broken for
+        # 16-bit ('I;16') images, so resample in float ('F') mode.
+        # QUAD data: upper-left, lower-left, lower-right, upper-right corners of the source,
+        # relative to the extracted rect. Our points are TL, TR, BR, BL -> p0, p3, p2, p1.
+        quad = []
+        for p in (p0, p3, p2, p1):
+            quad += [p[0] - min_x, p[1] - min_y]
+
+        src = Image.fromarray(region.astype(np.float32))
+        out = np.asarray(src.transform((dst_w, dst_h), Image.QUAD, tuple(quad), resample=Image.BILINEAR))
+        if region.dtype == np.uint8:
+            out = out * 257.0
+        return np.clip(np.rint(out), 0, 65535).astype(np.uint16)
 
 
-class MosaicTiffStack:
+class TiffStack(ImageStack):
     """
-    Virtual Stack acting as the ORIGINAL RAW Image.
+    Multi-page TIFF with region reads.
+    - tifffile, uncompressed native-order pages: memory-mapped (only touched pixels are read).
+    - tifffile, other pages: the page is decoded once into a single array and cached
+      (one frame at a time).
+    - no tifffile: PIL fallback, also one cached frame.
+    """
+    MAX_MEMMAPS = 8
+
+    def __init__(self, path, start=0, count=None):
+        self.path = path
+        self._tf = None
+        self._volume = None # (N, H, W[, C]) when all frames live in one page/block
+        self._memmaps = OrderedDict() # phys_idx -> np.memmap
+        self._frame_cache = None # (phys_idx, ndarray)
+
+        n = w = h = None
+        dtype = None
+        if tifffile is not None:
+            try:
+                self._tf = tifffile.TiffFile(path)
+                n = len(self._tf.pages)
+                page = self._tf.pages[0]
+                h, w = page.imagelength, page.imagewidth
+                dtype = page.dtype
+                if n == 1:
+                    n = self._open_volume(page) or 1
+            except Exception as e:
+                print(f"tifffile could not open {path} ({e}); falling back to PIL")
+                if self._tf is not None:
+                    self._tf.close()
+                self._tf = None
+        if self._tf is None:
+            with Image.open(path) as img:
+                n = getattr(img, 'n_frames', 1)
+                w, h = img.size
+                dtype = _PIL_DTYPES.get(img.mode, np.uint8)
+
+        self.n_frames = int(n)
+        self.width, self.height = int(w), int(h)
+        self.dtype = np.dtype(dtype if dtype is not None else np.uint16)
+        self.backend = "tifffile" if self._tf is not None else "PIL"
+        self.frame_start = 0
+        self.frame_count = self.n_frames
+        self.set_range(start, self.n_frames if count is None else count)
+
+    def _open_volume(self, page):
+        """
+        Single-IFD files can still hold several frames (ImageJ > 4 GB, tifffile 'shaped',
+        SGI image depth). Returns the frame count if so, else None.
+        """
+        series = self._tf.series[0] if self._tf.series else None
+        if series is None:
+            return None
+        frame_ndim = 3 if page.samplesperpixel > 1 else 2
+        n = int(np.prod(series.shape[:-frame_ndim], dtype=np.int64)) if len(series.shape) > frame_ndim else 1
+        if n <= 1:
+            return None
+        try:
+            vol = tifffile.memmap(self.path, series=0, mode='r')
+        except Exception:
+            vol = series.asarray() # Not memory-mappable: the data is one block anyway
+        self._volume = vol.reshape((n,) + tuple(series.shape[-frame_ndim:]))
+        return n
+
+    def set_range(self, start, count):
+        self.frame_start = min(max(0, start), self.n_frames - 1)
+        self.frame_count = max(1, min(count, self.n_frames - self.frame_start))
+
+    def layer_number(self, z):
+        return self.frame_start + z
+
+    def _phys(self, z):
+        if z < 0:
+            z += self.frame_count
+        if z < 0 or z >= self.frame_count:
+            raise IndexError(f"Layer {z} out of range (0..{self.frame_count - 1})")
+        return self.frame_start + z
+
+    def _frame(self, idx):
+        if self._volume is not None:
+            return self._volume[idx]
+        mm = self._memmaps.get(idx)
+        if mm is not None:
+            self._memmaps.move_to_end(idx)
+            return mm
+        if self._frame_cache is not None and self._frame_cache[0] == idx:
+            return self._frame_cache[1]
+
+        if self._tf is not None:
+            page = self._tf.pages[idx]
+            if getattr(page, 'is_memmappable', False):
+                try:
+                    mm = tifffile.memmap(self.path, page=idx, mode='r')
+                    self._memmaps[idx] = mm
+                    while len(self._memmaps) > self.MAX_MEMMAPS:
+                        self._memmaps.popitem(last=False)
+                    return mm
+                except Exception:
+                    pass # e.g. non-native byte order -> decode
+            self._frame_cache = None # Free the previous frame before decoding the next one
+            arr = page.asarray()
+        else:
+            self._frame_cache = None
+            with Image.open(self.path) as img:
+                img.seek(idx)
+                arr = np.array(img)
+        self._frame_cache = (idx, arr)
+        return arr
+
+    def read_region(self, z, x, y, w, h, step=1):
+        frame = self._frame(self._phys(z))
+        x0, y0 = max(0, x), max(0, y)
+        return _slice2d(frame, x0, y0, x + w - x0, y + h - y0, step)
+
+    def release_cache(self):
+        self._frame_cache = None
+
+    def close(self):
+        self._frame_cache = None
+        self._memmaps.clear()
+        self._volume = None
+        if self._tf is not None:
+            self._tf.close()
+            self._tf = None
+
+
+# Backward compatible name
+LazyTiffStack = TiffStack
+
+
+class MosaicTiffStack(ImageStack):
+    """
+    Virtual Stack acting as the ORIGINAL RAW Image, rebuilt from an exported project folder.
     Strategy: "Pre-assemble Deskewed -> Warp to Raw".
     1. Parses patches.json.
-    2. Assembles 'Deskewed Layer Images' in memory (Lazy) by pasting cropped patches at 'bbox_deskewed'.
-    3. Serves Raw Crops by warping (rotating) regions from the Deskewed Layer.
+    2. Assembles a layer on demand by pasting the patches at 'bbox_deskewed' and rotating the
+       canvas back to the raw orientation. Only MAX_CACHED_LAYERS layers are kept in memory.
     """
+    MAX_CACHED_LAYERS = 2
+
     def __init__(self, patches_json_path):
         self.path = patches_json_path
         self.base_dir = os.path.dirname(patches_json_path)
@@ -263,65 +338,56 @@ class MosaicTiffStack:
         self.grid_cfg = data.get("grid_config", {})
         self.patches = data.get("patches", [])
         self.angle = self.grid_cfg.get("angle", 0.0)
-        
+
         # 1. Analyze Geometry
         self.layers = set()
         self.patches_by_layer = {}
-        
+
         max_dx, max_dy = 0, 0
-        max_rx, max_ry = 0, 0
-        
+
         # Sample for Alignment (Grid/Deskewed -> Raw)
         offsets_x, offsets_y = [], []
         rad = np.radians(self.angle)
         cos_a, sin_a = np.cos(rad), np.sin(rad)
-        
+
         for p in self.patches:
             z = p["layer"]
             self.layers.add(z)
-            if z not in self.patches_by_layer: self.patches_by_layer[z] = []
-            self.patches_by_layer[z].append(p)
-            
+            self.patches_by_layer.setdefault(z, []).append(p)
+
             # Deskewed Bounds
             bd = p.get("bbox_deskewed", [])
             if bd:
                 pts = np.array(bd)
                 max_dx = max(max_dx, pts[:, 0].max())
                 max_dy = max(max_dy, pts[:, 1].max())
-                
-                # Alignment Calculation
+
+                # Alignment Calculation (Center Comparison)
                 br = p.get("bbox_raw", [])
                 if br:
                     pts_r = np.array(br)
-                    max_rx = max(max_rx, pts_r[:, 0].max())
-                    max_ry = max(max_ry, pts_r[:, 1].max())
-                    
-                    # Center Comparison
                     rcx = (pts_r[:, 0].min() + pts_r[:, 0].max()) / 2.0
                     rcy = (pts_r[:, 1].min() + pts_r[:, 1].max()) / 2.0
-                    
+
                     dcx = (pts[:, 0].min() + pts[:, 0].max()) / 2.0
                     dcy = (pts[:, 1].min() + pts[:, 1].max()) / 2.0
-                    
+
                     rdx = dcx * cos_a - dcy * sin_a
                     rdy = dcx * sin_a + dcy * cos_a
-                    
+
                     offsets_x.append(rcx - rdx)
                     offsets_y.append(rcy - rdy)
-        
-        # Canvas Sizes (Full Raw Extent from 0,0)
-        self.width = int(max_rx + 2000) 
-        self.height = int(max_ry + 2000)
-        
+
+        # Deskewed canvas size
         self.deskew_w = int(max_dx + 2000)
         self.deskew_h = int(max_dy + 2000)
-        
-        self.n_frames = len(self.layers) if self.layers else 1
-        self.shape = (self.n_frames, self.height, self.width)
-        self.ndim = 3
-        self.dtype = np.uint8 
-        self.layer_offset = min(list(self.layers))
-        
+
+        # Relative index z -> absolute layer number
+        self.layer_ids = sorted(self.layers) if self.layers else [0]
+        self.n_frames = self.frame_count = len(self.layer_ids)
+        self.layer_offset = self.layer_ids[0]
+        self.dtype = np.dtype(np.uint8)
+
         # Alignment Params
         if offsets_x:
             self.off_x = np.median(offsets_x)
@@ -329,58 +395,56 @@ class MosaicTiffStack:
         else:
             self.off_x = 0.0
             self.off_y = 0.0
-            
-        print(f"[MosaicDebug] Raw Size: {self.width}x{self.height}")
-        print(f"[MosaicDebug] Deskew Size: {self.deskew_w}x{self.deskew_h}")
-        print(f"[MosaicDebug] Offset: ({self.off_x:.2f}, {self.off_y:.2f})")
-            
         self.cos_a = cos_a
         self.sin_a = sin_a
-        self.layer_cache = {} 
 
-        for i in list(self.layers):
-            self._build_deskewed_layer(i)
-        
-    def _build_deskewed_layer(self, z):
-        if z in self.layer_cache: return self.layer_cache[z]
-        
-        print(f"Building Deskewed Layer {z}...")
+        self.layer_cache = OrderedDict() # layer_id -> (H, W) uint8
+
+        # Image size = size of an assembled (rotated) layer
+        self.height, self.width = self._layer(0).shape
+        print(f"[Mosaic] {self.n_frames} layers, size {self.width}x{self.height}, angle {self.angle}")
+
+    def layer_number(self, z):
+        return self.layer_ids[z]
+
+    def _build_layer(self, layer_id):
+        print(f"Building Deskewed Layer {layer_id}...")
         canvas = Image.new("L", (self.deskew_w, self.deskew_h), 0)
-        patches = self.patches_by_layer.get(z, [])
-        first_patch = True
-        
-        for p in patches:
+
+        for p in self.patches_by_layer.get(layer_id, []):
             bd = p.get("bbox_deskewed", [])
             if not bd: continue
-            
-            try:
-                path = os.path.join(self.base_dir, p["filename"])
-                img = Image.open(path)
-                
-                # Crop Title Bar
-                if img.height > 40:
-                    img = img.crop((0, 40, img.width, img.height))
-                    
-                
-                pts = np.array(bd)
-                min_x = int(pts[:, 0].min())
-                min_y = int(pts[:, 1].min())
-                w_box = int(pts[:, 0].max() - min_x)
-                h_box = int(pts[:, 1].max() - min_y)
-                print(p['filename'], min_x, min_y, w_box, h_box)
 
-                if first_patch:
-                    print(f"[MosaicDebug] P[0] Img: {img.size} vs BBox: {w_box}x{h_box}")
-                    first_patch = False
-                
-                # Paste
-                canvas.paste(img, (min_x, min_y))
-                
+            path = os.path.join(self.base_dir, p["filename"])
+            try:
+                with Image.open(path) as img:
+                    # Crop Title Bar
+                    if img.height > 40:
+                        img = img.crop((0, 40, img.width, img.height))
+                    if img.mode != "L":
+                        img = img.convert("L")
+                    pts = np.array(bd)
+                    canvas.paste(img, (int(pts[:, 0].min()), int(pts[:, 1].min())))
             except Exception as e:
-                pass
-                
-        self.layer_cache[z] = canvas.rotate(-self.angle, expand=True)
-        return self.layer_cache[z]
+                print(f"[Mosaic] Failed to load patch {path}: {e}")
+
+        if self.angle:
+            canvas = canvas.rotate(-self.angle, expand=True)
+        return np.array(canvas)
+
+    def _layer(self, z):
+        if z < 0:
+            z += self.frame_count
+        layer_id = self.layer_ids[z]
+        arr = self.layer_cache.get(layer_id)
+        if arr is None:
+            arr = self._build_layer(layer_id)
+            self.layer_cache[layer_id] = arr
+            while len(self.layer_cache) > self.MAX_CACHED_LAYERS:
+                self.layer_cache.popitem(last=False)
+        else:
+            self.layer_cache.move_to_end(layer_id)
+        return arr
 
     def deskew_to_raw(self, gx, gy):
         rx = (gx * self.cos_a - gy * self.sin_a) + self.off_x
@@ -394,139 +458,13 @@ class MosaicTiffStack:
         gy = -dx * self.sin_a + dy * self.cos_a
         return gx, gy
 
-    def get_crop(self, z, x, y, w, h):
-        phys_idx =  z
-        self.img = self.layer_cache[phys_idx]
-        img_w, img_h = self.width, self.height
-        x = max(0, x); y = max(0, y)
-        x2 = min(x + w, img_w); y2 = min(y + h, img_h)
-        if x >= x2 or y >= y2: return np.zeros((h, w), dtype=self.dtype)
-        region = self.img.crop((x, y, x2, y2))
-        arr = np.array(region)
-        out = np.zeros((h, w), dtype=arr.dtype)
-        out_h, out_w = arr.shape[:2]
-        out[0:out_h, 0:out_w] = arr
-        if out.dtype == np.uint8: return (out.astype(np.uint16) * 257)
-        return out
+    def read_region(self, z, x, y, w, h, step=1):
+        arr = self._layer(z)
+        x0, y0 = max(0, x), max(0, y)
+        return arr[y0:y + h:step, x0:x + w:step]
 
-    def get_poly_crop(self, z, points):
-        """
-        Extracts a patch defined by 4 points (TL, TR, BR, BL) in Raw Coordinates.
-        Returns a straightened (deskewed) numpy array.
-        """
-        # 1. Bounding Box in Raw Space
-        poly = np.array(points) # [[x,y], ...]
-        min_x = int(np.floor(poly[:, 0].min()))
-        min_y = int(np.floor(poly[:, 1].min()))
-        max_x = int(np.ceil(poly[:, 0].max()))
-        max_y = int(np.ceil(poly[:, 1].max()))
-        
-        # Clamp to image bounds
-        img_w, img_h = self.width, self.height
-        min_x = max(0, min_x)
-        min_y = max(0, min_y)
-        max_x = min(img_w, max_x)
-        max_y = min(img_h, max_y)
-        
-        if max_x <= min_x or max_y <= min_y:
-            return None
-            
-        # 2. Extract bounding rect (Raw)
-        phys_idx = z - self.layer_offset
-        self.img = self.layer_cache[phys_idx]
-
-        raw_crop_pil = self.img.crop((min_x, min_y, max_x, max_y))
-
-        # 3. Rotate and Straighten
-        # Calculate angle from TL->TR vector
-        # points expected order: TL, TR, BR, BL
-        p0 = points[0]
-        p1 = points[1]
-        p3 = points[3] # BL
-        
-        # Width/Height of the target patch (Euclidean dist)
-        dst_w = int(np.hypot(p1[0] - p0[0], p1[1] - p0[1]))
-        dst_h = int(np.hypot(p3[0] - p0[0], p3[1] - p0[1]))
-
-        if dst_w <= 0 or dst_h <= 0: return None
-        
-        # Angle of the edge in Raw Space
-        dx = p1[0] - p0[0]
-        dy = p1[1] - p0[1]
-        angle_rad = np.arctan2(dy, dx)
-        angle_deg = np.degrees(angle_rad)
-        
-        # We need to rotate the RAW content by -angle_deg to make it horizontal
-        # PIL rotate is CCW. 
-        # If line is angled +30 deg (down-right). We rotate by +30 to make it upright? 
-        # No, if line is +30, we rotate by +30 to align X axis? 
-        # Wait. Visualizing: Line is \ (positive slope in Y-down?).
-        # If we Rotate image by Angle, we align axis.
-        # Let's trust standard deskew logic: Rotate by Angle.
-        # But `raw_crop_pil` center is NOT the patch center.
-        # We need to handle translation.
-        
-        # Robust Approach: Use Affine Transform on the BBox Crop
-        # Center of ROI in Raw Coords
-        cx = np.mean(poly[:, 0])
-        cy = np.mean(poly[:, 1])
-        
-        # Center of the Crop Image
-        crop_cx = cx - min_x
-        crop_cy = cy - min_y
-        
-        # Target Center (center of dst)
-        tgt_cx = dst_w / 2.0
-        tgt_cy = dst_h / 2.0
-        
-        # We want to map: Output(xy) -> Input(xy)
-        # Transform Matrix M maps Output -> Input
-        # 1. Output Center -> Origin
-        # 2. Rotate
-        # 3. Translate to Input Center
-        
-        # Using PIL.Image.transform with QUAD is easiest for 4 points
-        # quad argument: 4 points in the Input Image (raw_crop_pil)
-        # mapped to the corners of the Output Image (0,0, w,0, w,h, 0,h)
-        
-        # The points passed to `transform` must be relative to the image being transformed (raw_crop_pil)
-        # So we shift `points` by (min_x, min_y)
-        local_poly = []
-        for p in points:
-            local_poly.append(p[0] - min_x)
-            local_poly.append(p[1] - min_y)
-            
-        quad_data = (
-            local_poly[0], local_poly[1], # TL
-            local_poly[6], local_poly[7], # BL (Index 3 * 2 = 6,7)
-            local_poly[4], local_poly[5], # BR (Index 2)
-            local_poly[2], local_poly[3]  # TR (Index 1)
-        )
-
-        print(quad_data, dst_w, dst_h, raw_crop_pil.size)
-        
-        out_pil = raw_crop_pil.transform(
-            (dst_w, dst_h),
-            method=Image.QUAD, # Image.QUAD (cannot import Image here easily if not at top)
-            # method 3 is QUAD
-            data=quad_data,
-            resample=2 # Image.BILINEAR or BICUBIC
-        )
-        
-        out = np.array(out_pil)
-        Image.fromarray(out).save("out_pil.png")
-        if out.dtype == np.uint8:
-            return (out.astype(np.uint16) * 257)
-            
-        return out
-
-    def __getitem__(self, key):
-        phy_idx = key + self.layer_offset
-        return np.array(self.layer_cache[phy_idx])
-
-
-    def __len__(self): return self.n_frames
-    def close(self): pass
+    def close(self):
+        self.layer_cache.clear()
 
 
 class GridConfig:
@@ -546,6 +484,22 @@ class GridConfig:
         self.use_calib = False
         self.target_mean = 128.0
         self.target_std = 40.0
+
+    def cell_at(self, gx, gy):
+        """
+        (row, col) of the cell containing the Deskewed (grid space) point (gx, gy).
+        May lie outside 0..rows-1 / 0..cols-1; see contains().
+        """
+        col = int(np.floor((gx - self.start_x) / self.pitch_x))
+        row = int(np.floor((gy - self.start_y) / self.pitch_y))
+        return row, col
+
+    def contains(self, row, col):
+        return 0 <= row < self.rows and 0 <= col < self.cols
+
+    def cell_origin(self, row, col):
+        """Deskewed top-left corner of a cell."""
+        return self.start_x + col * self.pitch_x, self.start_y + row * self.pitch_y
 
 class BondingMap:
     def __init__(self):
