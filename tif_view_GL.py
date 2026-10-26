@@ -786,6 +786,7 @@ class MainWindow(QMainWindow):
         self._close_data()
         self.full_data = stack
         self.layer_offset = stack.layer_number(0)
+        self.glw.bbox_layer = self.layer_offset
         self.void_manager.replace_all()
 
         # 2. Setup UI
@@ -1123,6 +1124,7 @@ class MainWindow(QMainWindow):
 
             self.full_data = stack
             self.layer_offset = stack.layer_number(0)
+            self.glw.bbox_layer = self.layer_offset
             self.void_manager.replace_all()
 
             # 3. UI / State

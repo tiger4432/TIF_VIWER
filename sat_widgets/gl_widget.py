@@ -155,6 +155,7 @@ class GLImageWidget(QOpenGLWidget):
         self.void_mode = False # Active State: "DRAW" | "EDIT" | "ERASE" | False
         self.selected_void_tool = "DRAW" # Selected Tool: "DRAW" | "EDIT" | "ERASE"
         self.active_type = None # Void type name used for drawing
+        self.bbox_layer = 0 # Absolute layer whose bboxes can be hovered / edited (topmost loaded)
         self.hover_void = None # Void under the mouse (drawn translucent)
         self._hover_state = None # (void, action, axis) for the edit cursor (hysteresis)
         self._digits = "" # Type number being typed (two digits when typed quickly)
@@ -705,7 +706,7 @@ class GLImageWidget(QOpenGLWidget):
                 or modifiers & (Qt.ControlModifier | Qt.ShiftModifier) or delta == 0):
             return False
         gx, gy = self.get_image_coords(e.position())
-        v, _ = self.void_manager.hit_test(self.current_layer, gx, gy, margin=10.0/self.zoom, coord_transform=self.raw_to_deskew, quadrant_ctx=self._quadrant_ctx())
+        v, _ = self.void_manager.hit_test(self.current_layer, gx, gy, margin=10.0/self.zoom, coord_transform=self.raw_to_deskew, quadrant_ctx=self._quadrant_ctx(), allow_bbox=self.bbox_recognized())
         if v is None or self.void_manager.shape_of(v) != "curve":
             return False
         p = self.void_manager.set_p(v, self.void_manager.p_of(v) * (1.1 ** (delta / 120.0)))
@@ -885,7 +886,7 @@ class GLImageWidget(QOpenGLWidget):
         vm = self.void_manager
         margin = 10.0 / self.zoom
         ctx = self._quadrant_ctx()
-        v, action = vm.hit_test(self.current_layer, gx, gy, margin=margin, coord_transform=self.raw_to_deskew, quadrant_ctx=ctx)
+        v, action = vm.hit_test(self.current_layer, gx, gy, margin=margin, coord_transform=self.raw_to_deskew, quadrant_ctx=ctx, allow_bbox=self.bbox_recognized())
 
         prev = self._hover_state
         if prev is not None and prev[0] is not None and prev[1] == "edge":
@@ -895,13 +896,14 @@ class GLImageWidget(QOpenGLWidget):
             shape = vm.shape_of(pv)
             dist, inside = vm.boundary_distance(shape, gx - pcx, gy - pcy, pv["radiusX"], pv["radiusY"],
                                                 vm.p_of(pv) if shape == "curve" else 2.0)
-            if any(pv is x for x in vm.voids.get(self.current_layer, [])) and dist <= 1.6 * margin and (v is None or v is pv):
+            if (any(pv is x for x in vm.voids.get(self.current_layer, [])) and dist <= 1.6 * margin and (v is None or v is pv)
+                    and (self.bbox_recognized() or not vm.is_bbox(pv))):
                 v, action = pv, "edge"
         if v is None:
             # Ghost (other layer) voids also highlight (Q moves them here)
             for layer in vm.voids:
                 if layer != self.current_layer:
-                    g, _ = vm.hit_test(layer, gx, gy, margin=margin, coord_transform=self.raw_to_deskew, quadrant_ctx=ctx)
+                    g, _ = vm.hit_test(layer, gx, gy, margin=margin, coord_transform=self.raw_to_deskew, quadrant_ctx=ctx, allow_bbox=self.bbox_recognized())
                     if g is not None:
                         v, action = g, None
                         break
@@ -1237,7 +1239,7 @@ class GLImageWidget(QOpenGLWidget):
                 elif self.void_mode == "EDIT":
                     # Hit Test on the current layer (ghost voids of other layers are reference only)
                     # Mouse (gx, gy) is Deskewed -> pass the Raw -> Deskew transform.
-                    v, action = self.void_manager.hit_test(self.current_layer, gx, gy, margin=10.0/self.zoom, coord_transform=self.raw_to_deskew, quadrant_ctx=self._quadrant_ctx())
+                    v, action = self.void_manager.hit_test(self.current_layer, gx, gy, margin=10.0/self.zoom, coord_transform=self.raw_to_deskew, quadrant_ctx=self._quadrant_ctx(), allow_bbox=self.bbox_recognized())
                     if v:
                         self.active_void = v
                         self.active_void_action = action # 'center' or 'edge'
@@ -1505,12 +1507,16 @@ class GLImageWidget(QOpenGLWidget):
                 s = max(s, 1.0 / max(min(r0x, r0y), 1e-9))
                 v["radiusX"], v["radiusY"] = r0x * s, r0y * s
 
+    def bbox_recognized(self):
+        """Bboxes are recognized (hover, edit, erase, Q, type keys) only on the topmost loaded layer."""
+        return self.current_layer == self.bbox_layer
+
     def _quadrant_ctx(self):
         return (self.void_manager.reference_bboxes(self.grid_cfg, self.coord_transform), self.grid_cfg)
 
     def _erase_at(self, gx, gy):
         """Deletes the topmost void of the current layer under the Deskewed point (gx, gy)."""
-        v, _ = self.void_manager.hit_test(self.current_layer, gx, gy, margin=10.0/self.zoom, coord_transform=self.raw_to_deskew, quadrant_ctx=self._quadrant_ctx())
+        v, _ = self.void_manager.hit_test(self.current_layer, gx, gy, margin=10.0/self.zoom, coord_transform=self.raw_to_deskew, quadrant_ctx=self._quadrant_ctx(), allow_bbox=self.bbox_recognized())
         return v is not None and self.void_manager.remove_void(self.current_layer, v)
 
     def mouseReleaseEvent(self, e):
@@ -1740,7 +1746,7 @@ class GLImageWidget(QOpenGLWidget):
             if layer == self.current_layer:
                 continue
             v, _ = self.void_manager.hit_test(layer, gx, gy, margin=10.0/self.zoom,
-                                              coord_transform=self.raw_to_deskew, quadrant_ctx=ctx)
+                                              coord_transform=self.raw_to_deskew, quadrant_ctx=ctx, allow_bbox=self.bbox_recognized())
             if v is not None and self.void_manager.move_void_to_layer(v, layer, self.current_layer):
                 self.voids_changed.emit()
                 self.update()

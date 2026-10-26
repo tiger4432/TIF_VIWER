@@ -561,10 +561,11 @@ class VoidManager:
             return min(rx, ry), True
         return math.hypot(dx, dy) * abs(1.0 - 1.0 / t), t <= 1.0
 
-    def hit_test(self, layer, gx, gy, margin=5.0, coord_transform=None, quadrant_ctx=None):
+    def hit_test(self, layer, gx, gy, margin=5.0, coord_transform=None, quadrant_ctx=None, allow_bbox=True):
         """
         gx, gy: Query Point (usually Mouse in Screen/Deskewed Space)
         coord_transform: Function(cx, cy) -> (tx, ty) to transform Stored Coords to Query Space.
+        allow_bbox: False skips reference bbox voids (not recognized outside the bbox layer).
         Returns (void_obj, type_str)
         type_str: 'center' (move), 'edge' (resize), None
         """
@@ -575,6 +576,8 @@ class VoidManager:
         # corner voids lie on its outline and would otherwise lose to it.
         best = None
         for v in reversed(self.voids[layer]):
+            if not allow_bbox and self.is_bbox(v):
+                continue
             cx, cy = v["globalCX"], v["globalCY"]
             
             # Apply Transform if provided (Raw -> Deskewed)
