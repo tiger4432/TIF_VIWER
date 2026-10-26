@@ -87,5 +87,15 @@
             }
         ],
         "view_scale": 1.4
+    },
+    "auto_bbox": {
+        "contrast_pct": [
+            2.0,
+            98.0
+        ],
+        "window_scale": 1.2,
+        "size_tolerance": 0.3,
+        "min_edge_ratio": 4.0,
+        "outlier_tol": 0.05
     }
 }

@@ -1,4 +1,5 @@
 import sys
+import math
 import ctypes
 import numpy as np
 
@@ -158,6 +159,8 @@ class GLImageWidget(QOpenGLWidget):
         self.active_void_action = None
         self._void_txn = False # Inside a VoidManager change (mouse press .. release)
         self._snap_hint = None
+        self._resize_anchor = (None, None)
+        self._pan_only = False
         
         # Chip layout of the selected WF product, drawn inside each cell's reference bbox
         self.layout = None
@@ -1024,8 +1027,15 @@ class GLImageWidget(QOpenGLWidget):
         return gx, gy
 
     def mousePressEvent(self, e):
+        if e.button() in (Qt.MiddleButton, Qt.RightButton):
+            # Pan in every mode
+            self._last_mouse = e.position()
+            self._pan_only = True
+            self.setFocus()
+            return
         if e.button() == Qt.LeftButton:
             self._last_mouse = e.position()
+            self._pan_only = False
             self.setFocus()
             
             # Void Interaction (one undo step per press .. release)
@@ -1107,10 +1117,12 @@ class GLImageWidget(QOpenGLWidget):
                     if v:
                         self.active_void = v
                         self.active_void_action = action # 'center' or 'edge'
+                        v.pop("auto", None) # Reviewed by hand (no longer "estimated")
                         # Snap types keep their anchored corner while resizing
                         self._snap_hint = None
                         if action == 'edge':
                             self._snap_hint = self.void_manager.snap_corner_point(v, self.grid_cfg, self.coord_transform)
+                            self._resize_anchor = self._resize_anchor_for(v, gx, gy)
                         self.update()
                         return
 
@@ -1140,7 +1152,7 @@ class GLImageWidget(QOpenGLWidget):
         dy = e.position().y() - self._last_mouse.y()
         
         # Void Interaction
-        if self.void_mode and getattr(self, 'active_void_action', None):
+        if self.void_mode and self.active_void_action and not getattr(self, '_pan_only', False):
              # Handle Drag
              gx, gy = self.get_image_coords(e.position())
              
@@ -1235,11 +1247,15 @@ class GLImageWidget(QOpenGLWidget):
                      self.void_manager.snap_void(self.active_void, self.grid_cfg, self.coord_transform,
                                                  hint=self._snap_hint, drag_point=(gx, gy))
                  else:
-                     # Unified Resize (Center-to-Edge)
-                     # Works for Ellipse (Radius), Rectangle (Half-Width/Height) and Curve
-                     # calculated from Center.
-                     self.active_void["radiusX"] = max(1.0, abs(gx - cx_deskew))
-                     self.active_void["radiusY"] = max(1.0, abs(gy - cy_deskew))
+                     # The side opposite to the grabbed one stays fixed; the grabbed side follows the mouse
+                     fx, fy = self._resize_anchor
+                     if fx is not None:
+                         cx_deskew = (fx + gx) / 2.0
+                         self.active_void["radiusX"] = max(1.0, abs(gx - fx) / 2.0)
+                     if fy is not None:
+                         cy_deskew = (fy + gy) / 2.0
+                         self.active_void["radiusY"] = max(1.0, abs(gy - fy) / 2.0)
+                     self.active_void["globalCX"], self.active_void["globalCY"] = self.deskew_to_raw(cx_deskew, cy_deskew)
                  
                  self.update()
                  
@@ -1256,7 +1272,7 @@ class GLImageWidget(QOpenGLWidget):
 
         modifiers = QApplication.keyboardModifiers()
         
-        if modifiers == Qt.ControlModifier and self.grid_cfg.visible:
+        if modifiers == Qt.ControlModifier and self.grid_cfg.visible and not getattr(self, '_pan_only', False):
             # Move Grid
             img_dx = dx / self.zoom
             img_dy = dy / self.zoom
@@ -1275,6 +1291,20 @@ class GLImageWidget(QOpenGLWidget):
         self._last_mouse = e.position()
         self.update()
 
+    def _resize_anchor_for(self, v, gx, gy):
+        """
+        Fixed opposite side(s) for resizing from the Deskewed grab point: (fixed x or None,
+        fixed y or None). Near a corner both axes resize, near a side only that axis.
+        """
+        cx, cy = self.raw_to_deskew(v["globalCX"], v["globalCY"])
+        rx, ry = v["radiusX"], v["radiusY"]
+        nx, ny = (gx - cx) / max(rx, 1e-6), (gy - cy) / max(ry, 1e-6)
+        use_x = abs(nx) >= 0.5 * max(abs(nx), abs(ny))
+        use_y = abs(ny) >= 0.5 * max(abs(nx), abs(ny))
+        fx = cx - math.copysign(rx, nx) if use_x else None
+        fy = cy - math.copysign(ry, ny) if use_y else None
+        return fx, fy
+
     def _quadrant_ctx(self):
         return (self.void_manager.reference_bboxes(self.grid_cfg, self.coord_transform), self.grid_cfg)
 
@@ -1286,6 +1316,9 @@ class GLImageWidget(QOpenGLWidget):
     def mouseReleaseEvent(self, e):
         # Clear interaction state
         self._last_mouse = None
+        if getattr(self, '_pan_only', False):
+            self._pan_only = False
+            return
 
         # A click without dragging in Drag-to-Size mode leaves a 1px void -> discard it
         if self.active_void_action == 'sizing' and self.active_void is not None:
@@ -1318,29 +1351,16 @@ class GLImageWidget(QOpenGLWidget):
         
     
     def set_void_tool(self, tool_name):
-        self.selected_void_tool = tool_name
-        # If currently active (Shift held), update immediate mode
-        if self.void_mode:
-             self.void_mode = tool_name
-             
-             # Update Cursor
-             self.update_cursor_style()
-                 
-             self.update()
+        """Activates a marking tool ("DRAW" / "EDIT" / "ERASE"), or None for view mode."""
+        if self.active_void_action:
+            return # Not in the middle of a drag
+        if tool_name:
+            self.selected_void_tool = tool_name
+        self.void_mode = tool_name or False
+        self.update_cursor_style()
+        self.update()
 
     def keyPressEvent(self, e):
-        if e.key() == Qt.Key_Shift:
-            if not self.void_mode:
-                self.void_mode = self.selected_void_tool
-                print(f"Void Mode Active: {self.void_mode}")
-                
-                # Cursor Logic
-                self.update_cursor_style()
-                     
-                self.update()
-            super().keyPressEvent(e)
-            return
-
         modifiers = e.modifiers()
         
         # 1. Ctrl + Arrows : Grid Nudge
@@ -1497,14 +1517,22 @@ class GLImageWidget(QOpenGLWidget):
 
         super().keyPressEvent(e)
 
-    def keyReleaseEvent(self, e):
-        if e.key() == Qt.Key_Shift:
-            if self.void_mode:
-                self.void_mode = False
-                print("Void Mode Deactivated")
-                self.setCursor(Qt.ArrowCursor)
+    def move_hovered_void_to_current_layer(self):
+        """Q: moves the void of another layer under the mouse (ghost) to the current layer."""
+        if not self.void_manager or not self.tiled_image:
+            return False
+        gx, gy = self.get_image_coords(QPointF(self.mapFromGlobal(QCursor.pos())))
+        ctx = self._quadrant_ctx()
+        for layer in sorted(self.void_manager.voids):
+            if layer == self.current_layer:
+                continue
+            v, _ = self.void_manager.hit_test(layer, gx, gy, margin=10.0/self.zoom,
+                                              coord_transform=self.raw_to_deskew, quadrant_ctx=ctx)
+            if v is not None and self.void_manager.move_void_to_layer(v, layer, self.current_layer):
+                self.voids_changed.emit()
                 self.update()
-        super().keyReleaseEvent(e)
+                return True
+        return False
 
     def clear_current_chip_voids(self):
         """

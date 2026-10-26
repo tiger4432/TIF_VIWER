@@ -26,6 +26,7 @@ from sat_widgets.exporter import ExportManager
 from sat_widgets.patch_viewer import PatchViewer
 from sat_widgets.roi_inspector import ROIInspector
 from sat_widgets.angle_preview import AnglePreview
+from sat_widgets.auto_bbox import place_bboxes
 from sat_widgets.products import load_products, GRID_KEYS
 from sat_widgets.app_paths import declaration_path, sync_declarations, default_update_manifest
 from sat_widgets.version import APP_VERSION
@@ -269,17 +270,19 @@ class MainWindow(QMainWindow):
         v_layout_void = QVBoxLayout(self.gb_void)
         
         # Toggle Mode (Hint Only)
-        self.lbl_void_hint = QLabel("Hold SHIFT to Activate")
+        self.lbl_void_hint = QLabel("W: Draw  E: Edit  R: Erase  Esc: View\nQ: move hovered void to this layer  |  Pan: right/middle drag")
         self.lbl_void_hint.setStyleSheet("font-weight: bold; color: gray;")
         
         # Mode Selection (Draw/Edit/Erase)
         h_modes = QHBoxLayout()
+        self.rb_view = QRadioButton("View")
         self.rb_draw = QRadioButton("Draw")
         self.rb_edit = QRadioButton("Edit")
         self.rb_erase = QRadioButton("Erase")
-        self.rb_draw.setChecked(True)
+        self.rb_view.setChecked(True)
         
         self.mode_group = QButtonGroup(self)
+        self.mode_group.addButton(self.rb_view)
         self.mode_group.addButton(self.rb_draw)
         self.mode_group.addButton(self.rb_edit)
         self.mode_group.addButton(self.rb_erase)
@@ -287,6 +290,7 @@ class MainWindow(QMainWindow):
         # Use buttonClicked (pointer to button) or standard signals
         self.mode_group.buttonClicked.connect(self.on_void_mode_changed)
         
+        h_modes.addWidget(self.rb_view)
         h_modes.addWidget(self.rb_draw)
         h_modes.addWidget(self.rb_edit)
         h_modes.addWidget(self.rb_erase)
@@ -330,15 +334,36 @@ class MainWindow(QMainWindow):
         v_layout_void.addLayout(h_layout_void_btns)
         v_layout_void.addWidget(self.btn_clear_voids)
         
+        # Automatic reference bboxes (topmost layer) and review of estimated ones
+        h_auto = QHBoxLayout()
+        btn_auto_bbox = QPushButton("Auto BBOX")
+        btn_auto_bbox.setToolTip("Detect the package edges of every (bonded) cell on the topmost layer and draw the bbox (declared size, detected center)")
+        btn_auto_bbox.clicked.connect(self.auto_bbox)
+        btn_next_est = QPushButton("Next Estimated")
+        btn_next_est.setToolTip("Go to the next bbox that was estimated because detection failed (drawn dashed)")
+        btn_next_est.clicked.connect(self.next_estimated_bbox)
+        h_auto.addWidget(btn_auto_bbox)
+        h_auto.addWidget(btn_next_est)
+        v_layout_void.addLayout(h_auto)
+        
         dock_layout.addWidget(self.gb_void)
         
         # Init Types
         self.populate_void_types()
         
         # Shortcuts for Void Mode
-        # Removed Toggle ('q') as Shift is now used
     
     
+        self.action_void_view = QAction("View Mode", self)
+        self.action_void_view.setShortcut("Esc")
+        self.action_void_view.triggered.connect(self.set_void_mode_view)
+        self.addAction(self.action_void_view)
+
+        self.action_void_to_layer = QAction("Move Hovered Void To Current Layer", self)
+        self.action_void_to_layer.setShortcut("q")
+        self.action_void_to_layer.triggered.connect(self.glw.move_hovered_void_to_current_layer)
+        self.addAction(self.action_void_to_layer)
+
         self.action_void_draw = QAction("Void Draw Mode", self)
         self.action_void_draw.setShortcut("w")
         self.action_void_draw.triggered.connect(self.set_void_mode_draw)
@@ -360,7 +385,6 @@ class MainWindow(QMainWindow):
         self.action_void_erase.triggered.connect(self.set_void_mode_erase)
         self.addAction(self.action_void_erase)
 
-        # Removed Esc (Exit Void Mode) as Shift release exits
 
         
         # 4. Auto Calibration
@@ -813,6 +837,10 @@ class MainWindow(QMainWindow):
             
 
 
+    def set_void_mode_view(self):
+        self.rb_view.setChecked(True)
+        self.on_void_mode_changed()
+
     def set_void_mode_draw(self):
         self.rb_draw.setChecked(True)
         self.on_void_mode_changed()
@@ -826,8 +854,11 @@ class MainWindow(QMainWindow):
         self.on_void_mode_changed()
 
     def on_void_mode_changed(self):
-        # Called when Radio Button changes
-        if self.rb_draw.isChecked():
+        # Called when Radio Button changes (tools stay active until another is chosen)
+        if self.rb_view.isChecked():
+            self.glw.set_void_tool(None)
+            print("Void Tool: VIEW")
+        elif self.rb_draw.isChecked():
             self.glw.set_void_tool("DRAW")
             print("Void Tool: DRAW")
         elif self.rb_edit.isChecked():
@@ -906,6 +937,66 @@ class MainWindow(QMainWindow):
         self.glw.clear_current_chip_voids()
         self.update_void_ui()
         self.glw.setFocus()
+
+    def _bbox_type_id(self):
+        for tid, t in self.void_manager.types.items():
+            if t.get("name", "").strip().lower() == self.void_manager.BBOX_TYPE_NAME:
+                return tid
+        return None
+
+    def auto_bbox(self):
+        """Detects and draws the reference bbox of every (bonded) cell on the topmost layer."""
+        if self.full_data is None or self.glw.tiled_image is None:
+            return
+        tid = self._bbox_type_id()
+        if tid is None:
+            QMessageBox.warning(self, "Auto BBOX", "No void type named 'bbox' is declared in config.json.")
+            return
+        t = self.void_manager.types[tid]
+        size = (t["def_w"], t["def_h"]) if t.get("def_w", 0) > 0 and t.get("def_h", 0) > 0 else None
+        cfg = self.glw.grid_cfg
+        bmap = self.glw.bonding_map
+        cells = [(r, c) for r in range(cfg.rows) for c in range(cfg.cols) if bmap is None or bmap.get_key(r, c)]
+
+        progress = QProgressDialog("Detecting bboxes...", "Cancel", 0, len(cells), self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+
+        def step(i):
+            if i % 10 == 0:
+                progress.setValue(i)
+                QApplication.processEvents()
+            return not progress.wasCanceled()
+
+        top_layer = self.abs_layer(0)
+        result = place_bboxes(self.full_data, 0, top_layer, cfg, self.glw.coord_transform, self.void_manager,
+                              tid, size, cells, self._config().get("auto_bbox"), step)
+        progress.close()
+        if result is None:
+            return
+        self.glw.update()
+        self.update_void_ui()
+        msg = (f"Auto BBOX on layer {top_layer}: {result['detected']} detected, "
+               f"{len(result['estimated'])} estimated (dashed, check with 'Next Estimated'), "
+               f"{len(result['failed'])} failed")
+        self.statusBar().showMessage(msg)
+        print(msg)
+        if result["failed"] and not result["detected"]:
+            QMessageBox.warning(self, "Auto BBOX", "No box edge could be detected. Check the grid origin/pitch "
+                                "and the bbox size, or adjust auto_bbox in config.json.")
+
+    def next_estimated_bbox(self):
+        """Navigates through the bboxes estimated by Auto BBOX (row-major order)."""
+        cfg = self.glw.grid_cfg
+        cells = sorted({self.glw.raw_to_cell(v["globalCX"], v["globalCY"])
+                        for vs in self.void_manager.voids.values() for v in vs if v.get("auto") == "estimated"})
+        if not cells:
+            self.statusBar().showMessage("No estimated bboxes left.")
+            return
+        here = self.glw.center_cell()
+        nxt = next((rc for rc in cells if rc > here), cells[0])
+        self.glw.fit_to_cell(nxt[1], nxt[0])
+        self.statusBar().showMessage(f"Estimated bbox {cells.index(nxt) + 1}/{len(cells)}: X{nxt[1]:02d} Y{nxt[0]:02d}")
         
     def update_void_ui(self):
         # Update label count (voids are keyed by absolute layer number)

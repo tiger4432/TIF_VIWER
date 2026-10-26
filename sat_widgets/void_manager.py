@@ -232,6 +232,8 @@ class VoidManager:
             brush = Qt.NoBrush
         else:
             pen = QPen(QColor(r, g, b, 255))
+            if v.get("auto") == "estimated":
+                pen.setStyle(Qt.DashLine) # Auto BBOX could not detect it: needs a review
             brush = Qt.NoBrush
         pen.setWidthF(width)
         painter.setPen(pen)
@@ -406,6 +408,20 @@ class VoidManager:
             if v is void:
                 self.checkpoint()
                 del v_list[i]
+                return True
+        return False
+
+    def move_void_to_layer(self, void, from_layer, to_layer):
+        """Moves this void object to another layer (undoable). Returns True if moved."""
+        if from_layer == to_layer:
+            return False
+        v_list = self.voids.get(from_layer, [])
+        for i, v in enumerate(v_list):
+            if v is void:
+                self.checkpoint()
+                del v_list[i]
+                v["layer"] = to_layer
+                self.voids.setdefault(to_layer, []).append(v)
                 return True
         return False
 
