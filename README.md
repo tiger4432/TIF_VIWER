@@ -7,7 +7,7 @@ SAT 멀티게이트 TIF를 레이어별로 보면서 디펙을 타원/사각형/
 | 항목 | 버전 |
 |---|---|
 | OS | Windows 10/11 x64 (OpenGL 3.3 이상 지원 GPU 드라이버) |
-| Python | 3.10 x64 (배포 exe와 같은 버전) |
+| Python | 64-bit 3.10–3.13 (배포 exe는 3.10으로 빌드) |
 | 패키지 | `requirements.txt` (numpy 2.2.6, PySide6 6.10.1, PyOpenGL 3.1.10, Pillow 11.3.0, tifffile 2025.5.10, imagecodecs 2025.3.30) |
 | 빌드 | PyInstaller 6.16.0 (`requirements-build.txt`) |
 
@@ -34,10 +34,23 @@ build.bat
 
 `build.bat`는 아래 순서로 동작합니다.
 
-1. `.venv`가 없으면 `py -3.10`으로 가상환경을 만듭니다.
+1. `.venv`가 없으면 가상환경을 만듭니다. Python은 다음 순서로 찾습니다.
+   - `PYTHON` 환경변수 (예: `set PYTHON=C:\Python310\python.exe`)
+   - `py -3.10` (py launcher)
+   - PATH의 `python` (예: 활성화된 conda 환경)
+
+   찾은 Python이 64-bit 3.10–3.13이 아니면 중단합니다.
 2. `requirements.txt`와 `requirements-build.txt`를 설치합니다.
 3. `pyinstaller --noconfirm --clean TIF_Viewer.spec`을 실행합니다.
-4. `config.json`과 `products.json`을 `dist\TIF_Viewer\`(exe 옆)로 복사합니다.
+4. `config.json`, `products.json`, `deploy.json`을 `dist\TIF_Viewer\`(exe 옆)로 복사합니다.
+
+conda에서 빌드하는 예시입니다.
+
+```bat
+conda create -n tifviewer python=3.10
+conda activate tifviewer
+build.bat
+```
 
 결과물은 `dist\TIF_Viewer\TIF_Viewer.exe`와 `_internal\` 폴더입니다. 배포할 때는 `dist\TIF_Viewer` 폴더를 통째로 복사합니다.
 
@@ -61,7 +74,8 @@ copy /Y products.json dist\TIF_Viewer\
 
 ### 빌드 문제 해결
 
-- **`py -3.10`을 찾지 못함:** python.org에서 Python 3.10 x64를 설치합니다(py launcher 포함).
+- **Python을 찾지 못함:** conda 환경을 활성화하거나, python.org에서 Python 3.10 x64를 설치하거나, `PYTHON` 환경변수로 python.exe 경로를 지정합니다.
+- **다른 Python으로 만든 `.venv`가 남아 있음:** `.venv` 폴더를 지운 뒤 다시 실행합니다.
 - **실행 시 OpenGL 오류:** GPU 드라이버를 업데이트합니다. 원격 데스크톱처럼 OpenGL 3.3을 지원하지 않는 환경에서는 실행되지 않습니다.
 - **압축 TIF를 열지 못함:** `imagecodecs`가 설치되어 있는지 확인한 뒤 다시 빌드합니다.
 
@@ -71,14 +85,30 @@ copy /Y products.json dist\TIF_Viewer\
 2. `build.bat`로 빌드합니다.
 3. 배포 폴더에 새 버전을 올리고, 업데이트 매니페스트(아래 [업데이트 알림](#업데이트-알림))의 `version`과 `download`를 갱신합니다.
 
-## 배포 파일 (exe 옆에 두고 수정)
-
-설정 파일은 실행 위치(작업 폴더)와 상관없이 **exe가 있는 폴더**에서 읽습니다. 소스에서 실행할 때는 저장소 루트에서 읽습니다.
+## 선언 파일과 중앙 공유 폴더
 
 | 파일 | 내용 |
 |---|---|
 | `config.json` | 디펙 타입, 출력 컬럼 이름, 업데이트 확인 위치 |
 | `products.json` | WF 제품군별 그리드, bbox 크기, bbox 내부 layout |
+| `deploy.json` | (exe 옆) 중앙 공유 폴더 위치 |
+
+### 중앙 공유 폴더에서 받기 (운영 배포)
+
+exe 옆의 `deploy.json`에 공유 폴더를 적습니다. 환경변수 `TIF_VIEWER_SHARED_DIR`로도 지정할 수 있습니다.
+
+```json
+{"shared_dir": "\\\\server\\share\\TIF_Viewer"}
+```
+
+- **시작할 때:** 공유 폴더의 `config.json`, `products.json`을 사용자 캐시(`%LOCALAPPDATA%\TIF_Viewer\shared_cache`)로 받아서 로드합니다.
+- **공유 폴더 접속 불가:** 5초 안에 응답이 없거나 폴더가 없으면 마지막으로 받은 캐시를 씁니다. 캐시도 없으면 exe 옆 파일을 씁니다.
+- **실행 중 다시 받기:** 툴바의 "Reload Declarations"를 누르면 다시 받아서 디펙 타입, 출력 컬럼, 제품 목록에 적용합니다.
+- **상태 확인:** 하단 상태바에 local / shared / cached copy 중 어느 것을 쓰는지 표시합니다.
+- **업데이트 매니페스트:** `config.json`에 `update.manifest`가 없으면 공유 폴더의 `latest.json`을 사용합니다.
+- **타입 편집:** 프로그램의 "Types..." 창에서 바꾼 내용은 캐시에만 저장되므로, 다음 시작 때 공유 폴더 내용으로 덮어씌워집니다. 영구 변경은 공유 폴더의 `config.json`을 수정합니다.
+
+`shared_dir`이 비어 있으면(기본값) 로컬 모드입니다. 이때는 실행 위치(작업 폴더)와 상관없이 **exe가 있는 폴더**(소스 실행 시 저장소 루트)의 파일을 읽습니다.
 
 ### 디펙 타입 (`config.json` → `void_types`)
 
@@ -172,6 +202,19 @@ voids.json의 필드와 voids.csv의 컬럼 이름을 exe를 다시 빌드하지
 | 확대·축소 / 이동 | 휠 / 드래그 |
 
 레이어 번호는 **절대 번호**(파일 안의 페이지 번호)로 저장합니다. `layer_numbering`이 없는 이전 voids.json은 "현재 연 범위의 시작 레이어 기준 상대 번호"로 해석합니다.
+
+## 테스트용 샘플 TIF 생성
+
+```bat
+python tools\make_sample_tif.py                      REM 14900 x 14900, 12 layers, 8-bit gray, LZW (~1.7 GB)
+python tools\make_sample_tif.py --compress none      REM 비압축 (~2.7 GB, 메모리 맵 경로)
+python tools\make_sample_tif.py --dtype uint16       REM 16-bit
+python tools\make_sample_tif.py --size 4000 --layers 3 --out small.tif
+```
+
+- **내용:** 회전된 칩 그리드에 패키지 bbox, SL 테두리 안쪽의 die, 일부 게이트에서만 보이는 보이드, SL 코너에서 시작하는 사분면 초타원 박리가 들어갑니다.
+- **메모리:** 띠(strip) 단위로 생성해서 쓰므로 메모리를 적게 씁니다. 압축 모드에서는 한 레이어(8-bit 기준 약 222MB)만 메모리에 둡니다.
+- **그리드 값:** 끝나면 그리드 값(origin, pitch, rows, cols, angle)과 products.json용 항목을 출력합니다. 이 값을 넣으면 칸과 bbox가 이미지와 맞습니다.
 
 ## 메모리 / GPU
 

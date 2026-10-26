@@ -12,6 +12,7 @@ from PySide6.QtCore import Qt, Signal, QRectF, QPointF
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 
 from . import output_columns
+from .app_paths import shared_dir
 
 # ==================================================================================
 # Void Data Manager
@@ -166,6 +167,9 @@ class VoidManager:
             with open(self.config_path, 'w') as f:
                 json.dump(data, f, indent=4)
             print(f"Saved config to {self.config_path}")
+            if shared_dir():
+                print("Note: declarations come from the shared folder; this change is local until "
+                      "config.json on the share is updated (it is replaced on the next start).")
         except Exception as e:
             print(f"Error saving config: {e}")
 

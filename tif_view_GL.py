@@ -26,7 +26,7 @@ from sat_widgets.exporter import ExportManager
 from sat_widgets.patch_viewer import PatchViewer
 from sat_widgets.roi_inspector import ROIInspector
 from sat_widgets.products import load_products, GRID_KEYS
-from sat_widgets.app_paths import app_file
+from sat_widgets.app_paths import declaration_path, sync_declarations, default_update_manifest
 from sat_widgets.version import APP_VERSION
 from sat_widgets.updater import UpdateChecker, show_update_dialog
 
@@ -37,6 +37,9 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"Tiled TIF Viewer (OpenGl Mosaic) v{APP_VERSION}")
+        
+        # Declarations (config.json, products.json): central shared folder -> local cache, see app_paths
+        self.declaration_status = sync_declarations()
         self.resize(1280, 720)
         
         self.calib_timer = QTimer()
@@ -95,6 +98,11 @@ class MainWindow(QMainWindow):
         a_proj = QAction("Open Project", self)
         a_proj.triggered.connect(self.open_project_folder)
         tb.addAction(a_proj)
+        
+        a_reload = QAction("Reload Declarations", self)
+        a_reload.setToolTip("Fetch config.json / products.json again (shared folder) and apply them")
+        a_reload.triggered.connect(self.reload_declarations)
+        tb.addAction(a_reload)
 
         # ---------------------------------------------------------
         # Dock Widget for Grid/Map Controls
@@ -234,7 +242,7 @@ class MainWindow(QMainWindow):
         self.glw.cursor_moved.connect(self.on_cursor_moved)
         
         # 3.5 Void Marking Control
-        self.void_manager = VoidManager(app_file("config.json"))
+        self.void_manager = VoidManager(declaration_path("config.json"))
         self.glw.void_manager = self.void_manager
         self.glw.voids_changed.connect(self.update_void_ui)
         self.glw.void_type_shortcut_triggered.connect(self.on_void_type_shortcut)
@@ -396,13 +404,30 @@ class MainWindow(QMainWindow):
             self.apply_product(self.cb_product.currentText())
         
         # Newer build available? (location declared in config.json "update.manifest")
-        self.update_checker = UpdateChecker(APP_VERSION, self._config().get("update", {}).get("manifest"), self)
+        manifest = self._config().get("update", {}).get("manifest") or default_update_manifest()
+        self.update_checker = UpdateChecker(APP_VERSION, manifest, self)
         self.update_checker.update_available.connect(lambda m: show_update_dialog(self, APP_VERSION, m))
         QTimer.singleShot(1500, self.update_checker.start)
+        self.statusBar().showMessage(f"Declarations: {self.declaration_status}")
+
+    def reload_declarations(self):
+        """Re-fetches the declarations and applies void types, output columns and products."""
+        self.declaration_status = sync_declarations()
+        self.void_manager.config_path = declaration_path("config.json")
+        self.void_manager.load_config()
+        self.populate_void_types()
+        current = self.cb_product.currentText()
+        self.load_product_list()
+        if current in self.products:
+            self.cb_product.setCurrentText(current)
+        if self.cb_product.count() > 0:
+            self.apply_product(self.cb_product.currentText())
+        self.glw.update()
+        self.statusBar().showMessage(f"Declarations reloaded: {self.declaration_status}")
 
     def _config(self):
         try:
-            with open(app_file("config.json"), "r", encoding="utf-8") as f:
+            with open(declaration_path("config.json"), "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception:
             return {}
@@ -411,7 +436,7 @@ class MainWindow(QMainWindow):
     # WF Products
     # -----------------------------------------------
     def load_product_list(self):
-        self.products, default = load_products(app_file("products.json"))
+        self.products, default = load_products(declaration_path("products.json"))
         self.cb_product.blockSignals(True)
         self.cb_product.clear()
         self.cb_product.addItems(list(self.products))
@@ -420,7 +445,7 @@ class MainWindow(QMainWindow):
         self.cb_product.blockSignals(False)
         self.cb_product.setEnabled(bool(self.products))
         if not self.products:
-            print(f"No products defined ({app_file('products.json')})")
+            print(f"No products defined ({declaration_path('products.json')})")
 
     def apply_product(self, name):
         """Applies the declared grid values, bbox default size and layout of a product."""
