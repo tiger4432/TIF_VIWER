@@ -47,7 +47,7 @@ build.bat
 conda에서 빌드하는 예시입니다.
 
 ```bat
-conda create -n tifviewer python=3.10
+conda create -n tifviewer -c conda-forge python=3.10
 conda activate tifviewer
 build.bat
 ```
@@ -76,6 +76,11 @@ copy /Y products.json dist\TIF_Viewer\
 
 - **Python을 찾지 못함:** conda 환경을 활성화하거나, python.org에서 Python 3.10 x64를 설치하거나, `PYTHON` 환경변수로 python.exe 경로를 지정합니다.
 - **다른 Python으로 만든 `.venv`가 남아 있음:** `.venv` 폴더를 지운 뒤 다시 실행합니다.
+- **`ImportError: DLL load failed while importing QtCore: 지정된 프로시저를 찾을 수 없습니다`:** Anaconda **base** Python으로 `.venv`를 만든 경우입니다. Anaconda 폴더의 오래된 VC++ 런타임(`msvcp140.dll`)이 Qt 6보다 먼저 로드되어 생깁니다. 해결 방법은 둘 중 하나입니다.
+  1. python.org에서 Python 3.10 x64를 설치하고, conda를 활성화하지 않은 새 콘솔에서 빌드합니다.
+  2. `conda create -n tifviewer -c conda-forge python=3.10` 후 `conda activate tifviewer`로 전용 환경을 씁니다.
+
+  어느 쪽이든 `rmdir /s /q .venv`로 기존 가상환경을 지운 뒤 `build.bat`를 다시 실행합니다. `build.bat`는 PyInstaller 실행 전에 이 문제를 검사해서 안내합니다.
 - **실행 시 OpenGL 오류:** GPU 드라이버를 업데이트합니다. 원격 데스크톱처럼 OpenGL 3.3을 지원하지 않는 환경에서는 실행되지 않습니다.
 - **압축 TIF를 열지 못함:** `imagecodecs`가 설치되어 있는지 확인한 뒤 다시 빌드합니다.
 

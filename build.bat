@@ -38,6 +38,9 @@ call .venv\Scripts\activate.bat || goto :error
 python -m pip install --upgrade pip || goto :error
 python -m pip install -r requirements.txt -r requirements-build.txt || goto :error
 
+REM Qt must load in this Python before PyInstaller can collect it
+python -c "import PySide6.QtCore" || goto :qt_broken
+
 pyinstaller --noconfirm --clean TIF_Viewer.spec || goto :error
 
 REM Editable deployment files live next to the exe
@@ -55,7 +58,17 @@ goto :error
 
 :bad_python
 echo %PYEXE% is not a 64-bit Python 3.10 - 3.13.
-echo Conda: conda create -n tifviewer python=3.10  then  conda activate tifviewer  and run build.bat again.
+echo Conda: conda create -n tifviewer -c conda-forge python=3.10  then  conda activate tifviewer  and run build.bat again.
+goto :error
+
+:qt_broken
+echo.
+echo PySide6 / Qt cannot be loaded with this Python - "DLL load failed ... procedure not found".
+echo Cause: Anaconda base Python ships an older MSVC runtime - msvcp140.dll - that Qt 6 cannot use.
+echo Fix, either:
+echo   1. Install Python 3.10 x64 from python.org, open a new console without conda activated.
+echo   2. conda create -n tifviewer -c conda-forge python=3.10   then   conda activate tifviewer
+echo Then delete the .venv folder - rmdir /s /q .venv - and run build.bat again.
 goto :error
 
 :error
