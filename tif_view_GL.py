@@ -179,7 +179,8 @@ class MainWindow(QMainWindow):
         form.addRow("Opacity:", self.slider_opacity)
         
         # Angle alignment preview (cells spread over the wafer)
-        self.angle_preview = None # Always-visible dock, created at the end of __init__
+        self.angle_preview = None # Small, always visible at the bottom of this group (created at the end of __init__)
+        self.form_grid = form
         
         # Connect signals
         for w in [self.sb_grid_x, self.sb_grid_y, self.sb_pitch_x, self.sb_pitch_y, self.sb_angle]:
@@ -647,14 +648,12 @@ class MainWindow(QMainWindow):
              # self.calib_timer.start(200) # 200ms debounce
 
     def _create_angle_preview(self):
-        """Angle preview: always visible in its own dock (left)."""
+        """Angle preview: small and always visible at the bottom of Grid Configuration."""
         self.angle_preview = AnglePreview(self)
-        dock = QDockWidget("Angle Preview", self)
-        dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
-        dock.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
-        dock.setWidget(self.angle_preview)
-        self.addDockWidget(Qt.LeftDockWidgetArea, dock)
-        self.angle_dock = dock
+        lbl = QLabel("Angle Preview")
+        lbl.setStyleSheet("font-weight: bold;")
+        self.form_grid.addRow(lbl)
+        self.form_grid.addRow(self.angle_preview)
 
     def _refresh_angle_preview(self):
         if getattr(self, 'angle_preview', None) is not None:

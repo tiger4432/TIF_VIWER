@@ -123,14 +123,16 @@ class _Tile(QWidget):
     def __init__(self):
         super().__init__()
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(2, 2, 2, 2)
+        lay.setContentsMargins(1, 1, 1, 1)
+        lay.setSpacing(1)
         self.title = QLabel("-")
-        self.title.setStyleSheet("font-weight: bold;")
-        self.title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred) # Text never resizes the dock
+        self.title.setStyleSheet("font-weight: bold; font-size: 10px;")
+        self.title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred) # Text never resizes the panel
         self.image = QLabel()
         self.image.setAlignment(Qt.AlignCenter)
-        self.image.setMinimumSize(200, 200)
-        self.image.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.image.setMinimumSize(90, 90) # Compact: shown small at the bottom of Grid Configuration
+        self.image.setFixedHeight(130)
+        self.image.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.image.setStyleSheet("background-color: #202020;")
         lay.addWidget(self.title)
         lay.addWidget(self.image, 1)
@@ -172,14 +174,18 @@ class AnglePreview(QWidget):
 
     def __init__(self, main_window):
         super().__init__(main_window)
-        self.setMinimumWidth(320)
         self.mw = main_window
 
         lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(2)
         self.info = QLabel("Grid lines should run along the chip edges in every patch. Click a patch to go there.")
         self.info.setWordWrap(True)
+        self.info.setStyleSheet("font-size: 10px; color: gray;")
+        self.info.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         lay.addWidget(self.info)
         self.grid_layout = QGridLayout()
+        self.grid_layout.setSpacing(2)
         lay.addLayout(self.grid_layout, 1)
         self.tiles = []
         for _ in range(4):
