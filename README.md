@@ -47,12 +47,15 @@ build.bat
 
 `build.bat`는 아래 순서로 동작합니다.
 
-1. 빌드 전용 가상환경 `.venv-build`를 준비합니다(IDE가 쓰는 `.venv`와 분리). Python은 다음 순서로 찾습니다.
+1. 빌드 전용 가상환경 `.venv-build`를 준비합니다(IDE가 쓰는 `.venv`와 분리). Python은 다음 순서로 찾습니다(dev.bat도 같음). **conda를 활성화하지 않아도 됩니다.**
    - `PYTHON` 환경변수 (예: `set PYTHON=C:\Python310\python.exe`)
+   - 저장소 루트의 `python.local` 파일: python.exe 경로 한 줄 (git에 올라가지 않음)
+   - 활성화된 conda 환경(base 제외)
+   - conda 환경 `tifviewer`(다른 이름은 `set CONDA_ENV=이름`): 일반적인 설치 폴더(`%USERPROFILE%\miniconda3`, `anaconda3`, `miniforge3`, `%LOCALAPPDATA%`·`%ProgramData%` 아래, `%USERPROFILE%\.conda`)의 `envs\tifviewer\python.exe`를 직접 찾습니다
    - `py -3.10` (py launcher)
-   - PATH의 `python` (예: 활성화된 conda 환경)
+   - PATH의 `python`
 
-   찾은 Python이 64-bit 3.10–3.13이 아니면 중단합니다. `.venv-build`가 다른 Python으로 만들어졌으면 지우고 다시 만듭니다.
+   찾은 Python이 64-bit 3.10–3.13이 아니면 중단합니다. 가상환경이 다른 Python(설치 위치 또는 **버전**)으로 만들어졌으면 지우고 다시 만듭니다. 가상환경의 pip가 동작하지 않으면 그 Python에 들어 있는 pip로 고친 뒤, 그래도 안 되면 가상환경을 한 번 다시 만듭니다.
 2. `requirements.txt`와 `requirements-build.txt`를 설치합니다.
 3. `pyinstaller --noconfirm --clean TIF_Viewer.spec`을 실행합니다.
 4. `config.json`, `products.json`, `deploy.json`을 `dist\TIF_Viewer\`(exe 옆)로 복사합니다.
@@ -87,7 +90,8 @@ copy /Y products.json dist\TIF_Viewer\
 
 ### 빌드 문제 해결
 
-- **Python을 찾지 못함:** conda 환경을 활성화하거나, python.org에서 Python 3.10 x64를 설치하거나, `PYTHON` 환경변수로 python.exe 경로를 지정합니다.
+- **Python을 찾지 못함 / VS Code 터미널에서 conda가 안 불러짐:** conda 활성화 없이 됩니다. `conda create -n tifviewer ...`로 만든 환경은 자동으로 찾고, 다른 위치라면 저장소 루트에 `python.local` 파일을 만들어 python.exe 경로를 한 줄 적습니다(예: `C:\Users\me\miniconda3\envs\tifviewer\python.exe`). VS Code 터미널에서도 conda를 쓰려면 한 번 `conda init powershell`(또는 `cmd.exe`) 후 VS Code를 다시 시작합니다.
+- **`AttributeError: module 'pkgutil' has no attribute 'ImpImporter'`:** 가상환경에 남아 있던 오래된 pip가 새 Python(3.12 이상)에서 실행될 때 생깁니다(같은 경로의 Python이 업그레이드된 경우 등). 이제 `dev.bat` / `build.bat`가 Python 버전을 비교해 가상환경을 다시 만들고, pip를 고칩니다. 그래도 나오면 `.venv-dev`(또는 `.venv-build`) 폴더를 지우고 다시 실행합니다.
 - **`ImportError: DLL load failed while importing QtCore: 지정된 프로시저를 찾을 수 없습니다`:** Anaconda **base** Python으로 가상환경을 만든 경우입니다. Anaconda 폴더의 오래된 VC++ 런타임(`msvcp140.dll`)이 Qt 6보다 먼저 로드되어 생깁니다. 해결 방법은 둘 중 하나입니다.
   1. python.org에서 Python 3.10 x64를 설치하고, conda를 활성화하지 않은 새 콘솔에서 빌드합니다.
   2. `conda create -n tifviewer -c conda-forge python=3.10` 후 `conda activate tifviewer`로 전용 환경을 씁니다.
