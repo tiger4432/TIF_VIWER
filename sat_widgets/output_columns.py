@@ -19,7 +19,20 @@ bbox_rel_x / bbox_rel_y: void center relative to the top-left corner of the cell
 bbox (the "bbox" type marking on the topmost layer of that cell), in grid-aligned pixels.
 Empty when the cell has no bbox.
 *_um: the same values in um (pixels x Scale). Empty while the scale is not set.
+
+Pixel values (positions and sizes: PIXEL_KEYS) are written scaled as if the grid's x pitch were
+NORM_PITCH_X (value x 300 / pitch_x), so files of scans with another resolution compare
+directly; the actual pixel values go to the *_raw fields. Change or switch off (null = actual
+pixels in both) in config.json:
+
+    "output_scale": {"pitch_x": 300}
+
+voids.json records the scale ("pixel_scale"); reading prefers the *_raw fields, else divides by
+the recorded scale (files without either are actual pixels).
 """
+
+NORM_PITCH_X = 300.0
+PIXEL_KEYS = ("center_x", "center_y", "radius_x", "radius_y", "global_x", "global_y", "bbox_rel_x", "bbox_rel_y")
 
 # voids.json, per void
 JSON_FIELDS = {
@@ -40,6 +53,14 @@ JSON_FIELDS = {
     "global_y": "globalCY",
     "bbox_rel_x": "bboxRelX",
     "bbox_rel_y": "bboxRelY",
+    "center_x_raw": "centerX_raw",
+    "center_y_raw": "centerY_raw",
+    "radius_x_raw": "radiusX_raw",
+    "radius_y_raw": "radiusY_raw",
+    "global_x_raw": "globalCX_raw",
+    "global_y_raw": "globalCY_raw",
+    "bbox_rel_x_raw": "bboxRelX_raw",
+    "bbox_rel_y_raw": "bboxRelY_raw",
     "center_x_um": "centerXUm",
     "center_y_um": "centerYUm",
     "radius_x_um": "radiusXUm",
@@ -64,6 +85,14 @@ CSV_COLUMNS = {
     "p": "P",
     "bbox_rel_x": "BBoxRelX",
     "bbox_rel_y": "BBoxRelY",
+    "global_x_raw": "GlobalX_raw",
+    "global_y_raw": "GlobalY_raw",
+    "center_x_raw": "RelativeX_raw",
+    "center_y_raw": "RelativeY_raw",
+    "radius_x_raw": "RadiusX_raw",
+    "radius_y_raw": "RadiusY_raw",
+    "bbox_rel_x_raw": "BBoxRelX_raw",
+    "bbox_rel_y_raw": "BBoxRelY_raw",
     "center_x_um": "RelativeX_um",
     "center_y_um": "RelativeY_um",
     "radius_x_um": "RadiusX_um",
@@ -85,3 +114,10 @@ def resolve(config=None):
                 continue
             names[key] = name
     return json_fields, csv_columns
+
+
+def norm_pitch(config=None):
+    """Grid x pitch the pixel values are scaled to (config.json "output_scale"), None = no scaling."""
+    cfg = (config or {}).get("output_scale", {"pitch_x": NORM_PITCH_X})
+    value = (cfg or {}).get("pitch_x") if isinstance(cfg, dict) else None
+    return float(value) if value else None

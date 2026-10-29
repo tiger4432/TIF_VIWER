@@ -94,7 +94,7 @@ def parse_wafer_id(file_name, settings) -> str              # 선택: 파일 이
 | `um_per_px` | Scale (0 = 미설정) |
 | `bonding_map` | `{"text": 붙여넣은 맵, "reject_values": [...], "rows": [[칸별 LEG]]}` 또는 None |
 | `voids_json` | "Save JSON"과 같은 내용(`version, layer_numbering, um_per_px, types, voids`). 각 보이드의 필드 이름은 `config.json`의 `output_columns`를 따릅니다 |
-| `records` | 보이드마다 내부 이름의 dict: `layer, row, col, label(LEG), type, center_x/y, radius_x/y, p, global_x/y, bbox_rel_x/y, *_um ...` (`sat_widgets/output_columns.py`) |
+| `records` | 보이드마다 내부 이름의 dict: `layer, row, col, label(LEG), type, center_x/y, radius_x/y, p, global_x/y, bbox_rel_x/y, *_raw, *_um ...` (`sat_widgets/output_columns.py`). 픽셀 값은 그리드 X 피치 300 기준으로 정규화, `*_raw`는 실제 픽셀 (README "픽셀 값의 정규화") |
 | `types` | 선언된 타입 `{이름: {color, shape, ...}}` |
 | `last_export_dir` | 이번 실행에서 마지막으로 Export한 폴더 또는 None |
 | `settings` | `config.json`의 `"results_api"` |
@@ -106,7 +106,7 @@ voids.json과 같습니다. 보이드마다 다음 중 하나로 위치를 줍�
 - `globalCX`, `globalCY`: 원본 이미지(raw) 픽셀 좌표 (권장, 그리드와 무관)
 - `x`(col), `y`(row), `centerX`, `centerY`: 칸 기준 상대 좌표
 
-공통으로 `layer`(절대 번호, `"layer_numbering": "absolute"`), `type`(타입 이름), `radiusX`, `radiusY`, 선택으로 `p`. 필드 이름은 `output_columns`로 바꾼 이름과 기본 이름 둘 다 읽습니다.
+공통으로 `layer`(절대 번호, `"layer_numbering": "absolute"`), `type`(타입 이름), `radiusX`, `radiusY`, 선택으로 `p`. 필드 이름은 `output_columns`로 바꾼 이름과 기본 이름 둘 다 읽습니다. 위치·크기는 `globalCX_raw`, `radiusX_raw`처럼 `_raw`로 실제 픽셀을 주는 것이 가장 확실합니다. `_raw` 없이 일반 필드만 주면, 최상위에 `"pixel_scale": {"scale": 비율}`이 있을 때 그 비율로 나누고, 없으면 실제 픽셀로 읽습니다.
 
 ```python
 def to_voids(data, ctx):

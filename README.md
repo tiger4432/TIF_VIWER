@@ -173,6 +173,16 @@ voids.json의 필드와 voids.csv의 컬럼 이름을 exe를 다시 빌드하지
 
 `bbox_rel_x`와 `bbox_rel_y`는 디펙 중심을 그 칸의 기준 bbox **좌상단**을 원점으로 한 좌표입니다(그리드 정렬 기준 픽셀). 칸에 bbox가 없으면 빈 값입니다.
 
+### 픽셀 값의 정규화 (`config.json` → `output_scale`)
+
+voids.json·voids.csv·결과 API의 픽셀 값(`globalCX/Y`, `centerX/Y`, `radiusX/Y`, `bboxRelX/Y`)은 **그리드 X 피치를 300으로 맞춘 비율**(값 × 300 / X 피치)로 씁니다. 해상도가 다른 스캔도 같은 기준으로 비교할 수 있습니다. 실제 픽셀값은 같은 이름에 `_raw`를 붙인 필드(`radiusX_raw`, CSV는 `RadiusX_raw` 등)에 함께 씁니다. um 값은 실제 픽셀 × Scale입니다.
+
+```json
+"output_scale": {"pitch_x": 300}
+```
+
+`null`이면 정규화하지 않습니다(두 필드 모두 실제 픽셀). voids.json에는 쓴 비율이 `"pixel_scale": {"pitch_x": 300, "pitch_x_raw": 실제 X 피치, "scale": 비율}`로 남습니다. 불러올 때는 `_raw` 필드를 먼저 쓰고, 없으면 일반 필드를 기록된 비율로 나눕니다. 비율 기록이 없는 예전 파일은 실제 픽셀로 읽습니다. `_raw` 필드 이름도 `output_columns`로 바꿀 수 있습니다(`radius_x_raw` 등).
+
 ### UI 기본값 (`config.json` → `ui_defaults`)
 
 입력 칸의 시작 값을 선언합니다. 프로그램을 시작할 때와 Reload Declarations 때 적용하고, 프로그램은 이 값을 쓰지 않습니다(사용 중 바꾼 값은 저장되지 않음).

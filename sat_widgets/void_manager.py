@@ -117,6 +117,7 @@ class VoidManager:
 
         # Output field/column names (see output_columns.py; overridable in config.json)
         self.json_fields, self.csv_columns = output_columns.resolve()
+        self.norm_pitch = output_columns.NORM_PITCH_X # Pixel values written as if pitch_x were this
         
         # Void types keyed by name, in declaration order (shortcuts 1..9, 0 follow this order).
         # Declared in config.json (written by the user; the program never writes it).
@@ -165,6 +166,7 @@ class VoidManager:
             with open(self.config_path, 'r') as f:
                 data = json.load(f)
                 self.json_fields, self.csv_columns = output_columns.resolve(data)
+                self.norm_pitch = output_columns.norm_pitch(data)
                 if "void_types" in data:
                     types = self.normalize_types(data["void_types"])
                     if types:
@@ -857,6 +859,7 @@ class VoidManager:
         refs = self.reference_bboxes(grid_cfg, coord_transform)
         s = self.um_per_px if self.um_per_px and self.um_per_px > 0 else None
         um = lambda px: px * s if s is not None and px is not None else None
+        k = self.pixel_scale(grid_cfg)
         records = []
         for layer in sorted(self.voids):
             for v in self.voids[layer]:
@@ -895,9 +898,20 @@ class VoidManager:
                     "bbox_rel_y": gy - bbox[1] if bbox else None,
                 })
                 rec = records[-1]
-                for k in ("center_x", "center_y", "radius_x", "radius_y", "bbox_rel_x", "bbox_rel_y"):
-                    rec[k + "_um"] = um(rec[k])
+                for key in ("center_x", "center_y", "radius_x", "radius_y", "bbox_rel_x", "bbox_rel_y"):
+                    rec[key + "_um"] = um(rec[key])
+                # Pixel values: actual pixels in *_raw, scaled to the normalized pitch in the plain fields
+                for key in output_columns.PIXEL_KEYS:
+                    raw = rec[key]
+                    rec[key + "_raw"] = raw
+                    rec[key] = None if raw is None else raw * k
         return records
+
+    def pixel_scale(self, grid_cfg):
+        """Factor from actual pixels to the written pixel values (norm pitch / grid x pitch), 1 = none."""
+        if not self.norm_pitch or not grid_cfg.pitch_x:
+            return 1.0
+        return self.norm_pitch / float(grid_cfg.pitch_x)
 
     def to_data(self, grid_cfg, bonding_map=None, coord_transform=None):
         """The voids.json content (also what the results plugin gets as ctx["voids_json"])."""
@@ -905,6 +919,9 @@ class VoidManager:
             "version": 3,
             "layer_numbering": "absolute",
             "um_per_px": self.um_per_px or None,
+            # Plain pixel fields = actual pixels x scale (grid x pitch normalized); *_raw = actual
+            "pixel_scale": {"pitch_x": self.norm_pitch, "pitch_x_raw": float(grid_cfg.pitch_x),
+                            "scale": self.pixel_scale(grid_cfg)} if self.norm_pitch else None,
             "types": self.types, # name -> {name, color, shape, ...}
             "voids": [
                 {name: rec[key] for key, name in self.json_fields.items() if name}
@@ -993,16 +1010,27 @@ class VoidManager:
         if legacy_layers and layer_offset:
             print(f"Legacy void file: relative layers shifted by +{layer_offset}")
 
+        # Pixel values: *_raw when present, else the plain field divided by the recorded scale
+        # (files without a scale hold actual pixels)
+        scale = ((raw_data.get("pixel_scale") or {}).get("scale") if isinstance(raw_data, dict) else None) or 1.0
+
+        def px(item, key, default=None):
+            value = self._field(item, key + "_raw")
+            if value is not None:
+                return value
+            value = self._field(item, key)
+            return default if value is None else value / scale
+
         for item in void_list:
             layer = self._field(item, "layer", 0)
             if legacy_layers:
                 layer += layer_offset
             col = self._field(item, "col", 0)
             row = self._field(item, "row", 0)
-            rel_cx = self._field(item, "center_x", 0)
-            rel_cy = self._field(item, "center_y", 0)
-            rx = self._field(item, "radius_x", 10.0)
-            ry = self._field(item, "radius_y", 10.0)
+            rel_cx = px(item, "center_x", 0)
+            rel_cy = px(item, "center_y", 0)
+            rx = px(item, "radius_x", 10.0)
+            ry = px(item, "radius_y", 10.0)
             
             # Resolve Type: by name; old files by number (their own number -> name table,
             # else the declaration order)
@@ -1017,8 +1045,8 @@ class VoidManager:
                 else:
                     type_name = order[0] if order else ""
             
-            gx = self._field(item, "global_x")
-            gy = self._field(item, "global_y")
+            gx = px(item, "global_x")
+            gy = px(item, "global_y")
             if gx is None or gy is None:
                 # Calc Global from Relative (Grid-Dependent)
                 chip_x0, chip_y0 = grid_cfg.cell_origin(row, col)
