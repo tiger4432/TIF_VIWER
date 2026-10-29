@@ -43,7 +43,7 @@ MISS_REASONS = {
 # False detection classes (first that applies)
 FP_REASONS = {
     "ed": "touches the chip border (bbox / alignment)",
-    "al": "chip misaligned against the median chip (shift > 1.5 working px)",
+    "al": "chip still misaligned against the median chip after registration (> 1.5 working px)",
     "lg": "large blob (> 2% of the chip)",
     "le": "on a layout edge (chip-to-chip spread > 2x the layer median)",
     "cm": "common spot (> 15% of the chips deviate there)",
@@ -135,6 +135,10 @@ class Evaluation:
             self.n_shift += 1
             shift = _shift(raw, self.ref)
             st["shift"].append(math.hypot(*shift))
+        # Misalignment left after the detector's own registration (classifies false detections)
+        left = None
+        if kept:
+            left = _shift(matched, self.gold) if (matched is not None and self.gold is not None) else shift
         x0, y0, w, h = self.rects[cell]
         W, H = self.size
         sx, sy = w / W, h / H
@@ -198,7 +202,7 @@ class Evaluation:
             d = {"layer": layer, "cell": cell, "box": tuple(c["extent"]), "score": c["score"] / thr,
                  "area_frac": c["area"] / float(W * H), "merged": c["merged"], "type": c.get("type"),
                  "edge": r0 <= border or c0 <= border or r1 >= H - 1 - border or c1 >= W - border,
-                 "shift": None if shift is None else math.hypot(*shift),
+                 "shift": None if left is None else math.hypot(*left),
                  "spread": None if self.spread is None else at(self.spread, pr, pc) / max(self.sp_med, 1e-6),
                  "pos": (pr, pc), "half": half_box(pr, pc)}
             c["_det"] = d
