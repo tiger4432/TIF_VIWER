@@ -138,14 +138,16 @@ exe 옆의 `deploy.json`에 공유 폴더를 적습니다. 환경변수 `TIF_VIE
 
 ```json
 "void_types": {
-    "BBOX":        {"color": [255,255,0], "shape": "rectangle", "def_w": 480, "def_h": 480},
-    "Corner":      {"color": [255,0,255], "shape": "rectangle", "snap": "bbox_corner"},
-    "CornerCurve": {"color": [0,255,0], "shape": "curve", "def_p": 4.0,
-                    "snap": "bbox_corner", "snap_anchor": "center", "snap_offset": "SL"}
+    "bbox":         {"color": [255,255,0], "shape": "rectangle", "def_w": 480, "def_h": 480},
+    "corner":       {"color": [255,0,255], "shape": "rectangle", "snap": "bbox_corner"},
+    "corner_curve": {"color": [0,255,0], "shape": "curve", "def_p": 4.0,
+                     "snap": "bbox_corner", "snap_anchor": "center", "snap_offset": "SL"}
 }
 ```
 
-리스트 형식(`[{"name": "BBOX", ...}, ...]`)과 이전 번호 키 형식(`"4": {"name": "BBOX", ...}`)도 읽습니다. 이전 voids.json의 `type_id`는 파일 안의 타입 이름으로 바꿔 읽습니다.
+리스트 형식(`[{"name": "bbox", ...}, ...]`)과 이전 번호 키 형식(`"4": {"name": "bbox", ...}`)도 읽습니다. 이전 voids.json의 `type_id`는 파일 안의 타입 이름으로 바꿔 읽습니다.
+
+타입 이름은 **대소문자를 구분하지 않고** 선언된 이름에 맞춥니다. 예를 들어 선언이 `bbox`, `edge`이면 voids.json / API로 불러온 `BBOX`, `Edge`나 `type_rules`, `ui_defaults`의 이름도 `bbox`, `edge`로 처리합니다. 이름이 `bbox`인 타입(대소문자 무관)이 기준 bbox입니다.
 
 | 키 | 의미 |
 |---|---|
@@ -184,7 +186,7 @@ voids.json의 필드와 voids.csv의 컬럼 이름을 exe를 다시 빌드하지
     "um_per_px": 2.0,
     "calib_enabled": false, "calib_robust": true, "calib_all_layers": true,
     "target_mean": 30000, "target_std": 10000,
-    "void_type": "Edge",
+    "void_type": "edge",
     "export": {"raw": true, "overlay": true, "mask": false, "merged": false, "json": true, "csv": true}
 }
 ```
@@ -339,10 +341,10 @@ Void Marking 패널의 **Detect Voids**는 대략적인 보이드를 자동으�
 
 ```json
 "type_rules": [
-    {"type": "CornerDelam", "near": {"box": "die", "part": "corner", "within": 15}, "polarity": "bright"},
-    {"type": "PadVoid", "in": "pad", "max_size_um": 40},
-    {"type": "LongVoid", "min_aspect": 3},
-    {"type": "DieVoid", "in": "die"}
+    {"type": "corner_delam", "near": {"box": "die", "part": "corner", "within": 15}, "polarity": "bright"},
+    {"type": "pad_void", "in": "pad", "max_size_um": 40},
+    {"type": "long_void", "min_aspect": 3},
+    {"type": "die_void", "in": "die"}
 ]
 ```
 

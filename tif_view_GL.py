@@ -562,7 +562,7 @@ class MainWindow(QMainWindow):
             return f
 
         def void_type(v):
-            i = self.cb_void_type.findData(v)
+            i = self.cb_void_type.findData(self.void_manager.resolve_type(v))
             if i < 0:
                 raise ValueError(f"unknown void type {v!r}")
             self.cb_void_type.setCurrentIndex(i)

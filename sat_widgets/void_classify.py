@@ -42,11 +42,13 @@ class Classifier:
     def __init__(self, rules, layout, known_types, um_per_px=0.0):
         self.um = um_per_px if um_per_px and um_per_px > 0 else None
         self.rules = []
+        lower = {str(t).lower(): t for t in known_types}
         for r in rules or ():
-            if r.get("type") not in known_types:
+            name = lower.get(str(r.get("type", "")).strip().lower()) # Case-insensitive, as declared
+            if name is None:
                 print(f"[type_rules] unknown void type {r.get('type')!r}: rule skipped")
                 continue
-            self.rules.append(r)
+            self.rules.append(dict(r, type=name))
         self.boxes = layout_named_boxes(layout) if layout else []
         self.design = (layout or {}).get("design_size")
 

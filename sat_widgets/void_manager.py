@@ -281,6 +281,13 @@ class VoidManager:
     # -----------------------------------------------
     # Type properties
     # -----------------------------------------------
+    def resolve_type(self, name):
+        """Declared type name for name, ignoring case ("BBOX" -> "bbox"); unknown names unchanged."""
+        if name is None or name in self.types:
+            return name
+        key = str(name).strip().lower()
+        return next((t for t in self.types if t.lower() == key), name)
+
     def type_of(self, v):
         return self.types.get(v.get("type"), {})
 
@@ -870,7 +877,8 @@ class VoidManager:
             if "types" in raw_data:
                 file_types = self.normalize_types(raw_data["types"])
                 for name, t in file_types.items():
-                    self.types.setdefault(name, t)
+                    if self.resolve_type(name) == name: # Same name in another case: the declared one
+                        self.types.setdefault(name, t)
                 # Legacy files reference types by number: number -> name
                 if isinstance(raw_data["types"], dict):
                     for k, t in raw_data["types"].items():
@@ -894,12 +902,12 @@ class VoidManager:
             
             # Resolve Type: by name; old files by number (their own number -> name table,
             # else the declaration order)
-            type_name = self._field(item, "type")
+            type_name = self.resolve_type(self._field(item, "type"))
             if not type_name:
                 t_id = item.get("type_id")
                 order = list(self.types)
                 if t_id in legacy_names:
-                    type_name = legacy_names[t_id]
+                    type_name = self.resolve_type(legacy_names[t_id])
                 elif isinstance(t_id, int) and 0 <= t_id < len(order):
                     type_name = order[t_id]
                 else:
