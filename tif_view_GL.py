@@ -438,18 +438,23 @@ class MainWindow(QMainWindow):
         
         self.btn_clear_chip = QPushButton("Clear Chip")
         self.btn_clear_chip.clicked.connect(self.clear_chip_voids)
-        
+        self.btn_clear_all = QPushButton("Clear All")
+        self.btn_clear_all.setToolTip("Removes every marking on all layers, bboxes included (Ctrl+Z restores)")
+        self.btn_clear_all.clicked.connect(self.clear_all_voids)
+
         h_layout_void_btns.addWidget(self.btn_load_voids)
         h_layout_void_btns.addWidget(self.btn_save_voids)
-        h_layout_void_btns.addWidget(self.btn_clear_voids)
-        h_layout_void_btns.addWidget(self.btn_clear_chip)
-        
+        h_clear_btns = QHBoxLayout()
+        h_clear_btns.addWidget(self.btn_clear_voids)
+        h_clear_btns.addWidget(self.btn_clear_chip)
+        h_clear_btns.addWidget(self.btn_clear_all)
+
         v_layout_void.addWidget(self.lbl_void_hint)
         v_layout_void.addLayout(h_modes)
         v_layout_void.addLayout(h_type)
         v_layout_void.addWidget(self.lbl_void_count)
         v_layout_void.addLayout(h_layout_void_btns)
-        v_layout_void.addWidget(self.btn_clear_voids)
+        v_layout_void.addLayout(h_clear_btns)
 
         # Rough automatic detection (die-to-die comparison), marked with the selected type
         h_detect = QHBoxLayout()
@@ -1312,6 +1317,21 @@ class MainWindow(QMainWindow):
     def clear_chip_voids(self):
         self.glw.clear_current_chip_voids()
         self.update_void_ui()
+        self.glw.setFocus()
+
+    def clear_all_voids(self):
+        """Removes every marking on all layers (bboxes too) after a confirmation. One undo step."""
+        n = sum(len(vs) for vs in self.void_manager.voids.values())
+        if n == 0:
+            return
+        if QMessageBox.question(self, "Clear All",
+                                f"Remove all {n} markings on all layers (bboxes included)?\nCtrl+Z restores them.",
+                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        self.void_manager.remove_voids_where(lambda layer, v: True)
+        self.glw.active_void = None
+        self.update_void_ui()
+        self.glw.refresh_hover()
         self.glw.setFocus()
 
     def _bbox_type_name(self):
