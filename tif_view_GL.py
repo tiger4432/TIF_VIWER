@@ -35,6 +35,7 @@ from sat_widgets.auto_bbox import place_bboxes
 from sat_widgets import void_detect
 from sat_widgets import void_eval
 from sat_widgets import void_learn
+from sat_widgets import void_seg, seg_data
 from sat_widgets import results_api
 from sat_widgets.products import load_products, GRID_KEYS
 from sat_widgets.app_paths import declaration_path, sync_declarations, default_update_manifest
@@ -477,6 +478,8 @@ class MainWindow(QMainWindow):
         self.cb_detect_method.addItem("Die-to-die", ("die_to_die", None))
         self.cb_detect_method.addItem("PatchCore MobileNetV2", ("patchcore", "models/patchcore_mobilenetv2.onnx"))
         self.cb_detect_method.addItem("PatchCore ResNet50", ("patchcore", "models/patchcore_resnet50.onnx"))
+        self.cb_detect_method.addItem("Segmentation U-Net", ("segmentation", "models/void_unet.onnx"))
+        self.cb_detect_method.addItem("Reconstruction U-Net", ("segmentation", "models/void_recon.onnx"))
         self.cb_detect_method.setToolTip("Die-to-die: pixel comparison with the median chip (fast, exact outlines).\n"
                                          "PatchCore: CNN features (optional, slower, coarse outlines), see docs/PATCHCORE.md.")
         self._detect_thr = {}
@@ -525,6 +528,10 @@ class MainWindow(QMainWindow):
         btn_train.clicked.connect(self.train_detector)
         h_learn.addWidget(self.chk_learned)
         h_learn.addWidget(btn_train)
+        btn_seg = QPushButton("Seg Data")
+        btn_seg.setToolTip("Build and review the U-Net training data from marked files (docs/SEGMENTATION.md)")
+        btn_seg.clicked.connect(self.open_seg_data)
+        h_learn.addWidget(btn_seg)
         h_learn.addStretch(1)
         v_layout_void.addLayout(h_learn)
         self._init_detect_method()
@@ -1471,9 +1478,15 @@ class MainWindow(QMainWindow):
             self.cb_detect_method.addItem("PatchCore (config.json)", ("patchcore", custom))
         start = 0
         for i in range(1, self.cb_detect_method.count()):
-            model = self.cb_detect_method.itemData(i)[1]
-            reason = patchcore.available({"pc_model": model})
+            method, model = self.cb_detect_method.itemData(i)
             item = self.cb_detect_method.model().item(i)
+            if method == "segmentation":
+                reason = void_seg.available(model)
+                item.setEnabled(not reason)
+                item.setToolTip(reason or "Small U-Net trained from the reviewed markings (Seg Data, tools/train_seg.py), "
+                                          "see docs/SEGMENTATION.md. Thr 5 = 50 % (segmentation)")
+                continue
+            reason = patchcore.available({"pc_model": model})
             item.setEnabled(not reason)
             item.setToolTip(reason or "CNN features, position-aware nearest neighbour (CPU), see docs/PATCHCORE.md")
             if not reason and cfg.get("method") == "patchcore" and model == (custom or patchcore.DEFAULTS["pc_model"]):
@@ -1491,7 +1504,7 @@ class MainWindow(QMainWindow):
         if last is not None:
             self._detect_thr[last] = self.sb_detect_thr.value()
         default = cfg.get("pc_threshold", patchcore.DEFAULTS["pc_threshold"]) if method == "patchcore" else \
-            cfg.get("threshold", void_detect.DEFAULTS["threshold"])
+            cfg.get("seg_threshold", 5.0) if method == "segmentation" else cfg.get("threshold", void_detect.DEFAULTS["threshold"])
         self.sb_detect_thr.setValue(float(self._detect_thr.get(idx, default)))
         self._detect_last = idx
 
@@ -1635,6 +1648,16 @@ class MainWindow(QMainWindow):
         if rules is not None: # Per product (products.json) wins over config.json
             params["type_rules"] = rules
         params["method"], model = self.cb_detect_method.currentData()
+        if params["method"] == "segmentation":
+            # U-Net map in place of the die-to-die deviation (sat_widgets/void_seg.py)
+            try:
+                params["seg_model"] = void_seg.Model(model)
+            except Exception as e:
+                QMessageBox.warning(self, title, f"Segmentation model not usable ({model}): {e}")
+                return None
+            params["method"] = "die_to_die"
+            params["threshold"] = self.sb_detect_thr.value()
+            model = None
         if model:
             params["pc_model"] = model
         params["pc_threshold" if params["method"] == "patchcore" else "threshold"] = self.sb_detect_thr.value()
@@ -1703,6 +1726,42 @@ class MainWindow(QMainWindow):
                     box = (gx - rx, gy - ry, gx + rx, gy + ry)
                 truths.append({"layer": layer, "cell": cfg.cell_at(gx, gy), "box": box, "type": v.get("type")})
         return truths
+
+    def seg_params(self):
+        """Detect Voids settings for extracting U-Net training data (die-to-die, current Skip layers)."""
+        params = dict(void_detect.DEFAULTS)
+        params.update(self._config().get("void_detect", {}))
+        params["method"] = "die_to_die"
+        try:
+            params["skip_layers"] = [int(x) for x in re.split(r"[,\s]+", self.le_skip_layers.text().strip()) if x]
+        except ValueError:
+            pass
+        return params
+
+    def open_seg_data(self):
+        from sat_widgets.seg_review import SegDataDialog
+        SegDataDialog(self).exec()
+
+    def add_seg_samples_from_open(self, progress_factory):
+        """Training samples of the open file and its markings (Seg Data window). Returns the folder or None."""
+        if self.full_data is None or self.glw.tiled_image is None:
+            QMessageBox.information(self, "Seg Data", "Open a file and load its markings first.")
+            return None
+        vm, cfg, ct = self.void_manager, self.glw.grid_cfg, self.glw.coord_transform
+        bmap = self.glw.bonding_map
+        cells = [(r, c) for r in range(cfg.rows) for c in range(cfg.cols) if bmap is None or bmap.get_key(r, c)]
+        refs = vm.reference_bboxes(cfg, ct)
+        layers = [self.abs_layer(z) for z in range(len(self.full_data))]
+        dlg, step = progress_factory("Extracting training samples...")
+        try:
+            out = seg_data.extract(self.full_data, cfg, ct, refs, cells, layers, vm, self.seg_params(), step)
+        finally:
+            dlg.close()
+        if out is None:
+            return None
+        layer_refs, samples = out
+        source = self.lbl_source.toolTip() or self.le_wafer_id.text() or "unnamed"
+        return void_seg.write_source(source, self.void_meta(), layer_refs, samples)
 
     def train_detector(self):
         """

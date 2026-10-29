@@ -348,6 +348,8 @@ class Evaluation:
         """
         p = self.p
         m = ("l" if p.get("learned_model") is not None else "d") if p.get("method") == "die_to_die" else "p"
+        if p.get("seg_model") is not None:
+            m = "s" if p["seg_model"].mode == "seg" else "r"
         thr = p.get("pc_threshold") if p.get("method") == "patchcore" else p.get("threshold")
         top = lambda d: [f"{k}{v}" for k, v in sorted(d.items(), key=lambda kv: -kv[1])[:2]]
         miss, false = {}, {}
@@ -372,6 +374,8 @@ class Evaluation:
         """Short text for the phone (see docs/VOID_EVAL.md)."""
         p = self.p
         m = {"die_to_die": "dd"}.get(p.get("method"), "pc" + ("r" if "resnet" in str(p.get("pc_model", "")).lower() else "m"))
+        if p.get("seg_model") is not None:
+            m = "sg" if p["seg_model"].mode == "seg" else "rc"
         thr = p.get("pc_threshold") if p.get("method") == "patchcore" else p.get("threshold")
         layers = sorted(self.layer_stats) or self.layers
         n_cells = len(self.rects)
@@ -477,7 +481,7 @@ class Evaluation:
                 _gray(st["_gold"]).save(os.path.join(img_dir, f"L{L}_golden.png"))
                 _heat(st["_spread"], float(np.percentile(st["_spread"].astype(np.float32), 99))).save(os.path.join(img_dir, f"L{L}_spread.png"))
 
-        data = {"version": VERSION, "meta": meta, "code": code, "params": {k: v for k, v in self.p.items() if k not in ("type_rules", "learned_model", "learn")},
+        data = {"version": VERSION, "meta": meta, "code": code, "params": {k: v for k, v in self.p.items() if k not in ("type_rules", "learned_model", "learn", "seg_model", "dump")},
                 "factor": self.factor, "work_size": list(self.size), "min_area": self.min_area, "max_area": self.max_area,
                 "layers": {str(L): {k: v for k, v in st.items() if not k.startswith("_")} for L, st in self.layer_stats.items()},
                 "truths": [_clean(t) for t in self.truths], "detections": [_clean(d) for d in self.dets]}

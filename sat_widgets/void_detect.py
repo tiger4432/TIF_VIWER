@@ -439,9 +439,22 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
             items = ((cell, dev, None, None) for cell, dev in pc.score_layer(chips, size).items())
         else:
             # Each chip moved onto the median chip first (the bbox may be off by a few px)
-            src = _register(chips)[0] if p.get("register", True) else chips
-            dctx = {}
+            if p.get("register", True):
+                src, shifts = _register(chips)
+            else:
+                src, shifts = chips, {}
+            dctx = {"shifts": shifts}
             items = _die_to_die(src, p, diag, dctx)
+            dump = p.get("dump")
+            if dump is not None:
+                # Training data (sat_widgets/void_seg.py): the chips as the detector sees them
+                for cell, _, _, matched in items:
+                    dump(layer, cell, matched, dctx["golden"], dctx["spread"], dctx["shifts"].get(cell, (0.0, 0.0)),
+                         rects[cell], size)
+                continue
+            seg = p.get("seg_model")
+            if seg is not None:
+                items = _learned_maps(items, dctx, seg, p, diag)
 
         # 3. Blobs per chip
         count = 0
@@ -587,6 +600,40 @@ def _golden(chips, p):
     match = _Matcher(golden)
     match.fit = fit
     return spread, gmin, gmax, match
+
+
+def _learned_maps(items, dctx, model, p, diag=None):
+    """
+    Deviation maps from a trained U-Net (sat_widgets/void_seg.py), in place of the die-to-die map:
+    - "seg": void probability x 10 (Thr 5 = 50 %);
+    - "recon": the model redraws the chip without voids (a golden chip of its own); the remainder
+      chip - redrawn, averaged like the die-to-die path ("smooth"), is compared with its per-pixel
+      chip-to-chip median / spread over the layer.
+    Yields (cell, deviation, sign, matched chip) like _die_to_die.
+    """
+    from . import void_seg
+    items = list(items)
+    if model.mode == "seg":
+        for cell, _, _, m in items:
+            x = void_seg.inputs(m, dctx["golden"], dctx["spread"])
+            prob = model.predict(x)
+            yield cell, prob * 10.0, np.sign(m - dctx["golden"]), m
+        return
+    sigma = float(p.get("smooth", 0.0))
+    rest = {}
+    for cell, _, _, m in items:
+        redrawn = model.predict(void_seg.inputs(m, dctx["golden"], dctx["spread"]))
+        r = (m - redrawn) / np.maximum(dctx["spread"], 1e-3)
+        rest[cell] = _blur(r, sigma) if sigma > 0 else r
+    stack = np.stack(list(rest.values()))
+    med = np.median(stack, axis=0)
+    spread = np.quantile(np.abs(stack - med), 0.9, axis=0) / 1.6449 * (4.0 / 3.0)
+    spread = _filt(spread, ImageFilter.MaxFilter(3))
+    spread = np.maximum(spread, 0.5 * float(np.median(spread)) + 1e-3)
+    del stack
+    for cell, _, _, m in items:
+        d = (rest[cell] - med) / spread
+        yield cell, np.abs(d), np.sign(d), m
 
 
 def _blur(a, sigma):
