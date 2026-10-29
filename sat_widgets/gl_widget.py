@@ -1,4 +1,5 @@
 import sys
+import math
 import time
 import ctypes
 import numpy as np
@@ -197,8 +198,9 @@ class GLImageWidget(QOpenGLWidget):
         self.active_void = None
         self.active_void_action = None
         self._void_txn = False # Inside a VoidManager change (mouse press .. release)
-        self._snap_hint = None
-        self._resize_anchor = (None, None)
+        self._snap_hint = None # Snap types: press point while drawing (bbox corner nearest to it)
+        self._snap_drag_point = None # Snap types: last mouse point while drawing (size on release)
+        self._free_quadrant = None # Center-anchored snap type being drawn: quadrant press -> mouse
         self._resize_plan = None
         self._pan_only = False
         
@@ -1080,8 +1082,9 @@ class GLImageWidget(QOpenGLWidget):
                      return # Off screen
                  if v is hover and style != "active":
                      style = "hover"
-                 vm.paint_void(painter, v, sx, sy, self.zoom, style=style,
-                               quadrant=vm.quadrant_of(v, dx, dy, refs, self.grid_cfg))
+                 quadrant = self._free_quadrant if (v is self.active_void and self._free_quadrant) \
+                     else vm.quadrant_of(v, dx, dy, refs, self.grid_cfg)
+                 vm.paint_void(painter, v, sx, sy, self.zoom, style=style, quadrant=quadrant)
 
              for layer_idx, v_list in vm.voids.items():
                  if layer_idx == self.current_layer:
@@ -1223,13 +1226,14 @@ class GLImageWidget(QOpenGLWidget):
                         if not is_sizing:
                             # Predefined Size (Click-to-Draw): the click is the top-left corner
                             # of the box in the Deskewed frame (grid axes); stored as Raw center
-                            # + half sizes. Snap types attach to the bbox corner nearest the click.
-                            # Same placement as automatic detection (VoidManager.place_void).
+                            # + half sizes (VoidManager.place_void, as automatic detection).
+                            # Snap types follow the mouse freely and attach to the bbox corner
+                            # when the mouse is released.
                             cx_raw, cy_raw = self.deskew_to_raw(gx + def_w / 2.0, gy + def_h / 2.0)
-                            self._snap_hint = (gx, gy)
+                            self._snap_hint = None
                             self.active_void = self.void_manager.place_void(
                                 self.current_layer, cx_raw, cy_raw, def_w / 2.0, def_h / 2.0, self.active_type,
-                                self.grid_cfg, self.coord_transform, hint=self._snap_hint)
+                                self.grid_cfg, self.coord_transform, snap=False)
 
                             # Switch to Move mode immediately
                             self.active_void_action = 'center'
@@ -1254,11 +1258,8 @@ class GLImageWidget(QOpenGLWidget):
                         self.active_void = v
                         self.active_void_action = action # 'center' or 'edge'
                         v.pop("auto", None) # Reviewed by hand (no longer "estimated")
-                        # Snap types keep their anchored corner while resizing
-                        self._snap_hint = None
+                        self._snap_hint = None # Snap types re-attach when the mouse is released
                         if action == 'edge':
-                            if self.void_manager.snap_anchor(v) == "edge":
-                                self._snap_hint = self.void_manager.snap_corner_point(v, self.grid_cfg, self.coord_transform)
                             self._resize_plan = self._make_resize_plan(v, gx, gy)
                         self.update()
                         return
@@ -1350,9 +1351,14 @@ class GLImageWidget(QOpenGLWidget):
                      self.active_void["globalCX"] = cx_raw
                      self.active_void["globalCY"] = cy_raw
                  
-                 # Snap types: span from the bbox corner nearest to the press point to the mouse
-                 self.void_manager.snap_void(self.active_void, self.grid_cfg, self.coord_transform,
-                                             hint=self._snap_hint, drag_point=(gx, gy))
+                 if self.void_manager.snap_anchor(self.active_void) == "center":
+                     # Center-anchored snap types: the drawn quadrant spans press point -> mouse
+                     self.active_void["radiusX"] = max(1.0, abs(gx - start_x))
+                     self.active_void["radiusY"] = max(1.0, abs(gy - start_y))
+                     self.active_void["globalCX"], self.active_void["globalCY"] = self.deskew_to_raw(start_x, start_y)
+                     self._free_quadrant = (1 if gx >= start_x else -1, 1 if gy >= start_y else -1)
+                 # Snap types are drawn as dragged; they snap when the mouse is released
+                 self._snap_drag_point = (gx, gy)
                  self.update()
                  
              elif self.active_void_action == 'center' and self.active_void:
@@ -1371,8 +1377,7 @@ class GLImageWidget(QOpenGLWidget):
                  
                  self.active_void["globalCX"] += raw_dx
                  self.active_void["globalCY"] += raw_dy
-                 # Snap types: re-attach to the nearest bbox corner
-                 self.void_manager.snap_void(self.active_void, self.grid_cfg, self.coord_transform)
+                 # Snap types move freely; they re-attach when the mouse is released
                  self.update()
                  
              elif self.active_void_action == 'edge' and self.active_void:
@@ -1381,12 +1386,7 @@ class GLImageWidget(QOpenGLWidget):
                  # Get Center in Deskewed Space (Reference)
                  cx_deskew, cy_deskew = self.raw_to_deskew(self.active_void["globalCX"], self.active_void["globalCY"])
                  
-                 if self._snap_hint is not None:
-                     # Edge-anchored snap types: anchored corner stays, size follows the mouse
-                     self.void_manager.snap_void(self.active_void, self.grid_cfg, self.coord_transform,
-                                                 hint=self._snap_hint, drag_point=(gx, gy))
-                 else:
-                     self._apply_resize(self.active_void, gx, gy)
+                 self._apply_resize(self.active_void, gx, gy) # Snap types re-attach on release
                  
                  self.update()
                  
@@ -1431,7 +1431,8 @@ class GLImageWidget(QOpenGLWidget):
         - ellipse / curve near the end of an axis: only that axis ("axes");
         - ellipse / curve on the curved part: uniform scaling ("uniform");
         - quadrant voids (center on a bbox corner): the corner stays; x end / y end / arc
-          ("quadrant").
+          ("quadrant");
+        - corner-snap types anchored by their edge: the anchored corner stays ("anchored").
         """
         vm = self.void_manager
         shape = vm.hit_shape(v) # Curve / snap types: their box
@@ -1453,6 +1454,13 @@ class GLImageWidget(QOpenGLWidget):
 
         if q:
             return {"kind": "quadrant", "q": q, "c": (cx, cy), "r0": (rx, ry), "p": p, "axis": axis, "shape": shape}
+        if vm.snap_anchor(v) == "edge":
+            # Corner-snap types: the corner at the bbox corner stays, the grabbed side(s) follow
+            k = vm.snap_corner_point(v, self.grid_cfg, self.coord_transform)
+            if k is not None:
+                fixed = min(((cx + a * rx, cy + b * ry) for a in (-1, 1) for b in (-1, 1)),
+                            key=lambda c: math.hypot(c[0] - k[0], c[1] - k[1]))
+                return {"kind": "anchored", "fixed": fixed, "x": axis in (None, "x"), "y": axis in (None, "y")}
         if shape == "rectangle" or axis is not None:
             return {"kind": "axes", "c": (cx, cy), "x": axis in (None, "x"), "y": axis in (None, "y")}
         sx = 1.0 if dx >= 0 else -1.0
@@ -1471,6 +1479,16 @@ class GLImageWidget(QOpenGLWidget):
                 v["radiusX"] = max(1.0, abs(gx - cx))
             if plan["y"]:
                 v["radiusY"] = max(1.0, abs(gy - cy))
+        elif kind == "anchored":
+            cx, cy = self.raw_to_deskew(v["globalCX"], v["globalCY"])
+            fx, fy = plan["fixed"]
+            if plan["x"]:
+                v["radiusX"] = max(1.0, abs(gx - fx) / 2.0)
+                cx = fx + math.copysign(v["radiusX"], gx - fx)
+            if plan["y"]:
+                v["radiusY"] = max(1.0, abs(gy - fy) / 2.0)
+                cy = fy + math.copysign(v["radiusY"], gy - fy)
+            v["globalCX"], v["globalCY"] = self.deskew_to_raw(cx, cy)
         elif kind == "uniform": # Center fixed: scale so the grabbed point follows the mouse
             (cx, cy), (bx, by), (r0x, r0y) = plan["c"], plan["B"], plan["r0"]
             s = ((gx - cx) * bx + (gy - cy) * by) / max(bx * bx + by * by, 1e-9)
@@ -1524,7 +1542,9 @@ class GLImageWidget(QOpenGLWidget):
                 moved = abs(e.position().x() - start.x()) + abs(e.position().y() - start.y())
                 if moved < 3:
                     self.void_manager.remove_void(self.current_layer, self.active_void)
-        
+                    self.active_void = None
+        self._snap_on_release()
+
         changed = self._end_void_change()
         if self._pending_tool is not False:
             tool, self._pending_tool = self._pending_tool, False
@@ -1537,6 +1557,23 @@ class GLImageWidget(QOpenGLWidget):
             self.update()
         if changed:
             self.voids_changed.emit()
+
+    def _snap_on_release(self):
+        """
+        Snap types are drawn / moved / resized as the mouse goes; they attach to the bbox corner
+        only when the mouse is released: drawn ones from the corner nearest the press point to
+        the last mouse point, moved or resized ones to the corner nearest to them (size kept).
+        """
+        v, action = self.active_void, self.active_void_action
+        drag, hint = self._snap_drag_point, self._snap_hint
+        self._snap_drag_point = self._free_quadrant = None
+        if v is None or action not in ('sizing', 'center', 'edge') or self.void_manager.snap_anchor(v) is None:
+            return
+        if action == 'sizing' and drag is not None:
+            self.void_manager.snap_void(v, self.grid_cfg, self.coord_transform, hint=hint, drag_point=drag)
+        else:
+            self.void_manager.snap_void(v, self.grid_cfg, self.coord_transform)
+        self.update()
 
     def _begin_void_change(self):
         if not self._void_txn:
