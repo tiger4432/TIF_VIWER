@@ -336,6 +336,35 @@ class Evaluation:
                 "size": size_r, "same_type": same_type, "elapsed": time.time() - self.t0}
 
     # ----- outputs -----
+    def short_code(self, s):
+        """
+        Two lines to type by hand (see docs/VOID_EVAL.md "짧은 코드"):
+          S1 <method><thr> <ok> <ly> <ms> <fp> <top 2 miss reasons>
+          <pk> <s> <c> <z> <top 2 false classes> <w> <h>
+        pk, s, c, w, h x100 as integers (medians of the threshold misses / matched sizes), 0 = none.
+        """
+        p = self.p
+        m = "d" if p.get("method") == "die_to_die" else "p"
+        thr = p.get("pc_threshold") if p.get("method") == "patchcore" else p.get("threshold")
+        top = lambda d: [f"{k}{v}" for k, v in sorted(d.items(), key=lambda kv: -kv[1])[:2]]
+        miss, false = {}, {}
+        for t in self.truths:
+            if t.get("result") == "ms":
+                miss[t["reason"]] = miss.get(t["reason"], 0) + 1
+        for d in self.dets:
+            if d.get("result") == "fp":
+                false[d["reason"]] = false.get(d["reason"], 0) + 1
+        bt = [t["rec"] for t in self.truths if t.get("reason") == "bt" and t.get("rec")]
+        i100 = lambda v: "0" if v is None else str(int(round(100 * v)))
+        b = [i100(_med([r.get(k) for r in bt])) for k in ("peak", "spread", "contrast")]
+        z = _med([r.get("size_w") for r in bt])
+        b.append("0" if z is None else str(int(round(z))))
+        w = _med([r[0] for r in s["size"]]) if s["size"] else None
+        h = _med([r[1] for r in s["size"]]) if s["size"] else None
+        line1 = " ".join([f"S1 {m}{_fmt(thr)}", str(s["ok"]), str(s["ly"]), str(s["ms"]), str(s["fp"])] + top(miss))
+        line2 = " ".join(b + top(false) + [i100(w), i100(h)])
+        return line1 + "\n" + line2
+
     def code(self, s):
         """Short text for the phone (see docs/VOID_EVAL.md)."""
         p = self.p
@@ -423,7 +452,7 @@ class Evaluation:
         img_dir = os.path.join(folder, "img")
         os.makedirs(img_dir, exist_ok=True)
         with open(os.path.join(folder, "summary.txt"), "w", encoding="utf-8") as f:
-            f.write(code + "\n")
+            f.write(self.short_code(s) + "\n\n" + code + "\n")
 
         # Chip images, the most useful first: misses, false detections, layer mismatches, matches
         prio = {}

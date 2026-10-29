@@ -1700,6 +1700,7 @@ class MainWindow(QMainWindow):
             return
         summary = ev.finish(cells)
         code = ev.code(summary)
+        short = ev.short_code(summary)
         src = self.lbl_source.toolTip()
         stem = os.path.splitext(os.path.basename(src))[0] or "eval"
         stamp = time.strftime("%Y%m%d_%H%M%S")
@@ -1710,8 +1711,8 @@ class MainWindow(QMainWindow):
         except OSError as e:
             report = None
             print(f"Evaluation report not written: {e}")
-        print("Detection evaluation:\n" + code + (f"\nReport: {report}" if report else ""))
-        EvalDialog(self, code, folder if report else None, report, summary["h"]).exec()
+        print("Detection evaluation:\n" + short + "\n\n" + code + (f"\nReport: {report}" if report else ""))
+        EvalDialog(self, code, folder if report else None, report, summary["h"], short).exec()
 
     def _detect_done(self, result, refs):
         self.glw.refresh_hover()
@@ -2339,17 +2340,19 @@ class MainWindow(QMainWindow):
 class EvalDialog(QDialog):
     """Result of Evaluate: the short code (to type or scan on a phone) and the report folder."""
 
-    def __init__(self, parent, code, folder, report, n_hand):
+    def __init__(self, parent, code, folder, report, n_hand, short=None):
         super().__init__(parent)
         self.setWindowTitle("Detection Evaluation")
-        self.code, self.folder, self.report = code, folder, report
+        self.full, self.short = code, short or code
+        self.code, self.folder, self.report = self.short, folder, report
         lay = QVBoxLayout(self)
-        hint = "Type this code on the phone and send it (letters, digits, dots and spaces only)."
+        hint = "Type this code on the phone and send it. Full code: more detail (per layer)."
         if n_hand == 0:
             hint = ("No hand markings on the loaded layers: only detection and chip statistics are shown.\n"
                     "Mark voids by hand (or load a reviewed voids.json) and evaluate again to compare.\n") + hint
         lay.addWidget(QLabel(hint))
-        txt = QPlainTextEdit(code)
+        txt = QPlainTextEdit(self.code)
+        self.txt = txt
         txt.setReadOnly(True)
         f = txt.font()
         f.setFamily("Consolas")
@@ -2363,6 +2366,10 @@ class EvalDialog(QDialog):
         b_copy = QPushButton("Copy")
         b_copy.clicked.connect(lambda: QApplication.clipboard().setText(self.code))
         btns.addWidget(b_copy)
+        self.b_full = QPushButton("Full Code")
+        self.b_full.setCheckable(True)
+        self.b_full.toggled.connect(self._toggle_full)
+        btns.addWidget(self.b_full)
         b_rep = QPushButton("Open Report")
         b_rep.setEnabled(bool(report))
         b_rep.clicked.connect(lambda: self._open(self.report))
@@ -2378,6 +2385,11 @@ class EvalDialog(QDialog):
         lay.addLayout(btns)
         if folder:
             lay.addWidget(QLabel(f"Report: {folder}"))
+
+    def _toggle_full(self, on):
+        self.code = self.full if on else self.short
+        self.txt.setPlainText(self.code)
+        self.b_full.setText("Short Code" if on else "Full Code")
 
     @staticmethod
     def _open(path):
