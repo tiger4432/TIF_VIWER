@@ -6,7 +6,8 @@ Run from the Void Marking panel ("Evaluate"): the detection runs exactly like De
 adds nothing; its result is compared with the markings drawn by hand (not the dashed detected
 ones, not bboxes) on the loaded layers. Output:
 
-- a short code (summary_code) meant to be read on screen and typed or scanned (QR) on a phone,
+- a short code (code) meant to be read on screen and typed on a phone (letters, digits, dots,
+  spaces only),
   see docs/VOID_EVAL.md for every field,
 - a folder with report.html (tables + chip images), eval.json and summary.txt.
 
@@ -53,7 +54,7 @@ FP_REASONS = {
 def _fmt(x, digits=2):
     """Compact number: .62, 1.9, 12 (no leading zero, trailing zeros dropped)."""
     if x is None or (isinstance(x, float) and not math.isfinite(x)):
-        return "-"
+        return "na"
     if abs(x) >= 10 or float(x).is_integer():
         return str(int(round(x)))
     s = f"{x:.{digits}f}".rstrip("0").rstrip(".")
@@ -354,10 +355,10 @@ class Evaluation:
         layers = sorted(self.layer_stats) or self.layers
         n_cells = len(self.rects)
         lines = [f"VD{VERSION} {m} t{_fmt(thr)} f{self.factor} w{max(self.size)} m{_fmt(p.get('min_size_px'))} "
-                 f"c{n_cells} b{self.refs_pct} L{min(layers)}-{max(layers)} h{s['h']}" if layers else f"VD{VERSION} {m} no layers"]
+                 f"c{n_cells} b{self.refs_pct} L{min(layers)}to{max(layers)} h{s['h']}" if layers else f"VD{VERSION} {m} no layers"]
         R = round(100 * s["ok"] / s["h"]) if s["h"] else None
         P = round(100 * s["ok"] / s["det"]) if s["det"] else None
-        lines.append(f"T ok{s['ok']} ly{s['ly']} ms{s['ms']} fp{s['fp']} R{'-' if R is None else R} P{'-' if P is None else P}")
+        lines.append(f"T ok{s['ok']} ly{s['ly']} ms{s['ms']} fp{s['fp']}" + ("" if R is None else f" R{R}") + ("" if P is None else f" P{P}"))
         for L in layers:
             tl = [t for t in self.truths if t["layer"] == L]
             dl = [d for d in self.dets if d["layer"] == L]
@@ -383,7 +384,7 @@ class Evaluation:
                 if st["shift"] is not None:
                     q.append(f"a{_fmt(st['shift'] * self.factor, 1)}")
                 q.append(f"x{_fmt(st['maxdev'] / st['thr'] if st['maxdev'] is not None else None)}")
-                parts.append("| " + " ".join(q))
+                parts += q
             lines.append(" ".join(parts))
         reasons = {}
         for t in self.truths:
@@ -411,7 +412,7 @@ class Evaluation:
             gt = sum(1 for a, b, _ in s["size"] if min(a, b) > 1.4)
             lines.append(f"S w{_fmt(_med(w))} h{_fmt(_med(h))} hf{_fmt(hf)} lt{lt} gt{gt}")
         if s["ok"]:
-            lines.append(f"Y {s['same_type']}/{s['ok']}")
+            lines.append(f"Y{s['same_type']}")
         return "\n".join(lines)
 
     def write_report(self, folder, s, code, meta):

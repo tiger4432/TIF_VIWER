@@ -34,7 +34,6 @@ from sat_widgets.angle_preview import AnglePreview
 from sat_widgets.auto_bbox import place_bboxes
 from sat_widgets import void_detect
 from sat_widgets import void_eval
-from sat_widgets import qr
 from sat_widgets import results_api
 from sat_widgets.products import load_products, GRID_KEYS
 from sat_widgets.app_paths import declaration_path, sync_declarations, default_update_manifest
@@ -487,7 +486,7 @@ class MainWindow(QMainWindow):
         h_detect.addWidget(btn_next_det)
         btn_eval = QPushButton("Evaluate")
         btn_eval.setToolTip("Run the detection without marking and compare it with the voids marked by hand on the loaded\n"
-                            "layers: misses and false detections with their reasons, as a short code (and QR) to send,\n"
+                            "layers: misses and false detections with their reasons, as a short code to type and send,\n"
                             "plus a report folder with chip images (see docs/VOID_EVAL.md).")
         btn_eval.clicked.connect(self.evaluate_detection)
         h_detect.addWidget(btn_eval)
@@ -1612,7 +1611,7 @@ class MainWindow(QMainWindow):
     def evaluate_detection(self):
         """
         Detection without marking, compared with the hand markings (sat_widgets/void_eval.py):
-        shows the short code + QR and writes the report folder.
+        shows the short code and writes the report folder.
         """
         setup = self._detect_setup("Evaluate")
         if setup is None:
@@ -2292,32 +2291,21 @@ class EvalDialog(QDialog):
         self.setWindowTitle("Detection Evaluation")
         self.code, self.folder, self.report = code, folder, report
         lay = QVBoxLayout(self)
-        hint = "Scan the QR with the phone camera to copy the text, or type the code below."
+        hint = "Type this code on the phone and send it (letters, digits, dots and spaces only)."
         if n_hand == 0:
             hint = ("No hand markings on the loaded layers: only detection and chip statistics are shown.\n"
-                    "Mark voids by hand (or load a reviewed voids.json) and evaluate again to compare. ") + hint
+                    "Mark voids by hand (or load a reviewed voids.json) and evaluate again to compare.\n") + hint
         lay.addWidget(QLabel(hint))
-        row = QHBoxLayout()
-        try:
-            from PySide6.QtGui import QPixmap
-            img = qr.to_qimage(qr.encode(code), scale=4)
-            lbl = QLabel()
-            lbl.setPixmap(QPixmap.fromImage(img))
-            lbl.setAlignment(Qt.AlignTop)
-            row.addWidget(lbl)
-        except ValueError:
-            row.addWidget(QLabel("(code too long for a QR)"))
         txt = QPlainTextEdit(code)
         txt.setReadOnly(True)
         f = txt.font()
         f.setFamily("Consolas")
         f.setStyleHint(f.StyleHint.Monospace)
-        f.setPointSize(13)
+        f.setPointSize(16)
         txt.setFont(f)
         txt.setLineWrapMode(QPlainTextEdit.NoWrap)
-        txt.setMinimumSize(560, 320)
-        row.addWidget(txt, 1)
-        lay.addLayout(row)
+        txt.setMinimumSize(720, 380)
+        lay.addWidget(txt, 1)
         btns = QHBoxLayout()
         b_copy = QPushButton("Copy")
         b_copy.clicked.connect(lambda: QApplication.clipboard().setText(self.code))
