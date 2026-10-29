@@ -19,8 +19,8 @@ Training recipe (from the defect-segmentation literature, e.g. DRAEM, FC-EF chan
 "simulated reference" die-to-die inspection):
 - the chip and the golden chip get independent contrast / gamma / blur / sub-pixel shift changes,
   so layout that "shows through" the difference is learnt as normal;
-- synthetic faint voids (ellipse / superellipse, soft edge, bright or dark, 1-4x the chip's noise
-  level) are pasted into the chip;
+- synthetic faint voids (ellipse / superellipse, soft edge, bright or dark, 0.3-3x the chip's
+  noise level, log-uniform) are pasted into the chip;
 - loss: focal + Dice on known pixels (the band around hand markings is left out).
 Requires: torch, numpy, Pillow, onnx (pip install torch onnx). Runs on CPU (minutes to hours).
 """
@@ -81,7 +81,7 @@ def synth_voids(m, y, rng, n_max=3):
         t = (np.abs((xx - cx) / rx) ** p + np.abs((yy - cy) / ry) ** p) ** (1.0 / p)
         soft = np.clip((1.25 - t) / 0.5, 0, 1)
         soft = _blur(soft.astype(np.float32), rng.uniform(0.5, 2.5))
-        amp = rng.uniform(1.0, 4.0) * rng.choice([-1.0, 1.0])
+        amp = math.exp(rng.uniform(math.log(0.3), math.log(3.0))) * rng.choice([-1.0, 1.0]) # Faint ones as often as clear ones
         m += amp * soft
         y[(t <= void_seg.CORE) & (y != 1)] = 1
         band = (t > void_seg.CORE) & (t <= void_seg.BAND) & (y == 0)
@@ -292,7 +292,8 @@ def main():
             sched.step()
             tot += float(loss)
         res = evaluate(model, val or train[:50], a.mode)
-        score = -res["l1"] if a.mode == "recon" else res["void_recall"] * 0.5 + res["pixel_f1"] * 0.5
+        r_, p_ = (res.get("void_recall", 0), res.get("void_precision", 0))
+        score = -res["l1"] if a.mode == "recon" else (2 * r_ * p_ / max(r_ + p_, 1e-9)) # Void F1
         if best is None or score > best[0]:
             best = (score, ep, res)
             best_state = {k: v.clone() for k, v in model.state_dict().items()}
