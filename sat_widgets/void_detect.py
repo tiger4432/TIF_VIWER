@@ -33,6 +33,7 @@ Parameters (config.json "void_detect", defaults in DEFAULTS):
     work_size        longest side of the working chip image (pixels)
     template_cells   chips used to build the golden chip
     layer_rule       "first" (default) | "last" | "strongest": layer of a spot found on several layers
+    skip_layers      absolute layer numbers not searched (default [0]: the top layer is noisy)
     smooth           averaging radius (Gaussian sigma, working px) of the deviation; 0 = pixel by
                      pixel (sharper outlines, misses large faint voids)
     type_rules       void type from the layout position and shape (sat_widgets/void_classify.py);
@@ -57,6 +58,7 @@ DEFAULTS = {
     "method": "die_to_die", # or "patchcore" (optional, sat_widgets/patchcore.py)
     "layer_rule": "first",
     "smooth": 1.5, # Averaging of the deviation (working px) for large faint voids; 0 = per pixel
+    "skip_layers": [0], # Absolute layer numbers not searched (top layer: surface echo noise)
 }
 
 
@@ -264,7 +266,10 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
         return None
 
     order = sorted(rects)
-    n_steps = len(layer_numbers) * len(order)
+    skip = {int(x) for x in (p.get("skip_layers") or [])}
+    layer_numbers = list(layer_numbers)
+    layer_z = [(z, layer) for z, layer in enumerate(layer_numbers) if layer not in skip]
+    n_steps = len(layer_z) * len(order)
     step = 0
     per_layer = {}
     found = [] # (layer, gx, gy, rx, ry, score)
@@ -277,7 +282,7 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
     if diag is not None:
         diag.setup(p, size, factor, rects, min_area, max_area, gap)
 
-    for z, layer in enumerate(layer_numbers):
+    for z, layer in layer_z:
         # 1. Aligned, normalized chips of this layer
         chips = {}
         for cell in order:

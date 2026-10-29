@@ -504,6 +504,14 @@ class MainWindow(QMainWindow):
         rule = str(self._config().get("void_detect", {}).get("layer_rule", "first")).lower()
         self.cb_layer_rule.setCurrentIndex(max(0, self.cb_layer_rule.findData(rule)))
         h_rule.addWidget(self.cb_layer_rule, 1)
+        h_rule.addWidget(QLabel("Skip layers:"))
+        self.le_skip_layers = QLineEdit()
+        self.le_skip_layers.setToolTip("Absolute layer numbers Detect Voids does not search, e.g. 0 or 0, 1\n"
+                                       "(the top layer is usually noisy: surface echo)")
+        skip = self._config().get("void_detect", {}).get("skip_layers", void_detect.DEFAULTS["skip_layers"])
+        self.le_skip_layers.setText(", ".join(map(str, skip)) if isinstance(skip, list) else str(skip))
+        self.le_skip_layers.setMaximumWidth(80)
+        h_rule.addWidget(self.le_skip_layers)
         v_layout_void.addLayout(h_rule)
         self._init_detect_method()
         
@@ -671,6 +679,7 @@ class MainWindow(QMainWindow):
             "target_std": lambda v: self.sb_target_std.setValue(float(v)),
             "void_type": void_type,
             "layer_rule": layer_rule,
+            "skip_layers": lambda v: self.le_skip_layers.setText(", ".join(map(str, v)) if isinstance(v, list) else str(v)),
             "export": lambda v: None, # Read by the export dialog when it opens
         }
 
@@ -1607,6 +1616,11 @@ class MainWindow(QMainWindow):
             params["pc_model"] = model
         params["pc_threshold" if params["method"] == "patchcore" else "threshold"] = self.sb_detect_thr.value()
         params["layer_rule"] = self.cb_layer_rule.currentData()
+        try:
+            params["skip_layers"] = [int(x) for x in re.split(r"[,\s]+", self.le_skip_layers.text().strip()) if x]
+        except ValueError:
+            QMessageBox.warning(self, title, "Skip layers: layer numbers separated by commas, e.g. 0, 1")
+            return None
         layers = [self.abs_layer(z) for z in range(len(self.full_data))]
         return type_name, cells, refs, params, layers
 

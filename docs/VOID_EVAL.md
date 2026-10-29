@@ -41,8 +41,9 @@ Y25
 | `VD1` | 코드 형식 버전 |
 | `dd` / `pcm` / `pcr` | Die-to-die / PatchCore MobileNetV2 / PatchCore ResNet50 |
 | `rf` / `rs` / `rl` | 여러 레이어에서 잡힌 자리를 마킹할 레이어: 처음(first) / 가장 강한 곳(strongest) / 마지막(last) |
+| `sk` | 검출하지 않은 레이어 (`sk0` = 0번 제외) |
 | `sm` | Die-to-die 평균화 반경 (작업 픽셀, 0 = 화소 단위) |
-| `pn` | PatchCore 위치별 정규화 사용 |
+| `pn` | PatchCore 위치별 정규화 사용 (`pc_position_norm`, 기본 꺼짐) |
 | `t` | 임계값 (Thr) |
 | `f` | 축소 배율: 작업 이미지 1픽셀 = 원본 f픽셀 |
 | `w` | 작업 이미지 긴 변 (work_size) |
@@ -86,7 +87,7 @@ Y25
 
 | 코드 | 뜻 | 대처 |
 |---|---|---|
-| `nl` | 그 레이어를 평가하지 못함 (안 불러옴, 칩 3개 미만) | 레이어 범위 확인 |
+| `nl` | 그 레이어를 검사하지 않음 (Skip layers, 안 불러옴, 칩 3개 미만) | Skip layers, 레이어 범위 확인 |
 | `ni` | 그 칸을 검사하지 않음 (본딩맵 제외 LEG) | 본딩맵 확인 |
 | `mg` | 다른 손 마킹과 한 덩어리로 잡힘 | 가까운 보이드 병합 거리 |
 | `dup` | 같은 자리를 다른 레이어에 마킹하기로 해서 건너뜀 (Mark on layer 규칙) | Mark on layer, 다른 레이어의 과검 확인 |

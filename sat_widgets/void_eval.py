@@ -31,7 +31,7 @@ SHIFT_SAMPLE = 40 # Chips per layer whose alignment is measured besides the ones
 
 # Miss reasons, in the order they are checked (first that applies)
 MISS_REASONS = {
-    "nl": "layer not evaluated (not loaded, or fewer than 3 chips)",
+    "nl": "layer not searched (skipped, not loaded, or fewer than 3 chips)",
     "ni": "cell not inspected (not in the bonding map / rejected LEG)",
     "mg": "merged into one detection with another hand marking",
     "dup": "skipped: the spot is marked on another layer (Mark on layer rule)",
@@ -364,9 +364,11 @@ class Evaluation:
         layers = sorted(self.layer_stats) or self.layers
         n_cells = len(self.rects)
         rule = {"first": "rf", "last": "rl", "strongest": "rs"}.get(p.get("layer_rule", "first"), "r" + str(p.get("layer_rule"))[:1])
+        for k in sorted(int(x) for x in (p.get("skip_layers") or [])):
+            rule += f" sk{k}"
         if p.get("method") == "die_to_die":
             rule += f" sm{_fmt(p.get('smooth', 0))}"
-        elif p.get("pc_position_norm", True):
+        elif p.get("pc_position_norm", False):
             rule += " pn"
         lines = [f"VD{VERSION} {m} {rule} t{_fmt(thr)} f{self.factor} w{max(self.size)} m{_fmt(p.get('min_size_px'))} "
                  f"c{n_cells} b{self.refs_pct} L{min(layers)}to{max(layers)} h{s['h']}" if layers else f"VD{VERSION} {m} no layers"]

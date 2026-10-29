@@ -337,8 +337,9 @@ Void Marking 패널의 **Detect Voids**는 대략적인 보이드를 자동으�
 
 - **타입 자동 구분:** layout 위치와 모양으로 타입을 정하는 규칙을 선언할 수 있습니다(아래). 규칙이 없거나 맞는 규칙이 없으면 Void Marking에서 선택한 타입(bbox 제외)으로 마킹합니다.
 - 찾은 보이드는 점선으로 그려지고, **Next Detected**로 레이어·칸 순서대로 돌아볼 수 있습니다. 수정(E)하면 실선이 됩니다. 전체 실행은 Ctrl+Z 한 번으로 되돌립니다.
-- 민감도는 Thr 칸(기본 6, 낮을수록 민감)으로 조절합니다. 나머지 값은 `config.json`의 `"void_detect"`로 바꿀 수 있습니다: `threshold`, `smooth`, `min_size_px`(가장 작은 보이드 지름), `max_area_frac`, `work_size`, `template_cells`, `layer_rule`.
+- 민감도는 Thr 칸(기본 6, 낮을수록 민감)으로 조절합니다. 나머지 값은 `config.json`의 `"void_detect"`로 바꿀 수 있습니다: `threshold`, `smooth`, `skip_layers`, `min_size_px`(가장 작은 보이드 지름), `max_area_frac`, `work_size`, `template_cells`, `layer_rule`.
 - 기준 bbox를 먼저 그리면(Detect BBOX) 칩 정렬이 정확해집니다.
+- **Skip layers**: 검출하지 않을 레이어(절대 번호, 쉼표로 구분). 기본은 `0`(맨 위 레이어는 표면 반사로 잡음이 많음). 기본값은 `config.json`의 `"void_detect": {"skip_layers": [0]}` 또는 `"ui_defaults": {"skip_layers": [0, 1]}`.
 - **Mark on layer**: 여러 레이어에서 잡힌 같은 자리를 어느 레이어에 마킹할지 고릅니다. First(위에서 처음 나온 레이어, 기본), Strongest(편차가 가장 큰 레이어), Last(가장 깊은 레이어). 기본값은 `config.json`의 `"void_detect": {"layer_rule": "last"}` 또는 `"ui_defaults": {"layer_rule": "last"}`.
 - **Evaluate**: 검출을 마킹 없이 돌려 손 마킹과 비교합니다. 놓친 것·잘못 잡은 것·크기 차이를 원인별로 휴대폰으로 입력해 보낼 수 있는 짧은 코드로 보여 주고, 칩 이미지가 든 보고서 폴더를 만듭니다. 코드 읽는 법은 [docs/VOID_EVAL.md](docs/VOID_EVAL.md).
 - 방법 상자에서 **PatchCore**(CNN 특징 기반, CPU, 선택 설치)를 고를 수도 있습니다. 검토 결과와 운영 셋업(오프라인 설치, 빌드, 설정, 임계값 보정)은 [docs/PATCHCORE.md](docs/PATCHCORE.md)를 보세요. 이 데이터에서는 기본 방식(Die-to-die)이 더 정확하고 빠릅니다.

@@ -26,7 +26,9 @@ DEFAULTS = {
     "pc_bank_chips": 64, # Other chips compared per position (speed)
     "pc_threshold": 10.0, # Score above the layer median, in MADs
     "pc_match": False, # Match brightness / contrast / shading to the golden chip first (tested: no gain)
-    "pc_position_norm": True, # Normalize each position by its own chip-to-chip spread (see score_layer)
+    "pc_position_norm": False, # Normalize each position by its own chip-to-chip spread (see score_layer).
+                               # Field data (20 chips): border false detections 57 -> 5 but found 20 -> 2
+                               # (real voids at the chip border were normalized away): off by default
 }
 
 
@@ -104,7 +106,7 @@ class PatchCore:
                 d2 = (q ** 2).sum(1)[:, None] - 2.0 * (q @ bank.T) + (bank ** 2).sum(1)[None, :]
                 d2[np.repeat(bank_ids, k)[None, :] == np.arange(N)[:, None]] = np.inf # Not itself
                 scores[:, y, x] = np.sqrt(np.maximum(d2.min(1), 0.0))
-        if self.p.get("pc_position_norm", True) and N >= 5:
+        if self.p.get("pc_position_norm", False) and N >= 5:
             # Per position: a place that scores high on every chip (chip border, layout edges that
             # shift a little from chip to chip) is normal there; only a chip standing out from the
             # others at that place counts. The spread has a floor (median spread of all positions).
