@@ -26,6 +26,7 @@ DEFAULTS = {
     "pc_bank_chips": 64, # Other chips compared per position (speed)
     "pc_threshold": 10.0, # Score above the layer median, in MADs
     "pc_match": False, # Match brightness / contrast / shading to the golden chip first (tested: no gain)
+    "pc_position_norm": True, # Normalize each position by its own chip-to-chip spread (see score_layer)
 }
 
 
@@ -103,10 +104,18 @@ class PatchCore:
                 d2 = (q ** 2).sum(1)[:, None] - 2.0 * (q @ bank.T) + (bank ** 2).sum(1)[None, :]
                 d2[np.repeat(bank_ids, k)[None, :] == np.arange(N)[:, None]] = np.inf # Not itself
                 scores[:, y, x] = np.sqrt(np.maximum(d2.min(1), 0.0))
-        med = float(np.median(scores))
-        mad = float(np.median(np.abs(scores - med))) * 1.4826 + 1e-6
+        if self.p.get("pc_position_norm", True) and N >= 5:
+            # Per position: a place that scores high on every chip (chip border, layout edges that
+            # shift a little from chip to chip) is normal there; only a chip standing out from the
+            # others at that place counts. The spread has a floor (median spread of all positions).
+            med = np.median(scores, axis=0)
+            mad = np.median(np.abs(scores - med), axis=0) * 1.4826
+            mad = np.maximum(mad, float(np.median(mad))) + 1e-6
+        else:
+            med = float(np.median(scores))
+            mad = float(np.median(np.abs(scores - med))) * 1.4826 + 1e-6
         out = {}
         for i, cell in enumerate(keys):
-            s = (scores[i] - med) / mad
+            s = ((scores[i] - med) / mad).astype(np.float32)
             out[cell] = np.asarray(Image.fromarray(s).resize(size, Image.BILINEAR))
         return out
