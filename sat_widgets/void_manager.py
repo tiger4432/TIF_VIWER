@@ -275,8 +275,19 @@ class VoidManager:
         pen.setWidthF(width)
         painter.setPen(pen)
         painter.setBrush(brush)
-        self.draw_void_shape(painter, t.get("shape", "ellipse"),
-                             cx, cy, v["radiusX"] * scale, v["radiusY"] * scale, self.p_of(v), quadrant)
+        rx, ry = v["radiusX"] * scale, v["radiusY"] * scale
+        self.draw_void_shape(painter, t.get("shape", "ellipse"), cx, cy, rx, ry, self.p_of(v), quadrant)
+        if style in ("active", "hover") and self.has_guide_box(v) and max(rx, ry) >= 1.5:
+            # Dashed box: the grab / resize area of curve and corner-snap types
+            guide = QPen(QColor(r, g, b, 170))
+            guide.setStyle(Qt.DashLine)
+            guide.setWidthF(1.0)
+            painter.setPen(guide)
+            painter.setBrush(Qt.NoBrush)
+            if quadrant:
+                painter.drawRect(QRectF(QPointF(cx, cy), QPointF(cx + quadrant[0] * rx, cy + quadrant[1] * ry)).normalized())
+            else:
+                painter.drawRect(QRectF(cx - rx, cy - ry, rx * 2, ry * 2))
 
     # -----------------------------------------------
     # Type properties
@@ -293,6 +304,18 @@ class VoidManager:
 
     def shape_of(self, v):
         return self.type_of(v).get("shape", "ellipse")
+
+    def hit_shape(self, v):
+        """
+        Shape used to pick and resize a void: curve and corner-snap types use their box (shown as a
+        dashed guide while hovered or edited) so the grab area does not depend on p or the
+        quadrant; the curve itself is still drawn. Other shapes use their outline.
+        """
+        shape = self.shape_of(v)
+        return "rectangle" if shape == "curve" or self.snap_anchor(v) is not None else shape
+
+    def has_guide_box(self, v):
+        return self.hit_shape(v) != self.shape_of(v)
 
     def p_of(self, v):
         """Curve exponent of a void (void value, else type default, else DEFAULT_P)."""
@@ -639,7 +662,7 @@ class VoidManager:
             rx = v["radiusX"]
             ry = v["radiusY"]
             
-            shape = self.shape_of(v)
+            shape = self.hit_shape(v)
             
             # Quadrant voids (center on a bbox corner): only the inward quadrant counts.
             # quadrant_ctx = (reference bboxes, grid_cfg), see quadrant_of

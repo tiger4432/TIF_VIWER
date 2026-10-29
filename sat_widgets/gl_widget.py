@@ -161,6 +161,7 @@ class TiledImage:
 class GLImageWidget(QOpenGLWidget):
     grid_params_changed = Signal()
     layer_wheel_changed = Signal(int) # Delta (+1 or -1)
+    P_STEP = 0.02 # Wheel step of the curve exponent p (Edit tool over a curve void)
     cursor_moved = Signal(int, int) # Col, Row
     navigation_requested = Signal(int, int) # Col, Row (Request to move view)
     voids_changed = Signal() # Void data edited (count labels etc.)
@@ -739,7 +740,7 @@ class GLImageWidget(QOpenGLWidget):
         v, _ = self.void_manager.hit_test(self.current_layer, gx, gy, margin=10.0/self.zoom, coord_transform=self.raw_to_deskew, quadrant_ctx=self._quadrant_ctx(), allow_bbox=self.bbox_recognized())
         if v is None or self.void_manager.shape_of(v) != "curve":
             return False
-        p = self.void_manager.set_p(v, self.void_manager.p_of(v) * (1.1 ** (delta / 120.0)))
+        p = self.void_manager.set_p(v, round(round((self.void_manager.p_of(v) + self.P_STEP * delta / 120.0) / self.P_STEP) * self.P_STEP, 4))
         QToolTip.showText(e.globalPosition().toPoint(), f"p = {p:.2f}", self)
         self.voids_changed.emit()
         self.update()
@@ -923,7 +924,7 @@ class GLImageWidget(QOpenGLWidget):
             # Stay on the edge of the previous void until clearly away from it (1.6x band)
             pv = prev[0]
             pcx, pcy = self.raw_to_deskew(pv["globalCX"], pv["globalCY"])
-            shape = vm.shape_of(pv)
+            shape = vm.hit_shape(pv)
             dist, inside = vm.boundary_distance(shape, gx - pcx, gy - pcy, pv["radiusX"], pv["radiusY"],
                                                 vm.p_of(pv) if shape == "curve" else 2.0)
             if (any(pv is x for x in vm.voids.get(self.current_layer, [])) and dist <= 1.6 * margin and (v is None or v is pv)
@@ -987,7 +988,7 @@ class GLImageWidget(QOpenGLWidget):
         direction (hysteresis).
         """
         vm = self.void_manager
-        shape = vm.shape_of(v)
+        shape = vm.hit_shape(v)
         p = vm.p_of(v) if shape == "curve" else 2.0
         cx, cy = self.raw_to_deskew(v["globalCX"], v["globalCY"])
         ux = abs(gx - cx) / max(v["radiusX"], 1e-9)
@@ -1433,7 +1434,7 @@ class GLImageWidget(QOpenGLWidget):
           ("quadrant").
         """
         vm = self.void_manager
-        shape = vm.shape_of(v)
+        shape = vm.hit_shape(v) # Curve / snap types: their box
         p = vm.p_of(v) if shape == "curve" else 2.0
         cx, cy = self.raw_to_deskew(v["globalCX"], v["globalCY"])
         rx, ry = v["radiusX"], v["radiusY"]
