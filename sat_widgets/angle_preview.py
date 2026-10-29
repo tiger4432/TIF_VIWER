@@ -13,7 +13,9 @@ smaller grid side), declared in config.json (defaults below):
     }
 
 angle: degrees counter-clockwise from +x (screen right), r: fraction of the wafer radius.
-With a bonding map the nearest bonded cell is used, so edge cells without a chip are skipped.
+Positions come from the whole grid (the bonding map is not used). Each patch is centered on the
+grid line crossing nearest to its point, marked with a red cross: four chip corners meet there,
+so a wrong angle or origin shows as the streets missing the cross.
 """
 import math
 import time
@@ -37,32 +39,22 @@ DEFAULT_POINTS = [
 DEFAULT_VIEW_SCALE = 1.4 # Patch size in cell pitches
 
 
-def preview_cells(grid_cfg, points, bonding_map=None):
-    """[(name, row, col)] for the declared polar points on the wafer circle."""
+def preview_points(grid_cfg, points):
+    """
+    [(name, row line, col line)] for the declared polar points on the wafer circle of the whole
+    grid: the grid line crossing nearest to each point (lines 0 .. rows / 0 .. cols).
+    """
     w, h = grid_cfg.cols * grid_cfg.pitch_x, grid_cfg.rows * grid_cfg.pitch_y
     cx, cy = grid_cfg.start_x + w / 2.0, grid_cfg.start_y + h / 2.0
     radius = min(w, h) / 2.0
-
-    bonded = None
-    if bonding_map is not None:
-        bonded = [(r, c) for r in range(grid_cfg.rows) for c in range(grid_cfg.cols) if bonding_map.get_key(r, c)]
-
     out = []
     for pt in points:
         a = math.radians(pt.get("angle", 0.0))
         px = cx + pt.get("r", 0.0) * radius * math.cos(a)
         py = cy - pt.get("r", 0.0) * radius * math.sin(a) # Screen y points down
-        if bonded:
-            def dist(rc):
-                ccx = grid_cfg.start_x + (rc[1] + 0.5) * grid_cfg.pitch_x
-                ccy = grid_cfg.start_y + (rc[0] + 0.5) * grid_cfg.pitch_y
-                return (ccx - px) ** 2 + (ccy - py) ** 2
-            row, col = min(bonded, key=dist)
-        else:
-            row, col = grid_cfg.cell_at(px, py)
-            row = min(max(row, 0), grid_cfg.rows - 1)
-            col = min(max(col, 0), grid_cfg.cols - 1)
-        out.append((pt.get("name", ""), row, col))
+        kc = min(max(int(round((px - grid_cfg.start_x) / grid_cfg.pitch_x)), 0), grid_cfg.cols)
+        kr = min(max(int(round((py - grid_cfg.start_y) / grid_cfg.pitch_y)), 0), grid_cfg.rows)
+        out.append((pt.get("name", ""), kr, kc))
     return out
 
 
@@ -253,18 +245,19 @@ class AnglePreview(QWidget):
                 self._reader.done.connect(lambda key, res, r=self._reader: self._on_region(r, key, res))
         grid = glw.grid_cfg
         points, view_scale = self._settings()
-        cells = preview_cells(grid, points, glw.bonding_map)
-        while len(self.tiles) < len(cells):
+        crossings = preview_points(grid, points)
+        while len(self.tiles) < len(crossings):
             self._add_tile()
 
         refs = mw.void_manager.reference_bboxes(grid, glw.coord_transform)
-        for tile, (name, row, col) in zip(self.tiles, cells):
-            out = self._render(stack, mw.current_z, grid, row, col, view_scale, refs, tile.side())
-            title = f"{name}  (X{col:02d}, Y{row:02d})"
+        for tile, (name, kr, kc) in zip(self.tiles, crossings):
+            out = self._render(stack, mw.current_z, grid, kr, kc, view_scale, refs, tile.side())
+            title = f"{name}  (X{kc:02d}|Y{kr:02d})"
+            cell = (min(kr, grid.rows - 1), min(kc, grid.cols - 1)) # Click: a cell at the crossing
             if out is None: # Region still loading in the background
-                tile.set_loading(title + "  loading...", (row, col))
+                tile.set_loading(title + "  loading...", cell)
             else:
-                tile.set_content(title, (row, col), out[0])
+                tile.set_content(title, cell, out[0])
         ms = (time.perf_counter() - t0) * 1000.0
         self.last_refresh_ms = ms
         self.info.setText(f"Angle {grid.angle:.3f}°  |  {ms:.0f} ms  |  grid lines should run along the chip edges. Click a patch to go there.")
@@ -304,10 +297,11 @@ class AnglePreview(QWidget):
         self.schedule_update()
 
     def _render(self, stack, z, grid, row, col, view_scale, refs, size):
+        """Patch centered on the crossing of grid lines row (y) and col (x)."""
         glw = self.mw.glw
         half = 0.5 * view_scale * max(grid.pitch_x, grid.pitch_y)
-        cx = grid.start_x + (col + 0.5) * grid.pitch_x
-        cy = grid.start_y + (row + 0.5) * grid.pitch_y
+        cx = grid.start_x + col * grid.pitch_x
+        cy = grid.start_y + row * grid.pitch_y
         x0, y0 = cx - half, cy - half # Patch top-left (Deskewed)
 
         # Deskewed square -> raw quad (TL, TR, BR, BL), like the main view
@@ -342,20 +336,21 @@ class AnglePreview(QWidget):
         p.setPen(pen)
         gx_end = grid.start_x + grid.cols * grid.pitch_x
         gy_end = grid.start_y + grid.rows * grid.pitch_y
-        for k in range(col - 2, col + 4):
+        for k in range(col - 3, col + 4):
             x = grid.start_x + k * grid.pitch_x
             if 0 <= k <= grid.cols and x0 <= x <= x0 + 2 * half:
                 p.drawLine(QPointF((x - x0) * sx, (max(y0, grid.start_y) - y0) * sy),
                            QPointF((x - x0) * sx, (min(y0 + 2 * half, gy_end) - y0) * sy))
-        for k in range(row - 2, row + 4):
+        for k in range(row - 3, row + 4):
             y = grid.start_y + k * grid.pitch_y
             if 0 <= k <= grid.rows and y0 <= y <= y0 + 2 * half:
                 p.drawLine(QPointF((max(x0, grid.start_x) - x0) * sx, (y - y0) * sy),
                            QPointF((min(x0 + 2 * half, gx_end) - x0) * sx, (y - y0) * sy))
 
-        # Reference bbox and product layout of this cell
-        bbox = refs.get((row, col))
-        if bbox is not None:
+        # Reference bboxes and product layout of the cells around the crossing
+        for bbox in (refs.get((r, c)) for r in (row - 1, row) for c in (col - 1, col)):
+            if bbox is None:
+                continue
             bx, by, bw, bh = bbox
             pen = QPen(QColor(255, 255, 255, 230))
             pen.setWidth(1)
@@ -371,12 +366,14 @@ class AnglePreview(QWidget):
                     p.drawRect(QRectF((bx + lx * bw / dw - x0) * sx, (by + ly * bh / dh - y0) * sy,
                                       lw * bw / dw * sx, lh * bh / dh * sy))
 
-        # Cell center cross
-        pen = QPen(QColor(255, 0, 0, 200))
-        pen.setWidthF(1.0)
+        # Grid crossing at the patch center
+        pen = QPen(QColor(255, 0, 0, 230))
+        pen.setWidth(1)
         p.setPen(pen)
         ccx, ccy = (cx - x0) * sx, (cy - y0) * sy
-        p.drawLine(QPointF(ccx - 8, ccy), QPointF(ccx + 8, ccy))
-        p.drawLine(QPointF(ccx, ccy - 8), QPointF(ccx, ccy + 8))
+        arm, gap = max(8.0, 0.15 * size), 3.0 # Open center: the street crossing stays visible
+        for d in (-1, 1):
+            p.drawLine(QPointF(ccx + d * gap, ccy), QPointF(ccx + d * arm, ccy))
+            p.drawLine(QPointF(ccx, ccy + d * gap), QPointF(ccx, ccy + d * arm))
         p.end()
         return QPixmap.fromImage(img), did_read
