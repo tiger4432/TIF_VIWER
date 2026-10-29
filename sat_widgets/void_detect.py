@@ -59,6 +59,7 @@ DEFAULTS = {
     "layer_rule": "first",
     "smooth": 1.5, # Averaging of the deviation (working px) for large faint voids; 0 = per pixel
     "skip_layers": [0], # Absolute layer numbers not searched (top layer: surface echo noise)
+    "layout_fit": True, # Fit away per-chip layout contrast / sharpness (see _LayoutFit)
 }
 
 
@@ -208,6 +209,47 @@ class _Matcher:
             c0, c1, c2, d0, d1, d2 = (float(k) for k in coef)
             shade = c0 + c1 * self.fx + c2 * self.fy + (d0 + d1 * self.fx + d2 * self.fy) * self.gc
         return (self._map(c, xs, ys) - shade).reshape(chip.shape).astype(np.float32)
+
+
+class _LayoutFit:
+    """
+    Removes what the golden chip explains from a matched chip: per chip, the layout may be drawn
+    with another contrast or sharpness (focus), varying across the chip. The difference to the
+    golden chip is fitted (robust least squares) with
+      golden * w_j                       contrast of the layout,
+      (blur_s(golden) - golden) * w_j    sharpness, s = 1, 2, 4 working px,
+      w_j                                brightness,
+    where w_j are 4 bilinear weights over the chip (corners), so the fit may vary smoothly across
+    it. A void is not in the golden chip and is local, so it stays in the remainder.
+    """
+    SIGMAS = (1.0, 2.0, 4.0)
+
+    def __init__(self, golden):
+        self.golden = golden
+        h, w = golden.shape
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+        u, v = (xx / max(w - 1, 1)).ravel(), (yy / max(h - 1, 1)).ravel()
+        weights = [(1 - u) * (1 - v), u * (1 - v), (1 - u) * v, u * v]
+        g = golden.ravel() - float(golden.mean())
+        bases = [g] + [(_blur(golden, s) - golden).ravel() for s in self.SIGMAS] + [np.ones_like(g)]
+        self.X = np.stack([b * wj for b in bases for wj in weights], axis=1).astype(np.float32)
+        self.sub = np.arange(0, g.size, 2) # Fit on a subsample (speed)
+
+    def apply(self, m):
+        r = (m - self.golden).ravel()
+        X, sub = self.X, self.sub
+        keep = sub
+        coef = None
+        for _ in range(3):
+            Xk = X[keep]
+            A = Xk.T @ Xk + np.eye(X.shape[1], dtype=np.float32) * 1e-3
+            coef = np.linalg.solve(A, Xk.T @ r[keep])
+            res = r[sub] - X[sub] @ coef
+            mad = float(np.median(np.abs(res))) * 1.4826 + 1e-6
+            keep = sub[np.abs(res) < 3.0 * mad] # Voids and other outliers do not steer the fit
+            if keep.size < X.shape[1] * 4:
+                break
+        return (m.ravel() - X @ coef).reshape(m.shape).astype(np.float32)
 
 
 def _filt(a, f):
@@ -426,6 +468,14 @@ def _golden(chips, p):
     match0 = _Matcher(golden0)
     matched = np.stack([match0.apply(chips[k].astype(np.float32)) for k in sample])
     golden = np.median(matched, axis=0)
+    fit = None
+    if p.get("layout_fit", True):
+        # Layout drawn with another contrast / sharpness per chip: fitted away (see _LayoutFit)
+        fit = _LayoutFit(golden)
+        matched = np.stack([fit.apply(mc) for mc in matched])
+        golden = np.median(matched, axis=0)
+        fit = _LayoutFit(golden)
+        matched = np.stack([fit.apply(mc) for mc in matched])
     # Per-pixel chip-to-chip spread of the matched chips (larger at layout edges)
     spread = np.median(np.abs(matched - golden), axis=0) * 1.4826
     del matched
@@ -435,7 +485,9 @@ def _golden(chips, p):
     # not a defect (1 px shifts, slightly different edges)
     gmin = _filt(golden, ImageFilter.MinFilter(3))
     gmax = _filt(golden, ImageFilter.MaxFilter(3))
-    return spread, gmin, gmax, _Matcher(golden)
+    match = _Matcher(golden)
+    match.fit = fit
+    return spread, gmin, gmax, match
 
 
 def _blur(a, sigma):
@@ -469,6 +521,8 @@ def _die_to_die(chips, p, diag=None):
 
     def signed(cell):
         m = match.apply(chips[cell].astype(np.float32))
+        if match.fit is not None:
+            m = match.fit.apply(m)
         if sigma > 0:
             # Averaged path: the plain difference (noise stays near-Gaussian when averaged; the
             # 3x3 envelope would leave sparse spikes whose average is heavy-tailed). Layout edges

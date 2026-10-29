@@ -367,7 +367,7 @@ class Evaluation:
         for k in sorted(int(x) for x in (p.get("skip_layers") or [])):
             rule += f" sk{k}"
         if p.get("method") == "die_to_die":
-            rule += f" sm{_fmt(p.get('smooth', 0))}"
+            rule += f" sm{_fmt(p.get('smooth', 0))}" + (" lf" if p.get("layout_fit", True) else "")
         elif p.get("pc_position_norm", False):
             rule += " pn"
         lines = [f"VD{VERSION} {m} {rule} t{_fmt(thr)} f{self.factor} w{max(self.size)} m{_fmt(p.get('min_size_px'))} "

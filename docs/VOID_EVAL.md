@@ -43,6 +43,7 @@ Y25
 | `rf` / `rs` / `rl` | 여러 레이어에서 잡힌 자리를 마킹할 레이어: 처음(first) / 가장 강한 곳(strongest) / 마지막(last) |
 | `sk` | 검출하지 않은 레이어 (`sk0` = 0번 제외) |
 | `sm` | Die-to-die 평균화 반경 (작업 픽셀, 0 = 화소 단위) |
+| `lf` | Die-to-die 레이아웃 맞춤 사용 (칩마다 다른 레이아웃 대비·선명도를 golden으로 맞춰 제거, `layout_fit`) |
 | `pn` | PatchCore 위치별 정규화 사용 (`pc_position_norm`, 기본 꺼짐) |
 | `t` | 임계값 (Thr) |
 | `f` | 축소 배율: 작업 이미지 1픽셀 = 원본 f픽셀 |
