@@ -364,6 +364,10 @@ class Evaluation:
         layers = sorted(self.layer_stats) or self.layers
         n_cells = len(self.rects)
         rule = {"first": "rf", "last": "rl", "strongest": "rs"}.get(p.get("layer_rule", "first"), "r" + str(p.get("layer_rule"))[:1])
+        if p.get("method") == "die_to_die":
+            rule += f" sm{_fmt(p.get('smooth', 0))}"
+        elif p.get("pc_position_norm", True):
+            rule += " pn"
         lines = [f"VD{VERSION} {m} {rule} t{_fmt(thr)} f{self.factor} w{max(self.size)} m{_fmt(p.get('min_size_px'))} "
                  f"c{n_cells} b{self.refs_pct} L{min(layers)}to{max(layers)} h{s['h']}" if layers else f"VD{VERSION} {m} no layers"]
         R = round(100 * s["ok"] / s["h"]) if s["h"] else None

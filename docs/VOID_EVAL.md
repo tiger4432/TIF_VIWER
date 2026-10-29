@@ -21,7 +21,7 @@
 예:
 
 ```
-VD1 dd rf t6 f8 w256 m8 c412 b100 L0to11 h47
+VD1 dd rf sm1.5 t6 f8 w256 m8 c412 b100 L0to11 h47
 T ok31 ly3 ms13 fp9 R66 P72
 L0 h9 ok8 ms1 fp2 bt1 pk.6 n412 s1.2 r.9 a3 x.7
 L11 h12 ok1 ms11 bt8 dup3 pk.3 n412 s2.8 r2.1 a4 x1.4
@@ -41,6 +41,8 @@ Y25
 | `VD1` | 코드 형식 버전 |
 | `dd` / `pcm` / `pcr` | Die-to-die / PatchCore MobileNetV2 / PatchCore ResNet50 |
 | `rf` / `rs` / `rl` | 여러 레이어에서 잡힌 자리를 마킹할 레이어: 처음(first) / 가장 강한 곳(strongest) / 마지막(last) |
+| `sm` | Die-to-die 평균화 반경 (작업 픽셀, 0 = 화소 단위) |
+| `pn` | PatchCore 위치별 정규화 사용 |
 | `t` | 임계값 (Thr) |
 | `f` | 축소 배율: 작업 이미지 1픽셀 = 원본 f픽셀 |
 | `w` | 작업 이미지 긴 변 (work_size) |
