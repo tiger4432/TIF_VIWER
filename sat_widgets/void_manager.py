@@ -449,6 +449,18 @@ class VoidManager:
         self.voids[layer].append(new_void)
         return new_void
 
+    def place_void(self, layer, gx, gy, rx, ry, type_name, grid_cfg, coord_transform=None, hint=None, drag_point=None):
+        """
+        A marking as drawn by hand: Raw center (gx, gy), half sizes, then attached to the bbox corner
+        for snap types (hint / drag_point in Deskewed space, see snap_void). Used for clicks with a
+        declared size and for automatic detection alike, so both give the same kind of void.
+        """
+        v = self.add_void(int(layer), float(gx), float(gy), float(rx), float(ry), type_name)
+        self.snap_void(v, grid_cfg, coord_transform, hint=hint, drag_point=drag_point)
+        for k in ("globalCX", "globalCY", "radiusX", "radiusY"):
+            v[k] = float(v[k])
+        return v
+
     def remove_void(self, layer, void):
         """Removes this exact void object (identity, not value equality). Returns True if removed."""
         v_list = self.voids.get(layer, [])

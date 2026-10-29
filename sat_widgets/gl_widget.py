@@ -1,5 +1,4 @@
 import sys
-import math
 import time
 import ctypes
 import numpy as np
@@ -1213,44 +1212,24 @@ class GLImageWidget(QOpenGLWidget):
                         def_w = 0
                         def_h = 0
                         
-                        shape = "ellipse"
                         if self.active_type in self.void_manager.types:
                              tdata = self.void_manager.types[self.active_type]
-                             shape = tdata.get("shape", "ellipse")
                              def_w = tdata.get("def_w", 0)
                              def_h = tdata.get("def_h", 0)
                         
                         is_sizing = (def_w <= 0 or def_h <= 0)
                         
                         if not is_sizing:
-                            # Predefined Size (Click-to-Draw)
-                            # Size is Width/Height in Deskewed Frame (Grid Axes)
-                            # Stored as radiusX/radiusY
-                            
-                            if shape == "rectangle":
-                                # Rectangle: Center/Radius Logic (Unified)
-                                # Click Point = Top-Left of Box -> Calculate Center
-                                cx_deskew = gx + def_w / 2.0
-                                cy_deskew = gy + def_h / 2.0
-                                cx_raw, cy_raw = self.deskew_to_raw(cx_deskew, cy_deskew)
-                                
-                                # Store Center. radiusX = Half-Width
-                                self.active_void = self.void_manager.add_void(self.current_layer, cx_raw, cy_raw, def_w/2.0, def_h/2.0, self.active_type)
-                            else:
-                                # Ellipse: Schema Center, Radius
-                                # Click Point = Top-Left of Bounding Box
-                                # So Center (Deskewed) = gx + w/2, gy + h/2.
-                                # We need Center (Raw).
-                                cx_deskew = gx + def_w / 2.0
-                                cy_deskew = gy + def_h / 2.0
-                                cx_raw, cy_raw = self.deskew_to_raw(cx_deskew, cy_deskew)
-                                
-                                self.active_void = self.void_manager.add_void(self.current_layer, cx_raw, cy_raw, def_w/2.0, def_h/2.0, self.active_type)
-                                
-                            # Snap types: attach to the bbox corner nearest to the click
+                            # Predefined Size (Click-to-Draw): the click is the top-left corner
+                            # of the box in the Deskewed frame (grid axes); stored as Raw center
+                            # + half sizes. Snap types attach to the bbox corner nearest the click.
+                            # Same placement as automatic detection (VoidManager.place_void).
+                            cx_raw, cy_raw = self.deskew_to_raw(gx + def_w / 2.0, gy + def_h / 2.0)
                             self._snap_hint = (gx, gy)
-                            self.void_manager.snap_void(self.active_void, self.grid_cfg, self.coord_transform, hint=self._snap_hint)
-                            
+                            self.active_void = self.void_manager.place_void(
+                                self.current_layer, cx_raw, cy_raw, def_w / 2.0, def_h / 2.0, self.active_type,
+                                self.grid_cfg, self.coord_transform, hint=self._snap_hint)
+
                             # Switch to Move mode immediately
                             self.active_void_action = 'center'
                             
@@ -1442,28 +1421,14 @@ class GLImageWidget(QOpenGLWidget):
         self._last_mouse = e.position()
         self.update()
 
-    def _resize_anchor_for(self, v, gx, gy):
-        """
-        Fixed opposite side(s) for resizing from the Deskewed grab point: (fixed x or None,
-        fixed y or None). Near a corner both axes resize, near a side only that axis.
-        """
-        cx, cy = self.raw_to_deskew(v["globalCX"], v["globalCY"])
-        rx, ry = v["radiusX"], v["radiusY"]
-        nx, ny = (gx - cx) / max(rx, 1e-6), (gy - cy) / max(ry, 1e-6)
-        use_x = abs(nx) >= 0.5 * max(abs(nx), abs(ny))
-        use_y = abs(ny) >= 0.5 * max(abs(nx), abs(ny))
-        fx = cx - math.copysign(rx, nx) if use_x else None
-        fy = cy - math.copysign(ry, ny) if use_y else None
-        return fx, fy
-
     def _make_resize_plan(self, v, gx, gy):
         """
         How a drag from the grab point (Deskewed gx, gy) on the outline resizes the void, so the
-        outline follows the mouse:
-        - rectangle: grabbed side(s) move, the opposite side(s) stay ("axes");
-        - ellipse / curve near the end of an axis: only that axis, opposite end fixed ("axes");
-        - ellipse / curve on the curved part: uniform scaling about the opposite outline point
-          ("uniform");
+        grabbed outline point follows the mouse. The center stays (the void does not shift
+        towards the drag; the opposite side moves symmetrically):
+        - rectangle: grabbed side(s) ("axes");
+        - ellipse / curve near the end of an axis: only that axis ("axes");
+        - ellipse / curve on the curved part: uniform scaling ("uniform");
         - quadrant voids (center on a bbox corner): the corner stays; x end / y end / arc
           ("quadrant").
         """
@@ -1487,14 +1452,11 @@ class GLImageWidget(QOpenGLWidget):
 
         if q:
             return {"kind": "quadrant", "q": q, "c": (cx, cy), "r0": (rx, ry), "p": p, "axis": axis, "shape": shape}
+        if shape == "rectangle" or axis is not None:
+            return {"kind": "axes", "c": (cx, cy), "x": axis in (None, "x"), "y": axis in (None, "y")}
         sx = 1.0 if dx >= 0 else -1.0
         sy = 1.0 if dy >= 0 else -1.0
-        if shape == "rectangle" or axis is not None:
-            fx = cx - sx * rx if axis in (None, "x") else None
-            fy = cy - sy * ry if axis in (None, "y") else None
-            return {"kind": "axes", "fixed": (fx, fy), "c": (cx, cy)}
-        return {"kind": "uniform", "c0": (cx, cy), "r0": (rx, ry),
-                "B": (cx + sx * rx * bx, cy + sy * ry * by), "P": (cx - sx * rx * bx, cy - sy * ry * by)}
+        return {"kind": "uniform", "c": (cx, cy), "r0": (rx, ry), "B": (sx * rx * bx, sy * ry * by)}
 
     def _apply_resize(self, v, gx, gy):
         """Resizes v following the mouse (Deskewed gx, gy) according to the plan from the press."""
@@ -1502,24 +1464,17 @@ class GLImageWidget(QOpenGLWidget):
         if plan is None:
             return
         kind = plan["kind"]
-        if kind == "axes":
-            cx, cy = self.raw_to_deskew(v["globalCX"], v["globalCY"])
-            fx, fy = plan["fixed"]
-            if fx is not None:
-                cx = (fx + gx) / 2.0
-                v["radiusX"] = max(1.0, abs(gx - fx) / 2.0)
-            if fy is not None:
-                cy = (fy + gy) / 2.0
-                v["radiusY"] = max(1.0, abs(gy - fy) / 2.0)
-            v["globalCX"], v["globalCY"] = self.deskew_to_raw(cx, cy)
-        elif kind == "uniform":
-            (px, py), (bx, by) = plan["P"], plan["B"]
-            (c0x, c0y), (r0x, r0y) = plan["c0"], plan["r0"]
-            vx, vy = bx - px, by - py
-            s = ((gx - px) * vx + (gy - py) * vy) / max(vx * vx + vy * vy, 1e-9)
+        if kind == "axes": # Center fixed: the grabbed side follows the mouse
+            cx, cy = plan["c"]
+            if plan["x"]:
+                v["radiusX"] = max(1.0, abs(gx - cx))
+            if plan["y"]:
+                v["radiusY"] = max(1.0, abs(gy - cy))
+        elif kind == "uniform": # Center fixed: scale so the grabbed point follows the mouse
+            (cx, cy), (bx, by), (r0x, r0y) = plan["c"], plan["B"], plan["r0"]
+            s = ((gx - cx) * bx + (gy - cy) * by) / max(bx * bx + by * by, 1e-9)
             s = max(s, 1.0 / max(min(r0x, r0y), 1e-9))
             v["radiusX"], v["radiusY"] = r0x * s, r0y * s
-            v["globalCX"], v["globalCY"] = self.deskew_to_raw(px + (c0x - px) * s, py + (c0y - py) * s)
         else: # quadrant: the corner (center) stays
             (cx, cy), (qx, qy), (r0x, r0y) = plan["c"], plan["q"], plan["r0"]
             mx = max(0.0, (gx - cx) * qx)

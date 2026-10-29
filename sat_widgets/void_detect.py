@@ -345,18 +345,20 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
     vm.begin_change()
     try:
         for layer, gx, gy, rx, ry, score, vtype, cell, extent in found:
-            v = vm.add_void(layer, *to_raw(gx, gy), rx, ry, vtype)
-            v["auto"] = "detected"
-            v["score"] = round(score, 1)
-            if vm.snap_anchor(v) is not None:
-                # Corner-anchored types: attach to the bbox corner nearest the blob, sized to its
-                # far extent corner (like drawing it from the corner)
+            # Placed like a hand marking (same function as a click). Corner-anchored types attach
+            # to the bbox corner nearest the blob, sized to its far extent corner (like drawing
+            # it from the corner).
+            far = None
+            if vm.snap_anchor({"type": vtype}) is not None:
                 bx, by, bw, bh = rects[cell]
                 kx, ky = min(((bx, by), (bx + bw, by), (bx + bw, by + bh), (bx, by + bh)),
                              key=lambda k: math.hypot(k[0] - gx, k[1] - gy))
                 far = max(((extent[0], extent[1]), (extent[2], extent[1]), (extent[2], extent[3]), (extent[0], extent[3])),
                           key=lambda q: math.hypot(q[0] - kx, q[1] - ky))
-                vm.snap_void(v, grid_cfg, coord_transform, hint=(gx, gy), drag_point=far)
+            v = vm.place_void(layer, *to_raw(gx, gy), rx, ry, vtype, grid_cfg, coord_transform,
+                              hint=(gx, gy), drag_point=far)
+            v["auto"] = "detected" # Only the dashed outline until reviewed (any edit clears it)
+            v["score"] = round(float(score), 1)
             types[vtype] = types.get(vtype, 0) + 1
     finally:
         vm.end_change()
