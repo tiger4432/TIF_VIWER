@@ -745,8 +745,9 @@ class MainWindow(QMainWindow):
             w, h = declared.get("def_w", 0.0), declared.get("def_h", 0.0)
         t = self.void_manager.types[name]
         t["def_w"], t["def_h"] = float(w), float(h)
-        # Existing bboxes follow the product size (centers kept)
+        # Existing bboxes follow the product size (centers kept); corner voids follow the bboxes
         if self.void_manager.apply_bbox_size():
+            self.void_manager.resnap(self.glw.grid_cfg, self.glw.coord_transform)
             self.glw.update()
 
     def on_scale_changed(self, value):
@@ -1372,9 +1373,16 @@ class MainWindow(QMainWindow):
             return not progress.wasCanceled()
 
         top_layer = self.abs_layer(0)
-        result = place_bboxes(self.full_data, 0, top_layer, cfg, self.glw.coord_transform, self.void_manager,
-                              tid, size, cells, self._config().get("auto_bbox"), step)
-        progress.close()
+        vm = self.void_manager
+        vm.begin_change() # One undo step with the corner voids following the new bboxes
+        try:
+            result = place_bboxes(self.full_data, 0, top_layer, cfg, self.glw.coord_transform, vm,
+                                  tid, size, cells, self._config().get("auto_bbox"), step)
+            if result is not None:
+                vm.resnap(cfg, self.glw.coord_transform)
+        finally:
+            vm.end_change()
+            progress.close()
         if result is None:
             return
         self.glw.update()

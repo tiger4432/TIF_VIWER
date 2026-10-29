@@ -244,6 +244,7 @@ WF Product 묶음에 연 파일 이름(**File**)과 **Wafer ID** 칸이 있습�
 - 이전 형식(`"bbox": {"w", "h"}` 픽셀 + `layout.design_size`)도 그대로 읽습니다.
 - bbox 크기는 **제품마다** 다르게 적습니다(`chip_size_um` 또는 `bbox`). 제품을 바꾸면 bbox 타입의 기본 크기(그리기, Detect BBOX)가 그 제품 값으로 바뀌고, 둘 다 없는 제품은 `config.json`의 bbox 타입 크기로 돌아갑니다.
 - bbox 크기는 **항상 선택한 제품 크기**를 따릅니다. 이미 그린 bbox도 제품·Scale을 바꾸면 중심은 그대로 두고 크기만 바뀌고, voids.json·프로젝트·API에서 불러온 bbox도 저장된 크기 대신 **중심 좌표만** 쓰고 제품 크기로 그립니다. bbox는 손으로 크기를 조절할 수 없고(가장자리를 잡아도 이동), 크기가 정해지지 않은 경우(Scale 없음, 크기 선언 없음)에만 처음 그릴 때 드래그로 크기를 정합니다.
+- bbox 코너에 붙은 마킹(`snap: "bbox_corner"`)은 bbox를 따라갑니다. bbox를 옮기면 모든 레이어의 그 bbox 코너 마킹이 같이 움직이고(되돌리기 한 번), bbox 크기가 바뀌거나(제품·Scale·불러오기) Detect BBOX로 다시 그려지면 가장 가까운 코너에 다시 붙습니다.
 
 ### 축척 (Scale)
 

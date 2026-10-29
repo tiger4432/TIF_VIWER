@@ -201,6 +201,7 @@ class GLImageWidget(QOpenGLWidget):
         self._snap_hint = None # Snap types: press point while drawing (bbox corner nearest to it)
         self._snap_drag_point = None # Snap types: last mouse point while drawing (size on release)
         self._free_quadrant = None # Center-anchored snap type being drawn: quadrant press -> mouse
+        self._bbox_followers = [] # Corner voids attached to the bbox being moved (they move along)
         self._resize_plan = None
         self._pan_only = False
         
@@ -1259,6 +1260,8 @@ class GLImageWidget(QOpenGLWidget):
                         self.active_void_action = action # 'center' or 'edge'
                         v.pop("auto", None) # Reviewed by hand (no longer "estimated")
                         self._snap_hint = None # Snap types re-attach when the mouse is released
+                        if action == 'center' and self.void_manager.is_bbox(v):
+                            self._bbox_followers = self.void_manager.snapped_to(v, self.grid_cfg, self.coord_transform)
                         if action == 'edge':
                             self._resize_plan = self._make_resize_plan(v, gx, gy)
                         self.update()
@@ -1343,6 +1346,9 @@ class GLImageWidget(QOpenGLWidget):
                  
                  self.active_void["globalCX"] += raw_dx
                  self.active_void["globalCY"] += raw_dy
+                 for f in self._bbox_followers: # Corner voids move with their bbox
+                     f["globalCX"] += raw_dx
+                     f["globalCY"] += raw_dy
                  # Snap types move freely; they re-attach when the mouse is released
                  self.update()
                  
@@ -1533,6 +1539,9 @@ class GLImageWidget(QOpenGLWidget):
         v, action = self.active_void, self.active_void_action
         drag, hint = self._snap_drag_point, self._snap_hint
         self._snap_drag_point = self._free_quadrant = None
+        followers, self._bbox_followers = self._bbox_followers, []
+        if followers: # Corner voids of a moved bbox: exactly on its corners again
+            self.void_manager.resnap(self.grid_cfg, self.coord_transform, followers)
         if v is None or action not in ('sizing', 'center', 'edge') or self.void_manager.snap_anchor(v) is None:
             return
         if action == 'sizing' and drag is not None:

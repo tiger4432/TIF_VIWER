@@ -613,6 +613,30 @@ class VoidManager:
         self.touch()
         return True
 
+    def snapped_to(self, bbox_void, grid_cfg, coord_transform=None):
+        """Snap-type voids (all layers) attached to the reference bbox drawn by bbox_void."""
+        to_deskew = coord_transform.raw_to_deskew if coord_transform else (lambda x, y: (x, y))
+        cx, cy = to_deskew(bbox_void["globalCX"], bbox_void["globalCY"])
+        rect = (cx - bbox_void["radiusX"], cy - bbox_void["radiusY"], 2 * bbox_void["radiusX"], 2 * bbox_void["radiusY"])
+        refs = self.reference_bboxes(grid_cfg, coord_transform)
+        same = lambda b: b is not None and all(abs(b[i] - rect[i]) < 1e-6 for i in range(4))
+        if not any(same(b) for b in refs.values()):
+            return [] # Not the reference bbox of its cell (e.g. a lower layer's)
+        out = []
+        for vs in self.voids.values():
+            for v in vs:
+                if self.snap_anchor(v) is not None and same(self.bbox_at(refs, grid_cfg, *to_deskew(v["globalCX"], v["globalCY"]))):
+                    out.append(v)
+        return out
+
+    def resnap(self, grid_cfg, coord_transform=None, voids=None):
+        """Re-attaches snap-type voids (default: all) to the nearest corner of their bbox (after bboxes moved / resized)."""
+        if voids is None:
+            voids = [v for vs in self.voids.values() for v in vs if self.snap_anchor(v) is not None]
+        for v in voids:
+            self.snap_void(v, grid_cfg, coord_transform)
+        return len(voids)
+
     def snap_corner_point(self, v, grid_cfg, coord_transform=None):
         """Deskewed bbox corner a snap-type void is currently attached to (None if not snapping)."""
         if self.snap_anchor(v) is None:
@@ -1025,7 +1049,8 @@ class VoidManager:
             self.voids[layer].append(v_obj)
             count += 1
         # Bboxes: only the center is taken from the data, the size follows the selected product
-        self.apply_bbox_size()
+        if self.apply_bbox_size():
+            self.resnap(grid_cfg, coord_transform) # Corner voids follow the resized bboxes
         return count
 
 
