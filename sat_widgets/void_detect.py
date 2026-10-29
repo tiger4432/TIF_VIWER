@@ -387,6 +387,13 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
     max_area = p["max_area_frac"] * size[0] * size[1]
     gap = max(2, int(round(0.05 * max(size))))
     pc = None
+    # Learned filter (sat_widgets/void_learn.py): candidates scored by a model trained from hand
+    # markings replace the threshold; "learn" collects the candidates for training instead
+    model, collect = p.get("learned_model"), p.get("learn")
+    learned = (model is not None or collect is not None) and p["method"] != "patchcore"
+    if learned:
+        from . import void_learn
+        cand_thr = float(p.get("cand_threshold", model.cand_threshold if model is not None else 1.0))
     classifier = Classifier(p.get("type_rules"), void_manager.layout, void_manager.types, void_manager.um_per_px)
     types = {}
     if diag is not None:
@@ -433,18 +440,35 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
         else:
             # Each chip moved onto the median chip first (the bbox may be off by a few px)
             src = _register(chips)[0] if p.get("register", True) else chips
-            items = _die_to_die(src, p, diag)
+            dctx = {}
+            items = _die_to_die(src, p, diag, dctx)
 
         # 3. Blobs per chip
         count = 0
         for cell, dev, signed, matched in items:
-            mask0 = dev > threshold
-            mask = _open(mask0) if mask0.any() else mask0
-            comps = _merge_close(_components(mask), gap) if mask.any() else []
+            probs = None
+            if learned:
+                cands = void_learn.candidates(void_learn.ChipContext(
+                    dev * signed, matched, dctx["golden"], dctx["spread"], dctx["sp_med"]), cand_thr)
+                if collect is not None:
+                    bx, by, bw, bh = rects[cell]
+                    ux, uy = bw / size[0], bh / size[1]
+                    collect(layer, cell, [((bx + b[2] * ux, by + b[0] * uy, bx + b[3] * ux, by + (b[1] + 1) * uy), area, f)
+                                          for b, area, f in cands])
+                    if diag is None:
+                        continue
+                mask0 = dev > cand_thr
+                mask = mask0
+                comps = [(b[0], b[1], b[2], b[3], area, 1) for b, area, _ in cands]
+                probs = list(model.scores([f for _, _, f in cands])) if (model is not None and cands) else [None] * len(cands)
+            else:
+                mask0 = dev > threshold
+                mask = _open(mask0) if mask0.any() else mask0
+                comps = _merge_close(_components(mask), gap) if mask.any() else []
             info = [] if diag is not None else None
             x0, y0, w, h = rects[cell]
             sx, sy = w / size[0], h / size[1]
-            for r0, r1, c0, c1, area, merged in comps:
+            for ci, (r0, r1, c0, c1, area, merged) in enumerate(comps):
                 gx = x0 + (c0 + c1) / 2.0 * sx
                 gy = y0 + (r0 + r1 + 1) / 2.0 * sy
                 rx = max(1.0, (c1 - c0) / 2.0 * sx)
@@ -453,6 +477,11 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
                 c = {"box": (r0, r1, c0, c1), "area": int(area), "merged": merged, "score": float(blob.max())}
                 if info is not None:
                     info.append(c)
+                if probs is not None:
+                    if probs[ci] is None or probs[ci] < model.cut:
+                        c["status"] = "cls" # Rejected by the learned filter (or collecting only)
+                        continue
+                    c["learned"] = float(probs[ci])
                 if area < min_area or area > max_area:
                     c["status"] = "small" if area < min_area else "large"
                     continue
@@ -573,7 +602,7 @@ def _blur(a, sigma):
     return sum(k[i] * tmp[i:i + h, :] for i in range(2 * r + 1)).astype(np.float32)
 
 
-def _die_to_die(chips, p, diag=None):
+def _die_to_die(chips, p, diag=None, ctx=None):
     """
     Yields (cell, deviation map, sign, matched chip): (chip - golden) / spread after matching,
     see the module doc. With "smooth" (working px) the signed deviation is averaged over its
@@ -585,6 +614,8 @@ def _die_to_die(chips, p, diag=None):
     spread, gmin, gmax, match = _golden(chips, p)
     if diag is not None:
         diag.golden(match.golden, spread)
+    if ctx is not None: # For the learned filter (void_learn.ChipContext)
+        ctx.update(golden=match.golden, spread=spread, sp_med=float(np.median(spread)))
     sigma = float(p.get("smooth", 0.0))
 
     golden = match.golden

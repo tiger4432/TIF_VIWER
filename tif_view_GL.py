@@ -34,6 +34,7 @@ from sat_widgets.angle_preview import AnglePreview
 from sat_widgets.auto_bbox import place_bboxes
 from sat_widgets import void_detect
 from sat_widgets import void_eval
+from sat_widgets import void_learn
 from sat_widgets import results_api
 from sat_widgets.products import load_products, GRID_KEYS
 from sat_widgets.app_paths import declaration_path, sync_declarations, default_update_manifest
@@ -513,6 +514,19 @@ class MainWindow(QMainWindow):
         self.le_skip_layers.setMaximumWidth(80)
         h_rule.addWidget(self.le_skip_layers)
         v_layout_void.addLayout(h_rule)
+        h_learn = QHBoxLayout()
+        self.chk_learned = QCheckBox("Learned filter")
+        self.chk_learned.setToolTip("Die-to-die: candidates scored by a model trained from hand markings (Train)\n"
+                                    "instead of the Thr threshold (sat_widgets/void_learn.py)")
+        self.chk_learned.setEnabled(os.path.exists(void_learn.model_path(self._config().get("void_detect", {}))))
+        btn_train = QPushButton("Train")
+        btn_train.setToolTip("Add this file's hand markings to the training set and retrain the learned filter\n"
+                             "(one entry per file; training the same file again replaces it)")
+        btn_train.clicked.connect(self.train_detector)
+        h_learn.addWidget(self.chk_learned)
+        h_learn.addWidget(btn_train)
+        h_learn.addStretch(1)
+        v_layout_void.addLayout(h_learn)
         self._init_detect_method()
         
         dock_layout.addWidget(self.gb_void)
@@ -1625,6 +1639,13 @@ class MainWindow(QMainWindow):
             params["pc_model"] = model
         params["pc_threshold" if params["method"] == "patchcore" else "threshold"] = self.sb_detect_thr.value()
         params["layer_rule"] = self.cb_layer_rule.currentData()
+        if self.chk_learned.isChecked() and params["method"] == "die_to_die":
+            path = void_learn.model_path(params)
+            try:
+                params["learned_model"] = void_learn.Model.load(path)
+            except Exception as e:
+                QMessageBox.warning(self, title, f"Learned filter not usable ({path}): {e}")
+                return None
         try:
             params["skip_layers"] = [int(x) for x in re.split(r"[,\s]+", self.le_skip_layers.text().strip()) if x]
         except ValueError:
@@ -1661,15 +1682,8 @@ class MainWindow(QMainWindow):
             return
         self._detect_done(result, refs)
 
-    def evaluate_detection(self):
-        """
-        Detection without marking, compared with the hand markings (sat_widgets/void_eval.py):
-        shows the short code and writes the report folder.
-        """
-        setup = self._detect_setup("Evaluate")
-        if setup is None:
-            return
-        type_name, cells, refs, params, layers = setup
+    def _hand_truths(self, layers, refs):
+        """Hand markings (not bboxes, not unreviewed detections) on the loaded layers, as drawn boxes."""
         vm, cfg, ct = self.void_manager, self.glw.grid_cfg, self.glw.coord_transform
         to_deskew = ct.raw_to_deskew if ct else (lambda x, y: (x, y))
         truths = []
@@ -1688,6 +1702,75 @@ class MainWindow(QMainWindow):
                 else:
                     box = (gx - rx, gy - ry, gx + rx, gy + ry)
                 truths.append({"layer": layer, "cell": cfg.cell_at(gx, gy), "box": box, "type": v.get("type")})
+        return truths
+
+    def train_detector(self):
+        """
+        Learned filter (sat_widgets/void_learn.py): adds the candidates of this file, labelled by its
+        hand markings, to the training set and retrains the model on all of it.
+        """
+        setup = self._detect_setup("Train")
+        if setup is None:
+            return
+        type_name, cells, refs, params, layers = setup
+        vm, cfg, ct = self.void_manager, self.glw.grid_cfg, self.glw.coord_transform
+        truths = self._hand_truths(layers, refs)
+        if not truths and QMessageBox.question(
+                self, "Train", "No hand markings on the loaded layers: this file adds only non-voids.\nContinue?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        params.pop("learned_model", None)
+        if params.get("method") == "patchcore":
+            params["method"] = "die_to_die" # The learned filter works on the die-to-die deviation
+        cand_thr = float(params.get("cand_threshold", 1.0))
+        collected = []
+        params["learn"] = lambda layer, cell, cands: collected.append((layer, cell, cands))
+        params["cand_threshold"] = cand_thr
+        progress, step = self._detect_progress("Collecting training candidates...")
+        try:
+            result = void_detect.detect_voids(self.full_data, cfg, ct, refs, cells, layers, vm, type_name,
+                                              params, step, apply=False)
+        finally:
+            progress.close()
+        if result is None:
+            return
+        rows, covered = void_learn.label_rows(collected, truths)
+        key = self.lbl_source.toolTip() or self.le_wafer_id.text() or "unnamed"
+        void_learn.add_to_dataset(key, rows)
+        path = void_learn.model_path(self._config().get("void_detect", {}))
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            data = void_learn.train_model(cand_thr, path)
+        except ValueError as e:
+            QMessageBox.warning(self, "Train", f"Added {len(rows)} candidates of this file. Not trained yet: {e}.")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self.chk_learned.setEnabled(True)
+        self.chk_learned.setChecked(True)
+        pct = lambda v: int(round(100 * v))
+        short = (f"L1 f{data['files']} v{data['voids']} n{data['others']} c{covered} h{len(truths)}\n"
+                 f"R{pct(data['cv_recall'])} P{pct(data['cv_precision'])} " + " ".join(data["top_features"][:3]))
+        full = (f"This file: {len(truths)} hand markings, {covered} found among {len(rows)} candidates\n"
+                f"Training set: {data['files']} files, {data['voids']} voids, {data['others']} other candidates\n"
+                f"Cross-validated by chip: recall {pct(data['cv_recall'])} %, precision {pct(data['cv_precision'])} %\n"
+                f"Most used features: {', '.join(data['top_features'])}\n"
+                f"Model: {path}\nTraining set: {void_learn.DATASET}")
+        print("Train:\n" + full)
+        EvalDialog(self, full, os.path.dirname(path), None, len(truths), short).exec()
+
+    def evaluate_detection(self):
+        """
+        Detection without marking, compared with the hand markings (sat_widgets/void_eval.py):
+        shows the short code and writes the report folder.
+        """
+        setup = self._detect_setup("Evaluate")
+        if setup is None:
+            return
+        type_name, cells, refs, params, layers = setup
+        vm, cfg, ct = self.void_manager, self.glw.grid_cfg, self.glw.coord_transform
+        to_deskew = ct.raw_to_deskew if ct else (lambda x, y: (x, y))
+        truths = self._hand_truths(layers, refs)
         ev = void_eval.Evaluation(truths, layers, self.cb_detect_method.currentText())
         ev.refs_pct = round(100 * sum(1 for c in cells if c in refs) / max(1, len(cells)))
         progress, step = self._detect_progress("Evaluating detection...")

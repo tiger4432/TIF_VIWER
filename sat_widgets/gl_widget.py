@@ -740,7 +740,7 @@ class GLImageWidget(QOpenGLWidget):
                 or modifiers & (Qt.ControlModifier | Qt.ShiftModifier) or delta == 0):
             return False
         gx, gy = self.get_image_coords(e.position())
-        v, _ = self.void_manager.hit_test(self.current_layer, gx, gy, margin=10.0/self.zoom, coord_transform=self.raw_to_deskew, quadrant_ctx=self._quadrant_ctx(), allow_bbox=self.bbox_recognized())
+        v, _, _ = self._hit_any(gx, gy)
         if v is None or self.void_manager.shape_of(v) != "curve":
             return False
         p = self.void_manager.set_p(v, round(round((self.void_manager.p_of(v) + self.P_STEP * delta / 120.0) / self.P_STEP) * self.P_STEP, 4))
@@ -934,13 +934,9 @@ class GLImageWidget(QOpenGLWidget):
                     and (self.bbox_recognized() or not vm.is_bbox(pv))):
                 v, action = pv, "edge"
         if v is None:
-            # Ghost (other layer) voids also highlight (Q moves them here)
-            for layer in vm.voids:
-                if layer != self.current_layer:
-                    g, _ = vm.hit_test(layer, gx, gy, margin=margin, coord_transform=self.raw_to_deskew, quadrant_ctx=ctx, allow_bbox=self.bbox_recognized())
-                    if g is not None:
-                        v, action = g, None
-                        break
+            # Ghost (other layer) voids: highlighted, edited (E) / erased (R) like the current
+            # layer's; Q moves them here
+            v, action, _ = self._hit_any(gx, gy, margin)
 
         axis = None
         if v is not None and action == "edge":
@@ -1254,7 +1250,8 @@ class GLImageWidget(QOpenGLWidget):
                 elif self.void_mode == "EDIT":
                     # Hit Test on the current layer (ghost voids of other layers are reference only)
                     # Mouse (gx, gy) is Deskewed -> pass the Raw -> Deskew transform.
-                    v, action = self.void_manager.hit_test(self.current_layer, gx, gy, margin=10.0/self.zoom, coord_transform=self.raw_to_deskew, quadrant_ctx=self._quadrant_ctx(), allow_bbox=self.bbox_recognized())
+                    # Current layer first, else a ghost of another layer (edited on its own layer)
+                    v, action, _ = self._hit_any(gx, gy)
                     if v:
                         self.active_void = v
                         self.active_void_action = action # 'center' or 'edge'
@@ -1490,10 +1487,27 @@ class GLImageWidget(QOpenGLWidget):
     def _quadrant_ctx(self):
         return (self.void_manager.reference_bboxes(self.grid_cfg, self.coord_transform), self.grid_cfg)
 
+    def _hit_any(self, gx, gy, margin=None):
+        """
+        Void under the Deskewed point: the current layer first, else a ghost of another layer (the
+        nearest layer first), so edit (E) and erase (R) work on every marking seen, hand-drawn or
+        detected. Returns (void, action, layer) or (None, None, None).
+        """
+        vm = self.void_manager
+        margin = 10.0 / self.zoom if margin is None else margin
+        ctx = self._quadrant_ctx()
+        layers = sorted(vm.voids, key=lambda l: (l != self.current_layer, abs(l - self.current_layer)))
+        for layer in layers:
+            v, action = vm.hit_test(layer, gx, gy, margin=margin, coord_transform=self.raw_to_deskew, quadrant_ctx=ctx,
+                                    allow_bbox=self.bbox_recognized() and layer == self.current_layer)
+            if v is not None:
+                return v, action, layer
+        return None, None, None
+
     def _erase_at(self, gx, gy):
-        """Deletes the topmost void of the current layer under the Deskewed point (gx, gy)."""
-        v, _ = self.void_manager.hit_test(self.current_layer, gx, gy, margin=10.0/self.zoom, coord_transform=self.raw_to_deskew, quadrant_ctx=self._quadrant_ctx(), allow_bbox=self.bbox_recognized())
-        return v is not None and self.void_manager.remove_void(self.current_layer, v)
+        """Deletes the void under the Deskewed point (current layer first, else the nearest ghost)."""
+        v, _, layer = self._hit_any(gx, gy)
+        return v is not None and self.void_manager.remove_void(layer, v)
 
     def mouseReleaseEvent(self, e):
         # Clear interaction state

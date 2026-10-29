@@ -37,6 +37,7 @@ MISS_REASONS = {
     "dup": "skipped: the spot is marked on another layer (Mark on layer rule)",
     "lg": "blob larger than max_area_frac (chip treated as misaligned / broken)",
     "sm": "blob smaller than min_size_px",
+    "cl": "candidate rejected by the learned filter",
     "op": "above the threshold, but too thin / small for the 3x3 opening",
     "bt": "deviation below the threshold",
 }
@@ -292,6 +293,8 @@ class Evaluation:
                     reason = "lg"
                 elif "small" in comps:
                     reason = "sm"
+                elif "cls" in comps:
+                    reason = "cl"
                 elif rec.get("above") and not rec.get("opened"):
                     reason = "op"
                 else:
@@ -344,7 +347,7 @@ class Evaluation:
         pk, s, c, w, h x100 as integers (medians of the threshold misses / matched sizes), 0 = none.
         """
         p = self.p
-        m = "d" if p.get("method") == "die_to_die" else "p"
+        m = ("l" if p.get("learned_model") is not None else "d") if p.get("method") == "die_to_die" else "p"
         thr = p.get("pc_threshold") if p.get("method") == "patchcore" else p.get("threshold")
         top = lambda d: [f"{k}{v}" for k, v in sorted(d.items(), key=lambda kv: -kv[1])[:2]]
         miss, false = {}, {}
@@ -375,6 +378,8 @@ class Evaluation:
         rule = {"first": "rf", "last": "rl", "strongest": "rs"}.get(p.get("layer_rule", "first"), "r" + str(p.get("layer_rule"))[:1])
         for k in sorted(int(x) for x in (p.get("skip_layers") or [])):
             rule += f" sk{k}"
+        if p.get("learned_model") is not None:
+            rule += " lm"
         if p.get("method") == "die_to_die":
             rule += f" sm{_fmt(p.get('smooth', 0))}" + (" lf" if p.get("layout_fit", True) else "") + (" rg" if p.get("register", True) else "")
         elif p.get("pc_position_norm", False):
@@ -472,7 +477,7 @@ class Evaluation:
                 _gray(st["_gold"]).save(os.path.join(img_dir, f"L{L}_golden.png"))
                 _heat(st["_spread"], float(np.percentile(st["_spread"].astype(np.float32), 99))).save(os.path.join(img_dir, f"L{L}_spread.png"))
 
-        data = {"version": VERSION, "meta": meta, "code": code, "params": {k: v for k, v in self.p.items() if k != "type_rules"},
+        data = {"version": VERSION, "meta": meta, "code": code, "params": {k: v for k, v in self.p.items() if k not in ("type_rules", "learned_model", "learn")},
                 "factor": self.factor, "work_size": list(self.size), "min_area": self.min_area, "max_area": self.max_area,
                 "layers": {str(L): {k: v for k, v in st.items() if not k.startswith("_")} for L, st in self.layer_stats.items()},
                 "truths": [_clean(t) for t in self.truths], "detections": [_clean(d) for d in self.dets]}
