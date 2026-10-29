@@ -33,6 +33,8 @@ from sat_widgets.roi_inspector import ROIInspector
 from sat_widgets.angle_preview import AnglePreview
 from sat_widgets.auto_bbox import place_bboxes
 from sat_widgets import void_detect
+from sat_widgets import void_eval
+from sat_widgets import qr
 from sat_widgets import results_api
 from sat_widgets.products import load_products, GRID_KEYS
 from sat_widgets.app_paths import declaration_path, sync_declarations, default_update_manifest
@@ -483,6 +485,12 @@ class MainWindow(QMainWindow):
         h_detect.addWidget(self.cb_detect_method)
         h_detect.addWidget(self.sb_detect_thr)
         h_detect.addWidget(btn_next_det)
+        btn_eval = QPushButton("Evaluate")
+        btn_eval.setToolTip("Run the detection without marking and compare it with the voids marked by hand on the loaded\n"
+                            "layers: misses and false detections with their reasons, as a short code (and QR) to send,\n"
+                            "plus a report folder with chip images (see docs/VOID_EVAL.md).")
+        btn_eval.clicked.connect(self.evaluate_detection)
+        h_detect.addWidget(btn_eval)
         v_layout_void.addLayout(h_detect)
         self._init_detect_method()
         
@@ -1549,15 +1557,15 @@ class MainWindow(QMainWindow):
         self.update_void_ui()
         self.statusBar().showMessage(f"Results API: {n} voids loaded ({'replaced' if replace else 'added'}; Ctrl+Z undoes)")
 
-    def detect_voids(self):
-        """Rough automatic void detection on all loaded layers (see sat_widgets/void_detect.py)."""
+    def _detect_setup(self, title):
+        """Inputs of Detect Voids / Evaluate: (type, cells, refs, params, layers), or None."""
         if self.full_data is None or self.glw.tiled_image is None:
-            return
+            return None
         vm = self.void_manager
         type_name = self.glw.active_type
         if not type_name or type_name not in vm.types or vm.is_bbox({"type": type_name}):
-            QMessageBox.warning(self, "Detect Voids", "Select the void type to mark with (not the bbox type).")
-            return
+            QMessageBox.warning(self, title, "Select the void type to mark with (not the bbox type).")
+            return None
         cfg = self.glw.grid_cfg
         bmap = self.glw.bonding_map
         cells = [(r, c) for r in range(cfg.rows) for c in range(cfg.cols) if bmap is None or bmap.get_key(r, c)]
@@ -1571,23 +1579,89 @@ class MainWindow(QMainWindow):
             params["pc_model"] = model
         params["pc_threshold" if params["method"] == "patchcore" else "threshold"] = self.sb_detect_thr.value()
         layers = [self.abs_layer(z) for z in range(len(self.full_data))]
+        return type_name, cells, refs, params, layers
 
-        progress = QProgressDialog("Detecting voids...", "Cancel", 0, 1000, self)
+    def _detect_progress(self, text):
+        progress = QProgressDialog(text, "Cancel", 0, 1000, self)
         progress.setWindowModality(Qt.WindowModal)
         progress.show()
 
-        def step(i, n, text):
+        def step(i, n, label):
             if i % 20 == 0:
                 progress.setValue(int(1000 * i / max(1, n)))
-                progress.setLabelText(text)
+                progress.setLabelText(label)
                 QApplication.processEvents()
             return not progress.wasCanceled()
+        return progress, step
 
+    def detect_voids(self):
+        """Rough automatic void detection on all loaded layers (see sat_widgets/void_detect.py)."""
+        setup = self._detect_setup("Detect Voids")
+        if setup is None:
+            return
+        type_name, cells, refs, params, layers = setup
+        vm, cfg = self.void_manager, self.glw.grid_cfg
+        progress, step = self._detect_progress("Detecting voids...")
         result = void_detect.detect_voids(self.full_data, cfg, self.glw.coord_transform, refs, cells,
                                           layers, vm, type_name, params, step)
         progress.close()
         if result is None:
             return
+        self._detect_done(result, refs)
+
+    def evaluate_detection(self):
+        """
+        Detection without marking, compared with the hand markings (sat_widgets/void_eval.py):
+        shows the short code + QR and writes the report folder.
+        """
+        setup = self._detect_setup("Evaluate")
+        if setup is None:
+            return
+        type_name, cells, refs, params, layers = setup
+        vm, cfg, ct = self.void_manager, self.glw.grid_cfg, self.glw.coord_transform
+        to_deskew = ct.raw_to_deskew if ct else (lambda x, y: (x, y))
+        truths = []
+        for layer, vs in vm.voids.items():
+            if layer not in layers:
+                continue
+            for v in vs:
+                if vm.is_bbox(v) or v.get("auto"):
+                    continue # Hand markings only (reviewed detections count: editing clears "auto")
+                gx, gy = to_deskew(v["globalCX"], v["globalCY"])
+                rx, ry = v["radiusX"], v["radiusY"]
+                q = vm.quadrant_of(v, gx, gy, refs, cfg)
+                if q: # Drawn quadrant: corner -> corner + radius
+                    xs, ys = sorted((gx, gx + q[0] * rx)), sorted((gy, gy + q[1] * ry))
+                    box = (xs[0], ys[0], xs[1], ys[1])
+                else:
+                    box = (gx - rx, gy - ry, gx + rx, gy + ry)
+                truths.append({"layer": layer, "cell": cfg.cell_at(gx, gy), "box": box, "type": v.get("type")})
+        ev = void_eval.Evaluation(truths, layers, self.cb_detect_method.currentText())
+        ev.refs_pct = round(100 * sum(1 for c in cells if c in refs) / max(1, len(cells)))
+        progress, step = self._detect_progress("Evaluating detection...")
+        try:
+            result = void_detect.detect_voids(self.full_data, cfg, ct, refs, cells, layers, vm, type_name,
+                                              params, step, diag=ev, apply=False)
+        finally:
+            progress.close()
+        if result is None:
+            return
+        summary = ev.finish(cells)
+        code = ev.code(summary)
+        src = self.lbl_source.toolTip()
+        stem = os.path.splitext(os.path.basename(src))[0] or "eval"
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        folder = os.path.join(os.path.expanduser("~"), "TIF_Viewer_eval", f"{stem}_{stamp}")
+        try:
+            report = ev.write_report(folder, summary, code, {"source": src, "time": stamp, "method": ev.method,
+                                                            "wafer_id": self.le_wafer_id.text()})
+        except OSError as e:
+            report = None
+            print(f"Evaluation report not written: {e}")
+        print("Detection evaluation:\n" + code + (f"\nReport: {report}" if report else ""))
+        EvalDialog(self, code, folder if report else None, report, summary["h"]).exec()
+
+    def _detect_done(self, result, refs):
         self.glw.refresh_hover()
         self.update_void_ui()
         per = ", ".join(f"L{l}: {n}" for l, n in result["per_layer"].items())
@@ -2209,6 +2283,67 @@ class MainWindow(QMainWindow):
                 self.last_export_dir = out_dir
                 if (self._results_settings().get("send") or {}).get("after_export"):
                     self.send_results() # config.json "results_api": {"send": {"after_export": true}}
+
+class EvalDialog(QDialog):
+    """Result of Evaluate: the short code (to type or scan on a phone) and the report folder."""
+
+    def __init__(self, parent, code, folder, report, n_hand):
+        super().__init__(parent)
+        self.setWindowTitle("Detection Evaluation")
+        self.code, self.folder, self.report = code, folder, report
+        lay = QVBoxLayout(self)
+        hint = "Scan the QR with the phone camera to copy the text, or type the code below."
+        if n_hand == 0:
+            hint = ("No hand markings on the loaded layers: only detection and chip statistics are shown.\n"
+                    "Mark voids by hand (or load a reviewed voids.json) and evaluate again to compare. ") + hint
+        lay.addWidget(QLabel(hint))
+        row = QHBoxLayout()
+        try:
+            from PySide6.QtGui import QPixmap
+            img = qr.to_qimage(qr.encode(code), scale=4)
+            lbl = QLabel()
+            lbl.setPixmap(QPixmap.fromImage(img))
+            lbl.setAlignment(Qt.AlignTop)
+            row.addWidget(lbl)
+        except ValueError:
+            row.addWidget(QLabel("(code too long for a QR)"))
+        txt = QPlainTextEdit(code)
+        txt.setReadOnly(True)
+        f = txt.font()
+        f.setFamily("Consolas")
+        f.setStyleHint(f.StyleHint.Monospace)
+        f.setPointSize(13)
+        txt.setFont(f)
+        txt.setLineWrapMode(QPlainTextEdit.NoWrap)
+        txt.setMinimumSize(560, 320)
+        row.addWidget(txt, 1)
+        lay.addLayout(row)
+        btns = QHBoxLayout()
+        b_copy = QPushButton("Copy")
+        b_copy.clicked.connect(lambda: QApplication.clipboard().setText(self.code))
+        btns.addWidget(b_copy)
+        b_rep = QPushButton("Open Report")
+        b_rep.setEnabled(bool(report))
+        b_rep.clicked.connect(lambda: self._open(self.report))
+        btns.addWidget(b_rep)
+        b_dir = QPushButton("Open Folder")
+        b_dir.setEnabled(bool(folder))
+        b_dir.clicked.connect(lambda: self._open(self.folder))
+        btns.addWidget(b_dir)
+        btns.addStretch(1)
+        b_close = QPushButton("Close")
+        b_close.clicked.connect(self.accept)
+        btns.addWidget(b_close)
+        lay.addLayout(btns)
+        if folder:
+            lay.addWidget(QLabel(f"Report: {folder}"))
+
+    @staticmethod
+    def _open(path):
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtCore import QUrl
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
 
 class ExportDialog(QDialog):
     def __init__(self, parent=None, default_dir=""):

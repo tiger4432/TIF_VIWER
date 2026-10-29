@@ -85,8 +85,11 @@ def _components(mask):
 
 
 def _merge_close(comps, gap):
-    """Merges blobs whose boxes are within gap pixels (a void cut in two by a layout line)."""
-    comps = [list(c) for c in comps]
+    """
+    Merges blobs whose boxes are within gap pixels (a void cut in two by a layout line).
+    Returns [r0, r1, c0, c1, area, number of merged blobs].
+    """
+    comps = [list(c) + [1] for c in comps]
     merged = True
     while merged:
         merged = False
@@ -94,7 +97,7 @@ def _merge_close(comps, gap):
             for j in range(i + 1, len(comps)):
                 a, b = comps[i], comps[j]
                 if a[0] - gap <= b[1] and b[0] - gap <= a[1] and a[2] - gap <= b[3] and b[2] - gap <= a[3]:
-                    comps[i] = [min(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), max(a[3], b[3]), a[4] + b[4]]
+                    comps[i] = [min(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), max(a[3], b[3]), a[4] + b[4], a[5] + b[5]]
                     del comps[j]
                     merged = True
                     break
@@ -208,11 +211,13 @@ def _open(mask):
 
 
 def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, void_manager, type_name,
-                 params=None, progress=None):
+                 params=None, progress=None, diag=None, apply=True):
     """
     Detects voids on all loaded layers (index z -> absolute layer_numbers[z]) and adds them to
     void_manager with type_name. cells: [(row, col)] to inspect. refs: reference bboxes.
     progress(i, n, text) -> False cancels. Returns {"added": n, "per_layer": {layer: n}} or None.
+    diag: collector of every stage (sat_widgets/void_eval.py). apply=False: nothing is added and
+    existing markings are ignored (evaluation against them); the result has "found".
     """
     p = dict(DEFAULTS)
     p.update(params or {})
@@ -236,18 +241,19 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
 
     # Existing markings (cell -> [(gx, gy, rx, ry)]) and the voids found so far (first layer wins)
     taken = {}
-    for vs in void_manager.voids.values():
+    for layer, vs in (void_manager.voids.items() if apply else ()):
         for v in vs:
             if void_manager.is_bbox(v):
                 continue
             gx, gy = to_deskew(v["globalCX"], v["globalCY"])
-            taken.setdefault(grid_cfg.cell_at(gx, gy), []).append((gx, gy, v["radiusX"], v["radiusY"]))
+            taken.setdefault(grid_cfg.cell_at(gx, gy), []).append((gx, gy, v["radiusX"], v["radiusY"], layer))
 
     def overlaps(cell, gx, gy, rx, ry):
-        for (ox, oy, orx, ory) in taken.get(cell, ()):
+        """Layer of the marking / earlier find this spot overlaps, else None."""
+        for (ox, oy, orx, ory, olayer) in taken.get(cell, ()):
             if abs(gx - ox) < max(rx, orx) and abs(gy - oy) < max(ry, ory):
-                return True
-        return False
+                return olayer
+        return None
 
     order = sorted(rects)
     n_steps = len(layer_numbers) * len(order)
@@ -260,6 +266,8 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
     pc = None
     classifier = Classifier(p.get("type_rules"), void_manager.layout, void_manager.types, void_manager.um_per_px)
     types = {}
+    if diag is not None:
+        diag.setup(p, size, factor, rects, min_area, max_area, gap)
 
     for z, layer in enumerate(layer_numbers):
         # 1. Aligned, normalized chips of this layer
@@ -283,6 +291,9 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
         stack.release_cache()
         if len(chips) < 3:
             continue
+        threshold = float(p.get("pc_threshold", 10.0)) if p["method"] == "patchcore" else p["threshold"]
+        if diag is not None:
+            diag.layer_start(layer, chips, threshold)
 
         if p["method"] == "patchcore":
             # Optional scorer (sat_widgets/patchcore.py): CNN features, position-aware nearest neighbour
@@ -295,33 +306,35 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
                 # Same brightness / contrast / shading matching as die-to-die before the CNN
                 match = _golden(chips, p)[3]
                 chips = {k: match.apply(c.astype(np.float32)) for k, c in chips.items()}
-            items = ((cell, dev, None) for cell, dev in pc.score_layer(chips, size).items())
-            threshold = float(p.get("pc_threshold", 10.0))
+            items = ((cell, dev, None, None) for cell, dev in pc.score_layer(chips, size).items())
         else:
-            items = _die_to_die(chips, p)
-            threshold = p["threshold"]
+            items = _die_to_die(chips, p, diag)
 
         # 3. Blobs per chip
         count = 0
-        for cell, dev, signed in items:
-            mask = dev > threshold
-            if not mask.any():
-                continue
-            mask = _open(mask)
-            if not mask.any():
-                continue
+        for cell, dev, signed, matched in items:
+            mask0 = dev > threshold
+            mask = _open(mask0) if mask0.any() else mask0
+            comps = _merge_close(_components(mask), gap) if mask.any() else []
+            info = [] if diag is not None else None
             x0, y0, w, h = rects[cell]
             sx, sy = w / size[0], h / size[1]
-            for r0, r1, c0, c1, area in _merge_close(_components(mask), gap):
-                if area < min_area or area > max_area:
-                    continue
+            for r0, r1, c0, c1, area, merged in comps:
                 gx = x0 + (c0 + c1) / 2.0 * sx
                 gy = y0 + (r0 + r1 + 1) / 2.0 * sy
                 rx = max(1.0, (c1 - c0) / 2.0 * sx)
                 ry = max(1.0, (r1 + 1 - r0) / 2.0 * sy)
-                if overlaps(cell, gx, gy, rx, ry):
-                    continue # Marked already, or found on an upper layer
                 blob = dev[r0:r1 + 1, c0:c1]
+                c = {"box": (r0, r1, c0, c1), "area": int(area), "merged": merged, "score": float(blob.max())}
+                if info is not None:
+                    info.append(c)
+                if area < min_area or area > max_area:
+                    c["status"] = "small" if area < min_area else "large"
+                    continue
+                dup = overlaps(cell, gx, gy, rx, ry)
+                if dup is not None:
+                    c["status"], c["dup_layer"] = "dup", dup
+                    continue # Marked already, or found on an upper layer
                 score = float(blob.max())
                 vtype = type_name
                 extent = (x0 + c0 * sx, y0 + r0 * sy, x0 + c1 * sx, y0 + (r1 + 1) * sy)
@@ -335,10 +348,18 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
                             "polarity": None if signed is None else
                             ("bright" if float((signed[r0:r1 + 1, c0:c1] * blob).sum()) > 0 else "dark")}
                     vtype = classifier.type_for(feat, rects[cell], type_name)
-                taken.setdefault(cell, []).append((gx, gy, rx, ry))
+                taken.setdefault(cell, []).append((gx, gy, rx, ry, layer))
                 found.append((layer, gx, gy, rx, ry, score, vtype, cell, extent))
+                c["status"], c["type"], c["extent"] = "kept", vtype, extent
                 count += 1
+            if diag is not None:
+                diag.chip(layer, cell, dev, signed, matched, mask0, mask, info)
         per_layer[layer] = count
+        if diag is not None:
+            diag.layer_end(layer)
+
+    if not apply:
+        return {"added": 0, "per_layer": per_layer, "found": found}
 
     # 4. One undo step for the whole run
     vm = void_manager
@@ -388,10 +409,15 @@ def _golden(chips, p):
     return spread, gmin, gmax, _Matcher(golden)
 
 
-def _die_to_die(chips, p):
-    """Yields (cell, deviation map): |chip - golden| / spread after matching, see the module doc."""
+def _die_to_die(chips, p, diag=None):
+    """
+    Yields (cell, deviation map, sign, matched chip): |chip - golden| / spread after matching,
+    see the module doc.
+    """
     spread, gmin, gmax, match = _golden(chips, p)
+    if diag is not None:
+        diag.golden(match.golden, spread)
     for cell in chips:
         m = match.apply(chips[cell].astype(np.float32))
         hi, lo = np.maximum(m - gmax, 0), np.maximum(gmin - m, 0)
-        yield cell, (hi + lo) / spread, np.sign(hi - lo) # Sign: brighter / darker than the golden chip
+        yield cell, (hi + lo) / spread, np.sign(hi - lo), m # Sign: brighter / darker than the golden chip
