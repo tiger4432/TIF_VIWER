@@ -12,8 +12,8 @@ ones, not bboxes) on the loaded layers. Output:
 - a folder with report.html (tables + chip images), eval.json and summary.txt.
 
 Detection stages seen per chip (sat_widgets/void_detect.py): deviation map -> threshold -> 3x3
-opening -> blobs merged -> size filter (min_size_px, max_area_frac) -> first-layer rule (a spot
-found on an upper layer is skipped) -> kept.
+opening -> blobs merged -> size filter (min_size_px, max_area_frac) -> layer rule (a spot
+found on several layers is marked on one of them: first, strongest or last) -> kept.
 """
 import json
 import math
@@ -34,7 +34,7 @@ MISS_REASONS = {
     "nl": "layer not evaluated (not loaded, or fewer than 3 chips)",
     "ni": "cell not inspected (not in the bonding map / rejected LEG)",
     "mg": "merged into one detection with another hand marking",
-    "dup": "skipped: the spot was already found on an upper layer (first-layer rule)",
+    "dup": "skipped: the spot is marked on another layer (Mark on layer rule)",
     "lg": "blob larger than max_area_frac (chip treated as misaligned / broken)",
     "sm": "blob smaller than min_size_px",
     "op": "above the threshold, but too thin / small for the 3x3 opening",
@@ -111,6 +111,7 @@ class Evaluation:
         self.method = method_label
         self.layer_stats = {}
         self.dets = []
+        self.kept_comps = [] # Blobs kept on their layer; the layer rule may still drop them (finish)
         self.chips = {} # (layer, cell) -> arrays for the images
         self.t0 = time.time()
 
@@ -207,10 +208,9 @@ class Evaluation:
                            contrast=None if self.gold is None or matched is None else abs(at(matched, pr, pc) - at(self.gold, pr, pc)),
                            polarity=None if signed is None else ("bright" if signed[pr, pc] > 0 else "dark"),
                            half=half_box(pr, pc) if pv > thr / 2.0 else None)
-                rec["comps"] = [c.get("status") for c in comps
-                                if c["box"][0] <= r1 - 1 and r0 <= c["box"][1] and c["box"][2] <= c1 - 1 and c0 <= c["box"][3] - 1]
-                rec["dup_layers"] = [c.get("dup_layer") for c in comps if c.get("status") == "dup"
-                                     and c["box"][0] <= r1 - 1 and r0 <= c["box"][1] and c["box"][2] <= c1 - 1 and c0 <= c["box"][3] - 1]
+                # Blobs over the marking; their final status is read in finish (layer rule)
+                rec["comp_refs"] = [c for c in comps
+                                    if c["box"][0] <= r1 - 1 and r0 <= c["box"][1] and c["box"][2] <= c1 - 1 and c0 <= c["box"][3] - 1]
             t["rec"] = rec
             self.cur_truth.append(t)
 
@@ -225,8 +225,9 @@ class Evaluation:
                  "shift": None if shift is None else math.hypot(*shift),
                  "spread": None if self.spread is None else at(self.spread, pr, pc) / max(self.sp_med, 1e-6),
                  "pos": (pr, pc), "half": half_box(pr, pc)}
+            c["_det"] = d
             self.cur_dets.append(d)
-            self.dets.append(d)
+            self.kept_comps.append(c)
         st["kept"] += len(kept)
 
         if interesting:
@@ -262,6 +263,14 @@ class Evaluation:
     def finish(self, cells):
         """Matches detections with hand markings and assigns the reasons. Returns the summary dict."""
         cells = set(map(tuple, cells))
+        # Detections: blobs still kept after the layer rule; statuses of the blobs over each marking
+        self.dets = [c["_det"] for c in self.kept_comps if c.get("status") == "kept"]
+        for t in self.truths:
+            rec = t.get("rec")
+            if rec and "comp_refs" in rec:
+                refs = rec.pop("comp_refs")
+                rec["comps"] = [c.get("status") for c in refs]
+                rec["dup_layers"] = [c.get("dup_layer") for c in refs if c.get("status") == "dup"]
         tol = self.factor # One working pixel (Deskewed px, about)
         for t in self.truths:
             t["match"] = None
@@ -354,7 +363,8 @@ class Evaluation:
         thr = p.get("pc_threshold") if p.get("method") == "patchcore" else p.get("threshold")
         layers = sorted(self.layer_stats) or self.layers
         n_cells = len(self.rects)
-        lines = [f"VD{VERSION} {m} t{_fmt(thr)} f{self.factor} w{max(self.size)} m{_fmt(p.get('min_size_px'))} "
+        rule = {"first": "rf", "last": "rl", "strongest": "rs"}.get(p.get("layer_rule", "first"), "r" + str(p.get("layer_rule"))[:1])
+        lines = [f"VD{VERSION} {m} {rule} t{_fmt(thr)} f{self.factor} w{max(self.size)} m{_fmt(p.get('min_size_px'))} "
                  f"c{n_cells} b{self.refs_pct} L{min(layers)}to{max(layers)} h{s['h']}" if layers else f"VD{VERSION} {m} no layers"]
         R = round(100 * s["ok"] / s["h"]) if s["h"] else None
         P = round(100 * s["ok"] / s["det"]) if s["det"] else None
@@ -386,6 +396,13 @@ class Evaluation:
                 q.append(f"x{_fmt(st['maxdev'] / st['thr'] if st['maxdev'] is not None else None)}")
                 parts += q
             lines.append(" ".join(parts))
+        moved = {}
+        for t in self.truths:
+            if t.get("result") == "ly": # Hand layer -> detected layer
+                k = f"L{t['layer']}to{self.dets[t['match'][1]]['layer']}"
+                moved[k] = moved.get(k, 0) + 1
+        if moved:
+            lines.append("D " + " ".join(f"{k}n{v}" for k, v in sorted(moved.items(), key=lambda kv: -kv[1])[:6]))
         reasons = {}
         for t in self.truths:
             if t.get("result") == "ms":
@@ -498,7 +515,7 @@ class Evaluation:
             f"{s['elapsed']:.0f} s</p><pre>{esc(code)}</pre>")
         add("<p>Hand markings: drawn by hand on the loaded layers (dashed detected voids and bboxes are not counted). "
             "Green box = hand marking, red = kept detection, orange = too small, purple = too large, blue = skipped by "
-            "the first-layer rule. Panels: chip (matched) · golden chip · deviation (0 .. 2x threshold) · "
+            "the layer rule (marked on another layer). Panels: chip (matched) · golden chip · deviation (0 .. 2x threshold) · "
             "mask (gray: above threshold, white: after the 3x3 opening).</p>")
         add("<h3>Layers</h3><table><tr><th>layer<th>chips<th>hand<th>ok<th>other layer<th>missed<th>false<th>candidates"
             "<th>spread med<th>residual med<th>shift med (px)<th>shift p95 (px)<th>max dev / thr (med)<th>golden<th>spread map</tr>")

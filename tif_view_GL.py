@@ -491,6 +491,20 @@ class MainWindow(QMainWindow):
         btn_eval.clicked.connect(self.evaluate_detection)
         h_detect.addWidget(btn_eval)
         v_layout_void.addLayout(h_detect)
+        # Layer of a spot found on several layers
+        h_rule = QHBoxLayout()
+        h_rule.addWidget(QLabel("Mark on layer:"))
+        self.cb_layer_rule = QComboBox()
+        for label, key in (("First (from top)", "first"), ("Strongest", "strongest"), ("Last", "last")):
+            self.cb_layer_rule.addItem(label, key)
+        self.cb_layer_rule.setToolTip("A spot found on several layers is marked once, on:\n"
+                                      "First: the first layer where it appears (from the top)\n"
+                                      "Strongest: the layer where it deviates most\n"
+                                      "Last: the deepest layer where it appears")
+        rule = str(self._config().get("void_detect", {}).get("layer_rule", "first")).lower()
+        self.cb_layer_rule.setCurrentIndex(max(0, self.cb_layer_rule.findData(rule)))
+        h_rule.addWidget(self.cb_layer_rule, 1)
+        v_layout_void.addLayout(h_rule)
         self._init_detect_method()
         
         dock_layout.addWidget(self.gb_void)
@@ -636,6 +650,12 @@ class MainWindow(QMainWindow):
                 raise ValueError(f"unknown void type {v!r}")
             self.cb_void_type.setCurrentIndex(i)
 
+        def layer_rule(v):
+            i = self.cb_layer_rule.findData(str(v).lower())
+            if i < 0:
+                raise ValueError(f"expected first / strongest / last, got {v!r}")
+            self.cb_layer_rule.setCurrentIndex(i)
+
         return {
             "reject_values": lambda v: self.le_reject.setText(", ".join(map(str, v)) if isinstance(v, list) else str(v)),
             "gpu_cache_mb": lambda v: self.sb_gpu_cache.setValue(int(v)),
@@ -650,6 +670,7 @@ class MainWindow(QMainWindow):
             "target_mean": lambda v: self.sb_target_mean.setValue(float(v)),
             "target_std": lambda v: self.sb_target_std.setValue(float(v)),
             "void_type": void_type,
+            "layer_rule": layer_rule,
             "export": lambda v: None, # Read by the export dialog when it opens
         }
 
@@ -1585,6 +1606,7 @@ class MainWindow(QMainWindow):
         if model:
             params["pc_model"] = model
         params["pc_threshold" if params["method"] == "patchcore" else "threshold"] = self.sb_detect_thr.value()
+        params["layer_rule"] = self.cb_layer_rule.currentData()
         layers = [self.abs_layer(z) for z in range(len(self.full_data))]
         return type_name, cells, refs, params, layers
 

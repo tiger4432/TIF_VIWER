@@ -16,9 +16,9 @@ background:
    to chip (registration), so they get a larger spread and do not trigger.
 3. |chip - golden| / spread above the threshold, brighter OR darker, cleaned with a small
    opening, gives the candidate blobs; each blob becomes an ellipse (its bounding box).
-4. Layers are processed from the top: a void is marked once, on the first layer where it
-   appears; on later layers the same spot is skipped. Spots overlapping an existing marking
-   (any layer) are skipped too.
+4. A spot found on several layers is marked once, on the layer chosen by layer_rule: the first
+   where it appears from the top (default), the last, or the one with the strongest deviation.
+   Spots overlapping an existing marking (any layer) are skipped.
 
 Detected voids carry v["auto"] = "detected" (drawn dashed, reviewed with "Next Auto";
 editing one clears the flag). The whole run is one undo step.
@@ -29,6 +29,7 @@ Parameters (config.json "void_detect", defaults in DEFAULTS):
     max_area_frac    blobs larger than this fraction of the chip are ignored (misaligned / broken chip)
     work_size        longest side of the working chip image (pixels)
     template_cells   chips used to build the golden chip
+    layer_rule       "first" (default) | "last" | "strongest": layer of a spot found on several layers
     type_rules       void type from the layout position and shape (sat_widgets/void_classify.py);
                      products.json "type_rules" of the selected product win
     method           "die_to_die" (default) or "patchcore" (CNN features, optional: needs
@@ -49,6 +50,7 @@ DEFAULTS = {
     "work_size": 256,
     "template_cells": 200,
     "method": "die_to_die", # or "patchcore" (optional, sat_widgets/patchcore.py)
+    "layer_rule": "first",
 }
 
 
@@ -239,18 +241,18 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
     factor = max(1, int(math.ceil(max(bw, bh) / p["work_size"])))
     size = (max(8, int(round(bw / factor))), max(8, int(round(bh / factor))))
 
-    # Existing markings (cell -> [(gx, gy, rx, ry)]) and the voids found so far (first layer wins)
-    taken = {}
+    # Existing markings (cell -> [(gx, gy, rx, ry, layer)]) and the voids found so far per layer
+    existing, taken = {}, {}
     for layer, vs in (void_manager.voids.items() if apply else ()):
         for v in vs:
             if void_manager.is_bbox(v):
                 continue
             gx, gy = to_deskew(v["globalCX"], v["globalCY"])
-            taken.setdefault(grid_cfg.cell_at(gx, gy), []).append((gx, gy, v["radiusX"], v["radiusY"], layer))
+            existing.setdefault(grid_cfg.cell_at(gx, gy), []).append((gx, gy, v["radiusX"], v["radiusY"], layer))
 
-    def overlaps(cell, gx, gy, rx, ry):
-        """Layer of the marking / earlier find this spot overlaps, else None."""
-        for (ox, oy, orx, ory, olayer) in taken.get(cell, ()):
+    def overlaps(cell, gx, gy, rx, ry, layer):
+        """Layer of the existing marking (any layer) / find on this layer the spot overlaps, else None."""
+        for (ox, oy, orx, ory, olayer) in existing.get(cell, []) + [t for t in taken.get(cell, []) if t[4] == layer]:
             if abs(gx - ox) < max(rx, orx) and abs(gy - oy) < max(ry, ory):
                 return olayer
         return None
@@ -331,10 +333,10 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
                 if area < min_area or area > max_area:
                     c["status"] = "small" if area < min_area else "large"
                     continue
-                dup = overlaps(cell, gx, gy, rx, ry)
+                dup = overlaps(cell, gx, gy, rx, ry, layer)
                 if dup is not None:
                     c["status"], c["dup_layer"] = "dup", dup
-                    continue # Marked already, or found on an upper layer
+                    continue # Marked already, or found on this layer already
                 score = float(blob.max())
                 vtype = type_name
                 extent = (x0 + c0 * sx, y0 + r0 * sy, x0 + c1 * sx, y0 + (r1 + 1) * sy)
@@ -349,7 +351,7 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
                             ("bright" if float((signed[r0:r1 + 1, c0:c1] * blob).sum()) > 0 else "dark")}
                     vtype = classifier.type_for(feat, rects[cell], type_name)
                 taken.setdefault(cell, []).append((gx, gy, rx, ry, layer))
-                found.append((layer, gx, gy, rx, ry, score, vtype, cell, extent))
+                found.append((layer, gx, gy, rx, ry, score, vtype, cell, extent, c))
                 c["status"], c["type"], c["extent"] = "kept", vtype, extent
                 count += 1
             if diag is not None:
@@ -358,6 +360,22 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
         if diag is not None:
             diag.layer_end(layer)
 
+    # 4. A spot found on several layers is one void, marked on the layer chosen by layer_rule:
+    #    "first" (where it first appears from the top), "last", or "strongest" (largest deviation)
+    rule = p.get("layer_rule", "first")
+    prefer = {"first": lambda f: (f[0], -f[5]), "last": lambda f: (-f[0], -f[5])}.get(rule, lambda f: (-f[5], f[0]))
+    chosen, by_cell = set(), {}
+    for f in sorted(found, key=prefer):
+        layer, gx, gy, rx, ry, cell, c = f[0], f[1], f[2], f[3], f[4], f[7], f[9]
+        hit = next((k for k in by_cell.get(cell, ()) if abs(gx - k[1]) < max(rx, k[3]) and abs(gy - k[2]) < max(ry, k[4])), None)
+        if hit is not None:
+            c["status"], c["dup_layer"] = "dup", hit[0]
+            continue
+        by_cell.setdefault(cell, []).append(f)
+        chosen.add(id(f))
+    found = [f for f in found if id(f) in chosen]
+    per_layer = {layer: sum(1 for f in found if f[0] == layer) for layer in per_layer}
+
     if not apply:
         return {"added": 0, "per_layer": per_layer, "found": found}
 
@@ -365,7 +383,7 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
     vm = void_manager
     vm.begin_change()
     try:
-        for layer, gx, gy, rx, ry, score, vtype, cell, extent in found:
+        for layer, gx, gy, rx, ry, score, vtype, cell, extent, _ in found:
             # Placed like a hand marking (same function as a click). Corner-anchored types attach
             # to the bbox corner nearest the blob, sized to its far extent corner (like drawing
             # it from the corner).
