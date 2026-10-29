@@ -98,8 +98,8 @@ def _components(mask):
 
 def _phase_shift(a, b):
     """Translation (dx, dy) of the content of a against b (working px) by phase correlation, subpixel."""
-    a = np.asarray(a, np.float32)
-    b = np.asarray(b, np.float32)
+    a = np.nan_to_num(np.asarray(a, np.float32), posinf=0.0, neginf=0.0)
+    b = np.nan_to_num(np.asarray(b, np.float32), posinf=0.0, neginf=0.0)
     # Hann window: the image border (same place in both) would otherwise pull the peak to 0;
     # partial whitening (|R|^0.5) keeps the peak sharp without amplifying empty frequencies or
     # locking onto a repeated pattern (bump array) one period off
@@ -155,8 +155,8 @@ def _register(chips, max_frac=0.1):
         for k, c in chips.items():
             a = c.astype(np.float32)
             dx, dy = _phase_shift(a, ref)
-            if math.hypot(dx, dy) > lim:
-                dx = dy = 0.0
+            if not (math.isfinite(dx) and math.isfinite(dy)) or math.hypot(dx, dy) > lim:
+                dx = dy = 0.0 # Not trusted: left as cut
             out[k] = _translate(a, dx, dy).astype(np.float16) if (dx or dy) else c
             shifts[k] = (dx, dy)
         ref = np.median(np.stack([out[keys[i]].astype(np.float32) for i in idx]), axis=0)
@@ -410,7 +410,7 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
                 continue
             region = to_gray(stack.read_region(z, rx0, ry0, rx1 - rx0, ry1 - ry0))
             quad = tuple(v for q in corners for v in (q[0] - rx0, q[1] - ry0))
-            chips[cell] = _normalize(_chip(region, quad, size, factor)).astype(np.float16)
+            chips[cell] = np.clip(_normalize(_chip(region, quad, size, factor)), -6e4, 6e4).astype(np.float16)
         stack.release_cache()
         if len(chips) < 3:
             continue
