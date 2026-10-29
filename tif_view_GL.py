@@ -8,6 +8,8 @@ from collections import OrderedDict
 from datetime import datetime
 import json
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -24,7 +26,7 @@ from PySide6.QtCore import Qt, QTimer, QEvent, QPointF
 from sat_widgets.core_data import TiffStack, MosaicTiffStack, GridConfig, BondingMap, to_uint16, ImageNormalizer, CoordinateTransform
 from sat_widgets.void_manager import VoidManager, VoidTypeDialog
 from sat_widgets.gl_widget import GLImageWidget, TiledImage
-from sat_widgets.layer_loader import LayerLoader
+from sat_widgets.layer_loader import LayerLoader, STATS_STEP
 from sat_widgets.exporter import ExportManager
 from sat_widgets.patch_viewer import PatchViewer
 from sat_widgets.roi_inspector import ROIInspector
@@ -40,6 +42,59 @@ from sat_widgets.updater import UpdateChecker, show_update_dialog
 # ==================================================================================
 # 4. Main Window
 # ==================================================================================
+def calibrate_layer(stack, z, p, preview=None):
+    """
+    (rows, cols, 2) scale / offset per cell of layer z: the cell's brightness (mean / std, or
+    median / IQR when robust) is mapped to the target. Cells without a bonding map value (and
+    outside the image) get scale 1, offset 0. Thread-safe given its own stack reader.
+    preview: (array, step), every step-th pixel of the layer kept by the background loader: the
+    statistics are taken from it (no decoding), else from the stack.
+    """
+    h, w = stack.height, stack.width
+    rows, cols = p["rows"], p["cols"]
+    pitch_x, pitch_y = p["pitch_x"], p["pitch_y"]
+    win_lo = p["win_lo"]
+    win_range = max(1, p["win_hi"] - win_lo)
+    bonded = p["bonded"]
+    calib = np.zeros((rows, cols, 2), dtype=np.float32)
+    calib[:, :, 0] = 1.0
+    for r in range(rows):
+        for c in range(cols):
+            if bonded is not None and (r, c) not in bonded:
+                continue # Not bonded -> no calibration
+            # Cell Center: Deskewed (grid) -> Raw (same transform as the display)
+            cx, cy = p["to_raw"](p["start_x"] + (c + 0.5) * pitch_x, p["start_y"] + (r + 0.5) * pitch_y)
+            x0 = max(0, min(w, int(cx - pitch_x / 2)))
+            x1 = max(0, min(w, int(cx + pitch_x / 2)))
+            y0 = max(0, min(h, int(cy - pitch_y / 2)))
+            y1 = max(0, min(h, int(cy + pitch_y / 2)))
+            if x1 <= x0 or y1 <= y0:
+                continue
+            if preview is not None:
+                arr, s = preview
+                # Preview pixel k is source pixel k * s: keep those inside [x0, x1) x [y0, y1)
+                sub = arr[-(-y0 // s):-(-y1 // s), -(-x0 // s):-(-x1 // s)]
+                step = int(np.sqrt(sub.size / 10000)) if sub.size > 10000 else 1
+                roi = to_uint16(sub[::max(1, step), ::max(1, step)])
+            else:
+                # Subsample to ~10k pixels while reading
+                roi_size = (x1 - x0) * (y1 - y0)
+                step = int(np.sqrt(roi_size / 10000)) if roi_size > 10000 else 1
+                roi = to_uint16(stack.read_region(z, x0, y0, x1 - x0, y1 - y0, max(1, step)))
+            if p["robust"]:
+                mean = np.median(roi)
+                q75, q25 = np.percentile(roi, [75, 25])
+                std = (q75 - q25) / 1.35
+            else:
+                mean = np.mean(roi)
+                std = np.std(roi)
+            std = max(std, 1.0)
+            scale = p["target_std"] / std
+            calib[r, c, 0] = scale
+            calib[r, c, 1] = (p["target_mean"] - win_lo - scale * (mean - win_lo)) / win_range
+    return calib
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -61,6 +116,7 @@ class MainWindow(QMainWindow):
         # Background loading (see sat_widgets/layer_loader.py)
         self.layer_loader = None
         self.layer_proxies = {} # z -> uploaded low-resolution preview (TiledImage)
+        self.layer_proxy_arrays = {} # z -> (every STATS_STEP-th pixel, step): per-cell statistics (calibration)
         self._ram_layers = {} # z -> decoded tiles of a neighbour layer that did not fit the GPU budget
         self._upload_queue = [] # TiledImages with tiles waiting for upload (current layer first)
         self._upload_timer = QTimer(self)
@@ -314,6 +370,7 @@ class MainWindow(QMainWindow):
         # Connect Cursor Signal
         self.glw.view_center_changed.connect(self.on_view_center_changed)
         self.glw.navigation_requested.connect(self.on_navigation_requested)
+        self.glw.cell_step_requested.connect(self.step_bonded_cell)
         self.glw.cursor_moved.connect(self.on_cursor_moved)
         
         # 3.5 Void Marking Control
@@ -1103,6 +1160,27 @@ class MainWindow(QMainWindow):
         size = f"{bmap.rows}x{bmap.cols}" if bmap is not None else "not parsed"
         self.statusBar().showMessage(f"Bonding map of {wafer_id}: {size}")
 
+    def step_bonded_cell(self, direction=1):
+        """
+        Right click: the next cell with a bonding map value (left to right, then the next row;
+        Shift + right click: previous), wrapping around. All grid cells without a bonding map.
+        """
+        cfg = self.glw.grid_cfg
+        bmap = self.glw.bonding_map
+        cells = [(r, c) for r in range(cfg.rows) for c in range(cfg.cols) if bmap is None or bmap.get_key(r, c)]
+        if not cells:
+            self.statusBar().showMessage("No cell with a bonding map value.")
+            return
+        here = tuple(self.glw.center_cell())
+        if direction > 0:
+            nxt = next((rc for rc in cells if rc > here), cells[0])
+        else:
+            nxt = next((rc for rc in reversed(cells) if rc < here), cells[-1])
+        r, c = nxt
+        self.glw.fit_to_cell(c, r)
+        leg = bmap.get_key(r, c) if bmap is not None else "-"
+        self.statusBar().showMessage(f"Cell {cells.index(nxt) + 1}/{len(cells)}: X{c:02d} Y{r:02d}  LEG {leg}")
+
     def auto_level(self):
         c = self.sb_jump_x.value()
         r = self.sb_jump_y.value()
@@ -1715,7 +1793,7 @@ class MainWindow(QMainWindow):
             self.preload_gpu_cache()
             return
         loader = LayerLoader(self.full_data, TiledImage.TILE_SIZE, parent=self)
-        loader.loaded.connect(lambda z, tiles, proxy, L=loader: self._on_layer_decoded(L, z, tiles, proxy))
+        loader.loaded.connect(lambda z, tiles, proxy, stats, L=loader: self._on_layer_decoded(L, z, tiles, proxy, stats))
         self.layer_loader = loader
         self._schedule_layer_loads()
 
@@ -1732,6 +1810,7 @@ class MainWindow(QMainWindow):
                 p.cleanup()
             self.glw.doneCurrent()
             self.layer_proxies.clear()
+        self.layer_proxy_arrays.clear()
 
     def layers_loading(self):
         """True while layers are decoded or uploaded in the background."""
@@ -1762,14 +1841,13 @@ class MainWindow(QMainWindow):
                 del self._ram_layers[z]
         jobs = []
         for z in order:
-            if z in full:
-                if not self._has_layer_data(z):
-                    jobs.append((z, True))
-            elif z not in self.layer_proxies and z not in self.layer_cache:
+            if z in full and not self._has_layer_data(z):
+                jobs.append((z, True))
+            elif z not in self.layer_proxy_arrays: # Preview + statistics sample (calibration), also for GPU layers
                 jobs.append((z, False))
         L.request(jobs)
 
-    def _on_layer_decoded(self, loader, z, tiles, proxy):
+    def _on_layer_decoded(self, loader, z, tiles, proxy, stats=None):
         loader.ack()
         if loader is not self.layer_loader or self.full_data is None:
             return # Result of a closed file
@@ -1783,6 +1861,8 @@ class MainWindow(QMainWindow):
             if z == self.current_z and self.glw.tiled_image is not None and not self.glw.tiled_image.fully_uploaded:
                 self.glw.proxy_image = p
                 self.glw.update()
+        if stats is not None:
+            self.layer_proxy_arrays[z] = (stats, STATS_STEP)
         if tiles is None:
             return
         t = self.layer_cache.get(z)
@@ -1917,116 +1997,91 @@ class MainWindow(QMainWindow):
             self.glw.update()
 
     def calculate_calibration(self):
+        """
+        Per-cell brightness calibration (scale, offset) of the current layer, or of all loaded
+        layers ("Apply to All Layers"). Only cells with a bonding map value are computed
+        (others keep scale 1, offset 0). Layers are decoded and computed in parallel, each worker
+        with its own reader of the file; the GUI stays responsive (progress, Cancel).
+        """
         if self.full_data is None: return
-        
-        # Determine layers to calculate
-        layers_to_calc = [self.current_z]
-        if self.chk_calib_all.isChecked():
-            # Calc for all available layers
-             if self.full_data.ndim > 2 and (not (self.full_data.ndim==3 and self.full_data.shape[-1] in [3,4])):
-                 layers_to_calc = list(range(self.full_data.shape[0]))
-        
-        # Progress Dialog if multiple
+        n_layers = len(self.full_data)
+        layers_to_calc = list(range(n_layers)) if self.chk_calib_all.isChecked() else [self.current_z]
+
+        cfg = self.glw.grid_cfg
+        bmap = self.glw.bonding_map
+        params = {
+            "start_x": cfg.start_x, "start_y": cfg.start_y, "pitch_x": cfg.pitch_x, "pitch_y": cfg.pitch_y,
+            "rows": cfg.rows, "cols": cfg.cols,
+            "to_raw": self.glw.deskew_to_raw,
+            "bonded": None if bmap is None else {(r, c) for r in range(cfg.rows) for c in range(cfg.cols) if bmap.get_key(r, c)},
+            "robust": self.chk_calib_robust.isChecked(),
+            "target_mean": self.sb_target_mean.value(), "target_std": self.sb_target_std.value(),
+            "win_lo": self.glw.win_lo, "win_hi": self.glw.win_hi,
+        }
         progress = None
         if len(layers_to_calc) > 1:
-            progress = QProgressDialog("Calibrating all layers...", "Cancel", 0, len(layers_to_calc), self)
+            progress = QProgressDialog("Calibrating layers...", "Cancel", 0, len(layers_to_calc), self)
             progress.setWindowModality(Qt.WindowModal)
             progress.show()
-            
-        cfg = self.glw.grid_cfg
-        target_mean = self.sb_target_mean.value()
-        target_std = self.sb_target_std.value()
-        win_lo = self.glw.win_lo
-        
-        # Loop layers
-        for i, z_idx in enumerate(layers_to_calc):
-            if progress:
-                if progress.wasCanceled(): break
-                progress.setValue(i)
-                QApplication.processEvents()
-                
-            # Only the cell regions are read (no full-layer copy)
-            h, w = self.full_data.height, self.full_data.width
-            
-            # Grid Loop
-            start_x = cfg.start_x
-            start_y = cfg.start_y
-            pitch_x = cfg.pitch_x
-            pitch_y = cfg.pitch_y
-            rows = cfg.rows
-            cols = cfg.cols
-            
-            # Win Lo/Hi for normalization
-            # Note: win_lo/hi might be shared or per layer?
-            # Typically shared global slider.
-            win_lo = self.glw.win_lo
-            win_hi = self.glw.win_hi
-            win_range = win_hi - win_lo
-            if win_range < 1: win_range = 1
-            
-            calib_data = np.zeros((rows, cols, 2), dtype=np.float32)
 
-            for r in range(rows):
-                for c in range(cols):
-                    # Cell Center: Deskewed (grid) -> Raw (same transform as the display)
-                    center_x, center_y = self.glw.deskew_to_raw(start_x + (c + 0.5) * pitch_x,
-                                                                start_y + (r + 0.5) * pitch_y)
-                    
-                    x0 = int(center_x - pitch_x/2)
-                    y0 = int(center_y - pitch_y/2)
-                    x1 = int(center_x + pitch_x/2)
-                    y1 = int(center_y + pitch_y/2)
-                    
-                    # Clip
-                    y0_c = max(0, min(h, y0))
-                    y1_c = max(0, min(h, y1))
-                    x0_c = max(0, min(w, x0))
-                    x1_c = max(0, min(w, x1))
-                    
-                    if x1_c <= x0_c or y1_c <= y0_c:
-                        calib_data[r, c, 0] = 1.0 # Scale
-                        calib_data[r, c, 1] = 0.0 # Offset
-                        continue
-                        
-                    # Check Bonding Map (Selective Calibration)
-                    if self.glw.bonding_map:
-                        key = self.glw.bonding_map.get_key(r, c)
-                        if not key:
-                            # Not bonded -> Skip calibration
-                            calib_data[r, c, 0] = 1.0
-                            calib_data[r, c, 1] = 0.0
-                            continue
-                            
-                    # Performance optimization: subsample to ~10k pixels while reading
-                    roi_size = (x1_c - x0_c) * (y1_c - y0_c)
-                    step = int(np.sqrt(roi_size / 10000)) if roi_size > 10000 else 1
-                    roi_stats = to_uint16(self.full_data.read_region(z_idx, x0_c, y0_c, x1_c - x0_c, y1_c - y0_c, max(1, step)))
-                    
-                    if self.chk_calib_robust.isChecked():
-                        mean = np.median(roi_stats)
-                        q75, q25 = np.percentile(roi_stats, [75, 25])
-                        iqr = q75 - q25
-                        std = iqr / 1.35 
-                    else:
-                        mean = np.mean(roi_stats)
-                        std = np.std(roi_stats)
-                        
-                    if std < 1.0: std = 1.0 
-                    
-                    scale = target_std / std
-                    offset = (target_mean - win_lo - scale * (mean - win_lo)) / win_range
-                    
-                    calib_data[r, c, 0] = scale
-                    calib_data[r, c, 1] = offset
-            
-            # Store in cache
-            self.layer_calib_data[z_idx] = calib_data
+        stack = self.full_data
+        # Layers whose preview is in memory (background loader): computed at once, no decoding
+        for z in [z for z in layers_to_calc if z in self.layer_proxy_arrays]:
+            self.layer_calib_data[z] = calibrate_layer(stack, z, params, self.layer_proxy_arrays[z])
+        done_now = len(layers_to_calc)
+        layers_to_calc = [z for z in layers_to_calc if z not in self.layer_proxy_arrays]
+        done_now -= len(layers_to_calc)
+        if progress:
+            progress.setMaximum(done_now + len(layers_to_calc))
+            progress.setValue(done_now)
+        workers = min(len(layers_to_calc), os.cpu_count() or 2, 4) if stack.supports_reopen else 1
+        if workers <= 1:
+            for i, z in enumerate(layers_to_calc):
+                if progress:
+                    if progress.wasCanceled(): break
+                    progress.setValue(done_now + i)
+                    QApplication.processEvents()
+                self.layer_calib_data[z] = calibrate_layer(stack, z, params)
+            stack.release_cache()
+        else:
+            # One reader per worker thread (decoding releases the GIL)
+            local = threading.local()
+            readers = []
+            canceled = threading.Event() # Set from the GUI thread (no widget access in workers)
 
-        self.full_data.release_cache()
+            def job(z):
+                if canceled.is_set():
+                    return z, None
+                rd = getattr(local, "reader", None)
+                if rd is None:
+                    rd = local.reader = stack.reopen()
+                    readers.append(rd)
+                out = calibrate_layer(rd, z, params)
+                rd.release_cache()
+                return z, out
+
+            with ThreadPoolExecutor(workers) as pool:
+                futures = [pool.submit(job, z) for z in layers_to_calc]
+                done = 0
+                while done < len(futures):
+                    done = sum(f.done() for f in futures)
+                    if progress:
+                        progress.setValue(done_now + done)
+                        if progress.wasCanceled():
+                            canceled.set()
+                    QApplication.processEvents()
+                    time.sleep(0.02)
+                for f in futures:
+                    z, out = f.result()
+                    if out is not None:
+                        self.layer_calib_data[z] = out
+            for rd in readers:
+                rd.close()
 
         if progress:
-            progress.setValue(len(layers_to_calc))
-            
+            progress.setValue(progress.maximum())
+            progress.close()
+
         # Update current layer View
         if self.current_z in self.layer_calib_data:
             self.glw.update_calib_texture(self.layer_calib_data[self.current_z])

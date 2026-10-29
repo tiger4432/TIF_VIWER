@@ -19,6 +19,8 @@ from PySide6.QtCore import QObject, Signal
 from .core_data import to_gray
 
 PROXY_MAX = 2048 # Longest side of a preview texture
+STATS_STEP = 5 # Every 5th pixel kept per layer for per-cell statistics (calibration): as accurate
+               # as full resolution on sharp layouts (a 1/8 preview is not: aliasing)
 
 
 def proxy_step(width, height):
@@ -26,8 +28,9 @@ def proxy_step(width, height):
 
 
 class LayerLoader(QObject):
-    # z, tiles (list of (h, w) arrays in TiledImage tile order) or None, preview array
-    loaded = Signal(int, object, object)
+    # z, tiles (list of (h, w) arrays in TiledImage tile order) or None, preview array,
+    # statistics sample (every STATS_STEP-th pixel)
+    loaded = Signal(int, object, object, object)
 
     def __init__(self, stack, tile_size, workers=2, parent=None):
         super().__init__(parent)
@@ -80,10 +83,10 @@ class LayerLoader(QObject):
                 try:
                     if reader is None:
                         reader = self._open_reader()
-                    tiles, proxy = self._decode(reader, z, want_tiles)
+                    tiles, proxy, stats = self._decode(reader, z, want_tiles)
                 except Exception as e:
                     print(f"[LayerLoader] layer {z}: {e}")
-                    tiles = proxy = None
+                    tiles = proxy = stats = None
                 with self._cv:
                     self._running.discard(z)
                     if self._stop:
@@ -91,7 +94,7 @@ class LayerLoader(QObject):
                     if proxy is not None:
                         self._undelivered += 1
                 if proxy is not None:
-                    self.loaded.emit(z, tiles, proxy)
+                    self.loaded.emit(z, tiles, proxy, stats)
         finally:
             if reader is not None:
                 reader.close()
@@ -101,6 +104,7 @@ class LayerLoader(QObject):
         arr = to_gray(reader.read_region(z, 0, 0, w, h))
         s = proxy_step(w, h)
         proxy = np.ascontiguousarray(arr[::s, ::s])
+        stats = np.ascontiguousarray(arr[::STATS_STEP, ::STATS_STEP])
         tiles = None
         if want_tiles:
             # Views into one decoded array (no copies); each tile is made contiguous at upload.
@@ -111,4 +115,4 @@ class LayerLoader(QObject):
                 arr = np.array(arr)
             tiles = [arr[y:y + T, x:x + T] for y in range(0, h, T) for x in range(0, w, T)] # TiledImage order
         reader.release_cache()
-        return tiles, proxy
+        return tiles, proxy, stats

@@ -165,6 +165,7 @@ class GLImageWidget(QOpenGLWidget):
     cursor_moved = Signal(int, int) # Col, Row
     navigation_requested = Signal(int, int) # Col, Row (Request to move view)
     voids_changed = Signal() # Void data edited (count labels etc.)
+    cell_step_requested = Signal(int) # Right click without dragging: +1 next / -1 previous (Shift) cell
 
     def __init__(self):
         super().__init__()
@@ -1182,9 +1183,10 @@ class GLImageWidget(QOpenGLWidget):
 
     def mousePressEvent(self, e):
         if e.button() in (Qt.MiddleButton, Qt.RightButton):
-            # Pan in every mode
+            # Pan in every mode (a right click without dragging steps to the next cell, see release)
             self._last_mouse = e.position()
             self._pan_only = True
+            self._press_pos = e.position()
             self.setFocus()
             return
         if e.button() == Qt.LeftButton:
@@ -1553,6 +1555,10 @@ class GLImageWidget(QOpenGLWidget):
         if getattr(self, '_pan_only', False):
             self._pan_only = False
             self.update_cursor_style()
+            p0 = getattr(self, '_press_pos', None)
+            if e.button() == Qt.RightButton and p0 is not None and \
+                    abs(e.position().x() - p0.x()) + abs(e.position().y() - p0.y()) < 4:
+                self.cell_step_requested.emit(-1 if e.modifiers() & Qt.ShiftModifier else 1)
             return
 
         # A click without dragging in Drag-to-Size mode leaves a 1px void -> discard it
