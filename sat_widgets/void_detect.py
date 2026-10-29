@@ -16,6 +16,9 @@ background:
    to chip (registration), so they get a larger spread and do not trigger.
 3. |chip - golden| / spread above the threshold, brighter OR darker, cleaned with a small
    opening, gives the candidate blobs; each blob becomes an ellipse (its bounding box).
+   With "smooth" (default) the signed difference is first averaged over a small neighbourhood
+   and compared with the chip-to-chip spread of that average: large faint voids, invisible pixel
+   by pixel, rise above the noise (see _die_to_die).
 4. A spot found on several layers is marked once, on the layer chosen by layer_rule: the first
    where it appears from the top (default), the last, or the one with the strongest deviation.
    Spots overlapping an existing marking (any layer) are skipped.
@@ -30,6 +33,8 @@ Parameters (config.json "void_detect", defaults in DEFAULTS):
     work_size        longest side of the working chip image (pixels)
     template_cells   chips used to build the golden chip
     layer_rule       "first" (default) | "last" | "strongest": layer of a spot found on several layers
+    smooth           averaging radius (Gaussian sigma, working px) of the deviation; 0 = pixel by
+                     pixel (sharper outlines, misses large faint voids)
     type_rules       void type from the layout position and shape (sat_widgets/void_classify.py);
                      products.json "type_rules" of the selected product win
     method           "die_to_die" (default) or "patchcore" (CNN features, optional: needs
@@ -51,6 +56,7 @@ DEFAULTS = {
     "template_cells": 200,
     "method": "die_to_die", # or "patchcore" (optional, sat_widgets/patchcore.py)
     "layer_rule": "first",
+    "smooth": 1.5, # Averaging of the deviation (working px) for large faint voids; 0 = per pixel
 }
 
 
@@ -427,15 +433,60 @@ def _golden(chips, p):
     return spread, gmin, gmax, _Matcher(golden)
 
 
+def _blur(a, sigma):
+    """Gaussian blur (separable, edges extended) of a small float image."""
+    if sigma <= 0:
+        return a
+    r = max(1, int(math.ceil(3 * sigma)))
+    k = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2)
+    k /= k.sum()
+    pad = np.pad(a, r, mode="edge")
+    h, w = a.shape
+    tmp = sum(k[i] * pad[:, i:i + w] for i in range(2 * r + 1))
+    return sum(k[i] * tmp[i:i + h, :] for i in range(2 * r + 1)).astype(np.float32)
+
+
 def _die_to_die(chips, p, diag=None):
     """
-    Yields (cell, deviation map, sign, matched chip): |chip - golden| / spread after matching,
-    see the module doc.
+    Yields (cell, deviation map, sign, matched chip): (chip - golden) / spread after matching,
+    see the module doc. With "smooth" (working px) the signed deviation is averaged over its
+    neighbourhood first: pixel noise averages out while a void (many pixels deviating the same
+    way) keeps its level, so large faint voids rise above the noise. The averaged deviation is
+    then compared like a chip: against its own per-pixel median and chip-to-chip spread over a
+    sample of chips, so layout edges (whose residuals do not average out) stay quiet.
     """
     spread, gmin, gmax, match = _golden(chips, p)
     if diag is not None:
         diag.golden(match.golden, spread)
-    for cell in chips:
+    sigma = float(p.get("smooth", 0.0))
+
+    golden = match.golden
+
+    def signed(cell):
         m = match.apply(chips[cell].astype(np.float32))
+        if sigma > 0:
+            # Averaged path: the plain difference (noise stays near-Gaussian when averaged; the
+            # 3x3 envelope would leave sparse spikes whose average is heavy-tailed). Layout edges
+            # are handled by the spread of the averaged deviation below.
+            return m, (m - golden) / spread
         hi, lo = np.maximum(m - gmax, 0), np.maximum(gmin - m, 0)
-        yield cell, (hi + lo) / spread, np.sign(hi - lo), m # Sign: brighter / darker than the golden chip
+        return m, (hi - lo) / spread # > 0: brighter than the golden chip, < 0: darker
+
+    if sigma > 0:
+        keys = list(chips)
+        n = min(len(keys), int(p["template_cells"]), 64)
+        sample = np.stack([_blur(signed(keys[i])[1], sigma) for i in np.linspace(0, len(keys) - 1, n).astype(int)])
+        s_med = np.median(sample, axis=0)
+        # Spread from the 90th percentile (normal-consistent) instead of the median: averaged
+        # residuals of matching / registration are heavy-tailed, the median would underrate them.
+        # The extra 4/3 keeps the threshold comparable to the pixel path (tested: same false
+        # detections at the same threshold on high-contrast data).
+        s_spread = np.quantile(np.abs(sample - s_med), 0.9, axis=0) / 1.6449 * (4.0 / 3.0)
+        del sample
+        s_spread = _filt(s_spread, ImageFilter.MaxFilter(3))
+        s_spread = np.maximum(s_spread, 0.5 * float(np.median(s_spread)) + 1e-3)
+    for cell in chips:
+        m, d = signed(cell)
+        if sigma > 0:
+            d = (_blur(d, sigma) - s_med) / s_spread
+        yield cell, np.abs(d), np.sign(d), m
