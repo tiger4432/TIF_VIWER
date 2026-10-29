@@ -573,10 +573,14 @@ class MainWindow(QMainWindow):
 
     def _apply_bbox_size(self):
         """
-        Default size of the bbox type (session only, not written to config.json):
-        chip_size_um / scale, or the legacy "bbox": {"w", "h"} in pixels.
-        No scale -> 0 (drag to size; Detect BBOX uses the detected size).
+        Default size of the bbox type for the selected product (session only, not written to
+        config.json): chip_size_um / scale, or the legacy "bbox": {"w", "h"} in pixels.
+        No scale -> 0 (drag to size; Detect BBOX uses the detected size). A product declaring
+        neither gets the size declared in config.json (not the previous product's).
         """
+        name = self._bbox_type_name()
+        if name is None:
+            return
         prod = getattr(self, "current_product", None) or {}
         chip = prod.get("chip_size_um")
         if chip:
@@ -585,11 +589,10 @@ class MainWindow(QMainWindow):
         elif prod.get("bbox"):
             w, h = prod["bbox"].get("w", 0.0), prod["bbox"].get("h", 0.0)
         else:
-            return
-        name = self._bbox_type_name()
-        if name is not None:
-            t = self.void_manager.types[name]
-            t["def_w"], t["def_h"] = float(w), float(h)
+            declared = VoidManager.normalize_types(self._config().get("void_types", {})).get(name, {})
+            w, h = declared.get("def_w", 0.0), declared.get("def_h", 0.0)
+        t = self.void_manager.types[name]
+        t["def_w"], t["def_h"] = float(w), float(h)
 
     def on_scale_changed(self, value):
         self.void_manager.um_per_px = value

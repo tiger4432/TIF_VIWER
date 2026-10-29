@@ -204,6 +204,7 @@ voids.json의 필드와 voids.csv의 컬럼 이름을 exe를 다시 빌드하지
   - `SL`은 스크라이브 라인 폭(x, y, um)입니다. `snap_offset: "SL"`인 타입은 bbox 코너에서 이만큼 안쪽 지점을 기준으로 그립니다.
   - 박스는 `"inset": "SL"`(bbox를 SL만큼 안쪽으로 줄인 영역), `"rect": [x, y, w, h]`, `"repeat"`(배열 반복)로 정의합니다.
 - 이전 형식(`"bbox": {"w", "h"}` 픽셀 + `layout.design_size`)도 그대로 읽습니다.
+- bbox 크기는 **제품마다** 다르게 적습니다(`chip_size_um` 또는 `bbox`). 제품을 바꾸면 bbox 타입의 기본 크기(그리기, Detect BBOX)가 그 제품 값으로 바뀌고, 둘 다 없는 제품은 `config.json`의 bbox 타입 크기로 돌아갑니다. 이미 그린 bbox는 그대로입니다.
 
 ### 축척 (Scale)
 
