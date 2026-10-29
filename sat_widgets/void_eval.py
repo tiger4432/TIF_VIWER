@@ -23,7 +23,7 @@ import time
 import numpy as np
 from PIL import Image, ImageDraw
 
-from .void_detect import _components
+from .void_detect import _components, _phase_shift as _shift
 
 VERSION = 1
 MAX_IMAGES = 150 # Chip images written to the report
@@ -64,31 +64,6 @@ def _fmt(x, digits=2):
 def _med(values):
     values = [v for v in values if v is not None]
     return float(np.median(values)) if values else None
-
-
-def _shift(a, b):
-    """Translation of a against b (working px, x, y) by phase correlation, subpixel."""
-    a = np.asarray(a, np.float32)
-    b = np.asarray(b, np.float32)
-    A = np.fft.rfft2(a - a.mean())
-    B = np.fft.rfft2(b - b.mean())
-    R = A * np.conj(B)
-    R /= np.abs(R) + 1e-9
-    r = np.fft.irfft2(R, s=a.shape)
-    h, w = r.shape
-    iy, ix = np.unravel_index(int(np.argmax(r)), r.shape)
-
-    def sub(c0, cm, cp):
-        d = cm - 2 * c0 + cp
-        return 0.0 if abs(d) < 1e-12 else 0.5 * (cm - cp) / d
-
-    dy = iy + sub(r[iy, ix], r[(iy - 1) % h, ix], r[(iy + 1) % h, ix])
-    dx = ix + sub(r[iy, ix], r[iy, (ix - 1) % w], r[iy, (ix + 1) % w])
-    if dy > h / 2:
-        dy -= h
-    if dx > w / 2:
-        dx -= w
-    return float(dx), float(dy)
 
 
 def _boxes_meet(a, b, tol=0.0):
@@ -149,6 +124,7 @@ class Evaluation:
         st["maxdev"].append(float(dev.max()))
         st["cand"] += len(comps)
         img = matched if matched is not None else self.chip_src[cell].astype(np.float32)
+        raw = self.chip_src[cell].astype(np.float32) # As cut by the bbox (before any registration)
         if self.gold is not None and matched is not None:
             st["res"].append(float(np.median(np.abs(matched - self.gold))))
         truths = self.by_lc.get((layer, cell), [])
@@ -157,7 +133,7 @@ class Evaluation:
         shift = None
         if interesting or self.n_shift < SHIFT_SAMPLE:
             self.n_shift += 1
-            shift = _shift(img, self.ref)
+            shift = _shift(raw, self.ref)
             st["shift"].append(math.hypot(*shift))
         x0, y0, w, h = self.rects[cell]
         W, H = self.size
@@ -367,7 +343,7 @@ class Evaluation:
         for k in sorted(int(x) for x in (p.get("skip_layers") or [])):
             rule += f" sk{k}"
         if p.get("method") == "die_to_die":
-            rule += f" sm{_fmt(p.get('smooth', 0))}" + (" lf" if p.get("layout_fit", True) else "")
+            rule += f" sm{_fmt(p.get('smooth', 0))}" + (" lf" if p.get("layout_fit", True) else "") + (" rg" if p.get("register", True) else "")
         elif p.get("pc_position_norm", False):
             rule += " pn"
         lines = [f"VD{VERSION} {m} {rule} t{_fmt(thr)} f{self.factor} w{max(self.size)} m{_fmt(p.get('min_size_px'))} "

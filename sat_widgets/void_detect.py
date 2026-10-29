@@ -60,6 +60,7 @@ DEFAULTS = {
     "smooth": 1.5, # Averaging of the deviation (working px) for large faint voids; 0 = per pixel
     "skip_layers": [0], # Absolute layer numbers not searched (top layer: surface echo noise)
     "layout_fit": True, # Fit away per-chip layout contrast / sharpness (see _LayoutFit)
+    "register": True, # Move every chip onto the median chip (subpixel) before comparing
 }
 
 
@@ -93,6 +94,73 @@ def _components(mask):
         b[2], b[3] = min(b[2], c0), max(b[3], c1)
         b[4] += c1 - c0
     return list(comps.values()) # [r0, r1, c0, c1 (exclusive), area]
+
+
+def _phase_shift(a, b):
+    """Translation (dx, dy) of the content of a against b (working px) by phase correlation, subpixel."""
+    a = np.asarray(a, np.float32)
+    b = np.asarray(b, np.float32)
+    # Hann window: the image border (same place in both) would otherwise pull the peak to 0;
+    # partial whitening (|R|^0.5) keeps the peak sharp without amplifying empty frequencies or
+    # locking onto a repeated pattern (bump array) one period off
+    win = np.outer(np.hanning(a.shape[0]), np.hanning(a.shape[1])).astype(np.float32)
+    A = np.fft.rfft2((a - a.mean()) * win)
+    B = np.fft.rfft2((b - b.mean()) * win)
+    R = A * np.conj(B)
+    R /= np.abs(R) ** 0.5 + 1e-9
+    r = np.fft.irfft2(R, s=a.shape)
+    h, w = r.shape
+    iy, ix = np.unravel_index(int(np.argmax(r)), r.shape)
+
+    def sub(c0, cm, cp):
+        d = cm - 2 * c0 + cp
+        return 0.0 if abs(d) < 1e-12 else 0.5 * (cm - cp) / d
+
+    dy = iy + sub(r[iy, ix], r[(iy - 1) % h, ix], r[(iy + 1) % h, ix])
+    dx = ix + sub(r[iy, ix], r[iy, (ix - 1) % w], r[iy, (ix + 1) % w])
+    if dy > h / 2:
+        dy -= h
+    if dx > w / 2:
+        dx -= w
+    return float(dx), float(dy)
+
+
+def _translate(a, dx, dy):
+    """a sampled at (x + dx, y + dy): undoes a content shift (dx, dy); bilinear, edges extended."""
+    h, w = a.shape
+    pad = int(math.ceil(max(abs(dx), abs(dy)))) + 1
+    ap = np.pad(a.astype(np.float32), pad, mode="edge")
+    ix, iy = int(math.floor(dx)), int(math.floor(dy))
+    fx, fy = dx - ix, dy - iy
+    y0, x0 = pad + iy, pad + ix
+    p00 = ap[y0:y0 + h, x0:x0 + w]
+    p01 = ap[y0:y0 + h, x0 + 1:x0 + 1 + w]
+    p10 = ap[y0 + 1:y0 + 1 + h, x0:x0 + w]
+    p11 = ap[y0 + 1:y0 + 1 + h, x0 + 1:x0 + 1 + w]
+    return (p00 * (1 - fx) * (1 - fy) + p01 * fx * (1 - fy) + p10 * (1 - fx) * fy + p11 * fx * fy).astype(np.float32)
+
+
+def _register(chips, max_frac=0.1):
+    """
+    Chips moved onto the median chip of the layer (subpixel phase correlation): the bbox does not
+    have to sit exactly on every chip. Shifts larger than max_frac of the chip are not trusted
+    (left as cut). Returns ({cell: registered chip}, {cell: (dx, dy)}).
+    """
+    keys = list(chips)
+    idx = np.linspace(0, len(keys) - 1, min(len(keys), 48)).astype(int)
+    ref = np.median(np.stack([chips[keys[i]].astype(np.float32) for i in idx]), axis=0)
+    lim = max_frac * max(ref.shape)
+    for _ in range(2): # Second pass against the sharper median of the registered chips
+        out, shifts = {}, {}
+        for k, c in chips.items():
+            a = c.astype(np.float32)
+            dx, dy = _phase_shift(a, ref)
+            if math.hypot(dx, dy) > lim:
+                dx = dy = 0.0
+            out[k] = _translate(a, dx, dy).astype(np.float16) if (dx or dy) else c
+            shifts[k] = (dx, dy)
+        ref = np.median(np.stack([out[keys[i]].astype(np.float32) for i in idx]), axis=0)
+    return out, shifts
 
 
 def _merge_close(comps, gap):
@@ -363,7 +431,9 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
                 chips = {k: match.apply(c.astype(np.float32)) for k, c in chips.items()}
             items = ((cell, dev, None, None) for cell, dev in pc.score_layer(chips, size).items())
         else:
-            items = _die_to_die(chips, p, diag)
+            # Each chip moved onto the median chip first (the bbox may be off by a few px)
+            src = _register(chips)[0] if p.get("register", True) else chips
+            items = _die_to_die(src, p, diag)
 
         # 3. Blobs per chip
         count = 0
