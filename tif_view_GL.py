@@ -30,6 +30,7 @@ from sat_widgets.roi_inspector import ROIInspector
 from sat_widgets.angle_preview import AnglePreview
 from sat_widgets.auto_bbox import place_bboxes
 from sat_widgets import void_detect
+from sat_widgets import results_api
 from sat_widgets.products import load_products, GRID_KEYS
 from sat_widgets.app_paths import declaration_path, sync_declarations, default_update_manifest
 from sat_widgets.version import APP_VERSION
@@ -251,6 +252,23 @@ class MainWindow(QMainWindow):
         btn_inspect_rois = QPushButton("Inspect ROIs (Debug)")
         btn_inspect_rois.clicked.connect(self.open_roi_inspector)
         v_ext.addWidget(btn_inspect_rois)
+
+        # Results API: send the markings to / load them from another system (plugins/results_api.py)
+        h_api = QHBoxLayout()
+        h_api.addWidget(QLabel("Results API:"))
+        btn_api_preview = QPushButton("Preview")
+        btn_api_preview.setToolTip("Show the payload that Send would send (build_payload of plugins/results_api.py)")
+        btn_api_preview.clicked.connect(self.preview_results_payload)
+        self.btn_api_send = QPushButton("Send")
+        self.btn_api_send.setToolTip("Send the markings (send of plugins/results_api.py, config.json \"results_api\")")
+        self.btn_api_send.clicked.connect(self.send_results)
+        self.btn_api_load = QPushButton("Load")
+        self.btn_api_load.setToolTip("Load markings from the other system (fetch + to_voids of plugins/results_api.py); Ctrl+Z undoes")
+        self.btn_api_load.clicked.connect(self.load_results_from_api)
+        for b in (btn_api_preview, self.btn_api_send, self.btn_api_load):
+            h_api.addWidget(b)
+        v_ext.addLayout(h_api)
+        self.last_export_dir = None
         # (added at the bottom of the dock, below Void Marking)
         
         # 3.2 Coordinate Display & Navigation
@@ -483,6 +501,9 @@ class MainWindow(QMainWindow):
         self.on_window_changed()
         self.update_grid_params()
         
+        # Default values of the inputs (config.json "ui_defaults")
+        self._apply_ui_defaults()
+
         # WF products (declared in products.json next to the program)
         self.load_product_list()
         self.cb_product.currentTextChanged.connect(self.apply_product)
@@ -504,6 +525,7 @@ class MainWindow(QMainWindow):
         self.void_manager.config_path = declaration_path("config.json")
         self.void_manager.load_config()
         self.populate_void_types()
+        self._apply_ui_defaults()
         current = self.cb_product.currentText()
         self.load_product_list()
         if current in self.products:
@@ -512,6 +534,49 @@ class MainWindow(QMainWindow):
             self.apply_product(self.cb_product.currentText())
         self.glw.update()
         self.statusBar().showMessage(f"Declarations reloaded: {self.declaration_status}")
+
+    def _ui_default_setters(self):
+        """config.json "ui_defaults" key -> setter of the input (see README "UI 기본값")."""
+        def toggle(btn, label):
+            def f(v):
+                btn.setChecked(bool(v))
+                btn.setText(f"{label}: {'ON' if v else 'OFF'}")
+            return f
+
+        def void_type(v):
+            i = self.cb_void_type.findData(v)
+            if i < 0:
+                raise ValueError(f"unknown void type {v!r}")
+            self.cb_void_type.setCurrentIndex(i)
+
+        return {
+            "reject_values": lambda v: self.le_reject.setText(", ".join(map(str, v)) if isinstance(v, list) else str(v)),
+            "gpu_cache_mb": lambda v: self.sb_gpu_cache.setValue(int(v)),
+            "start_layer": lambda v: self.sb_start_layer.setValue(int(v)),
+            "end_layer": lambda v: self.sb_end_layer.setValue(int(v)),
+            "show_grid": lambda v: self.chk_grid_show.setChecked(bool(v)),
+            "grid_opacity": lambda v: self.slider_opacity.setValue(int(v)),
+            "um_per_px": lambda v: self.sb_um_per_px.setValue(float(v)),
+            "calib_enabled": lambda v: self.chk_use_calib.setChecked(bool(v)),
+            "calib_robust": toggle(self.chk_calib_robust, "Robust Mode (Ignore Voids)"),
+            "calib_all_layers": toggle(self.chk_calib_all, "Apply to All Layers"),
+            "target_mean": lambda v: self.sb_target_mean.setValue(float(v)),
+            "target_std": lambda v: self.sb_target_std.setValue(float(v)),
+            "void_type": void_type,
+            "export": lambda v: None, # Read by the export dialog when it opens
+        }
+
+    def _apply_ui_defaults(self):
+        """Sets the inputs from config.json "ui_defaults" (the program never writes config.json)."""
+        setters = self._ui_default_setters()
+        for key, value in (self._config().get("ui_defaults") or {}).items():
+            if key not in setters:
+                print(f"[ui_defaults] unknown key '{key}' ignored. Valid keys: {', '.join(setters)}")
+                continue
+            try:
+                setters[key](value)
+            except Exception as e:
+                print(f"[ui_defaults] {key} = {value!r}: {e}")
 
     def _config(self):
         try:
@@ -900,6 +965,23 @@ class MainWindow(QMainWindow):
         self.glw.grid_cfg.cols = self.sb_cols.value()
         self.glw.grid_cfg.angle = self.sb_angle.value()
         
+        # 3.5 Bonding map saved with the export (bonding_map.txt; reject values alongside)
+        bm_txt = os.path.join(folder, "bonding_map.txt")
+        if os.path.exists(bm_txt):
+            try:
+                with open(bm_txt, "r", encoding="utf-8") as f:
+                    text = f.read()
+                rej = os.path.join(folder, "bonding_map_reject.txt")
+                reject = ""
+                if os.path.exists(rej):
+                    with open(rej, "r", encoding="utf-8") as f:
+                        reject = f.read().strip()
+                self.le_reject.setText(reject) # The project's own values (none saved: none)
+                self.txt_map.setPlainText(text)
+                self.import_map_data()
+            except Exception as e:
+                print(f"Bonding map not loaded ({bm_txt}): {e}")
+
         # 4. Load Initial Layer (also sets up the coordinate transform for the void loader)
         self.load_layer(0)
 
@@ -1138,6 +1220,128 @@ class MainWindow(QMainWindow):
             cfg.get("threshold", void_detect.DEFAULTS["threshold"])
         self.sb_detect_thr.setValue(float(self._detect_thr.get(idx, default)))
         self._detect_last = idx
+
+    # -----------------------------------------------
+    # Results API (plugins/results_api.py)
+    # -----------------------------------------------
+    def _results_settings(self):
+        return self._config().get("results_api") or {}
+
+    def _results_error(self, title, text):
+        print(text)
+        box = QMessageBox(QMessageBox.Critical, "Results API", title, parent=self)
+        box.setDetailedText(text) # Traceback for the plugin developer
+        box.exec()
+
+    def _results_plugin(self):
+        settings = self._results_settings()
+        try:
+            return results_api.load_plugin(settings), settings
+        except Exception:
+            self._results_error("The plugin could not be loaded.", traceback.format_exc())
+            return None, settings
+
+    def _results_payload(self):
+        if self.full_data is None:
+            QMessageBox.information(self, "Results API", "Open an image or a project first.")
+            return None, None, None
+        plugin, settings = self._results_plugin()
+        if plugin is None:
+            return None, None, None
+        try:
+            return plugin, settings, plugin.build_payload(results_api.build_context(self, settings))
+        except Exception:
+            self._results_error("build_payload() failed.", traceback.format_exc())
+            return None, None, None
+
+    def preview_results_payload(self):
+        plugin, settings, payload = self._results_payload()
+        if plugin is None:
+            return
+        text = results_api.to_json(payload)
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"Results API payload ({len(text.encode('utf-8')) / 1024:.1f} KB)")
+        dlg.resize(700, 600)
+        lay = QVBoxLayout(dlg)
+        edit = QPlainTextEdit(text)
+        edit.setReadOnly(True)
+        lay.addWidget(edit)
+        row = QHBoxLayout()
+        btn_save = QPushButton("Save...")
+        btn_copy = QPushButton("Copy")
+        btn_close = QPushButton("Close")
+        row.addWidget(btn_save); row.addWidget(btn_copy); row.addStretch(); row.addWidget(btn_close)
+        lay.addLayout(row)
+
+        def save():
+            path, _ = QFileDialog.getSaveFileName(dlg, "Save Payload", "payload.json", "JSON (*.json)")
+            if path:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(text)
+        btn_save.clicked.connect(save)
+        btn_copy.clicked.connect(lambda: QApplication.clipboard().setText(text))
+        btn_close.clicked.connect(dlg.accept)
+        dlg.exec()
+
+    def send_results(self):
+        plugin, settings, payload = self._results_payload()
+        if plugin is None:
+            return
+        self.btn_api_send.setEnabled(False)
+        self.statusBar().showMessage("Results API: sending...")
+        job = results_api.BackgroundCall(lambda: plugin.send(payload, settings), self)
+        job.done.connect(lambda result, error: self._on_results_sent(job, result, error))
+        self._results_job = job
+
+    def _on_results_sent(self, job, result, error):
+        self.btn_api_send.setEnabled(True)
+        job.deleteLater()
+        if error:
+            self.statusBar().showMessage("Results API: send failed")
+            self._results_error("send() failed.", error)
+            return
+        ok, message = result if isinstance(result, tuple) else (bool(result), str(result))
+        self.statusBar().showMessage(f"Results API: {'sent' if ok else 'not sent'} - {message}")
+        (QMessageBox.information if ok else QMessageBox.warning)(self, "Results API", message)
+
+    def load_results_from_api(self):
+        if self.full_data is None or self.glw.tiled_image is None:
+            QMessageBox.information(self, "Results API", "Open an image or a project first.")
+            return
+        plugin, settings = self._results_plugin()
+        if plugin is None:
+            return
+        replace = (settings.get("receive") or {}).get("replace", True)
+        if replace and not self._confirm_discard_voids():
+            return
+        ctx = results_api.build_context(self, settings)
+        self.btn_api_load.setEnabled(False)
+        self.statusBar().showMessage("Results API: loading...")
+        job = results_api.BackgroundCall(lambda: plugin.fetch(ctx, settings), self)
+        job.done.connect(lambda data, error: self._on_results_fetched(job, plugin, ctx, replace, data, error))
+        self._results_job = job
+
+    def _on_results_fetched(self, job, plugin, ctx, replace, data, error):
+        self.btn_api_load.setEnabled(True)
+        job.deleteLater()
+        if error:
+            self.statusBar().showMessage("Results API: load failed")
+            self._results_error("fetch() failed.", error)
+            return
+        try:
+            voids = plugin.to_voids(data, ctx)
+            n = self.void_manager.load_from_data(voids, self.glw.grid_cfg, self.glw.coord_transform,
+                                                 self.layer_offset, replace=replace)
+        except Exception:
+            self.statusBar().showMessage("Results API: load failed")
+            self._results_error("to_voids() / loading the voids failed.", traceback.format_exc())
+            return
+        self._scale_from_file()
+        self.populate_void_types()
+        self.glw.active_void = None
+        self.glw.refresh_hover()
+        self.update_void_ui()
+        self.statusBar().showMessage(f"Results API: {n} voids loaded ({'replaced' if replace else 'added'}; Ctrl+Z undoes)")
 
     def detect_voids(self):
         """Rough automatic void detection on all loaded layers (see sat_widgets/void_detect.py)."""
@@ -1816,6 +2020,9 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Export", f"Export canceled.\nPartial output: {out_dir}")
             else:
                 print("Export Finished.")
+                self.last_export_dir = out_dir
+                if (self._results_settings().get("send") or {}).get("after_export"):
+                    self.send_results() # config.json "results_api": {"send": {"after_export": true}}
 
 class ExportDialog(QDialog):
     def __init__(self, parent=None, default_dir=""):
@@ -1843,6 +2050,12 @@ class ExportDialog(QDialog):
         self.chk_merged.setChecked(True)
         self.chk_json.setChecked(True)
         self.chk_csv.setChecked(True)
+        # config.json "ui_defaults": {"export": {"raw": false, ...}}
+        defaults = (parent._config().get("ui_defaults") or {}).get("export", {}) if hasattr(parent, "_config") else {}
+        for key, chk in (("raw", self.chk_raw), ("overlay", self.chk_overlay), ("mask", self.chk_mask),
+                         ("merged", self.chk_merged), ("json", self.chk_json), ("csv", self.chk_csv)):
+            if key in defaults:
+                chk.setChecked(bool(defaults[key]))
         
         v_opt.addWidget(self.chk_raw)
         v_opt.addWidget(self.chk_overlay)

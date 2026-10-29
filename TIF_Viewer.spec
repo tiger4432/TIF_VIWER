@@ -4,6 +4,10 @@
 from PyInstaller.utils.hooks import collect_submodules
 
 hiddenimports = collect_submodules("imagecodecs") # tifffile imports codecs lazily
+# Standard library for plugins/results_api.py (loaded from file at run time, so PyInstaller does
+# not see its imports). Another package used by the plugin must be added here and to requirements.
+hiddenimports += ["urllib.request", "urllib.parse", "urllib.error", "http.client", "ssl", "json", "base64",
+                  "hashlib", "hmac", "uuid", "csv", "socket", "getpass", "email", "zipfile", "gzip"]
 try: # Optional PatchCore scorer (build with WITH_PATCHCORE=1, see docs/PATCHCORE.md)
     import onnxruntime # noqa: F401
     hiddenimports.append("onnxruntime")

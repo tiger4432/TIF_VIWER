@@ -788,6 +788,19 @@ class VoidManager:
                     rec[k + "_um"] = um(rec[k])
         return records
 
+    def to_data(self, grid_cfg, bonding_map=None, coord_transform=None):
+        """The voids.json content (also what the results plugin gets as ctx["voids_json"])."""
+        return {
+            "version": 3,
+            "layer_numbering": "absolute",
+            "um_per_px": self.um_per_px or None,
+            "types": self.types, # name -> {name, color, shape, ...}
+            "voids": [
+                {name: rec[key] for key, name in self.json_fields.items() if name}
+                for rec in self.void_records(grid_cfg, bonding_map, coord_transform)
+            ]
+        }
+
     def save_to_file(self, path, grid_cfg, bonding_map=None, coord_transform=None):
         """
         Converts Global -> Chip Relative using current Grid Config.
@@ -797,17 +810,7 @@ class VoidManager:
         patchLabel uses x_y_layer_bondinglabel format.
         "layer" is the absolute layer number (version 3).
         """
-        data = {
-            "version": 3,
-            "layer_numbering": "absolute",
-            "um_per_px": self.um_per_px or None,
-            "types": self.types, # ID -> {name, color}
-            "voids": [
-                {name: rec[key] for key, name in self.json_fields.items() if name}
-                for rec in self.void_records(grid_cfg, bonding_map, coord_transform)
-            ]
-        }
-                
+        data = self.to_data(grid_cfg, bonding_map, coord_transform)
         try:
             with open(path, 'w') as f:
                 json.dump(data, f, indent=2)
@@ -834,100 +837,106 @@ class VoidManager:
         try:
             with open(path, 'r') as f:
                 raw_data = json.load(f)
-
-            self.checkpoint() # Loading replaces the current voids (undoable)
-            self.voids.clear()
-            legacy_names = {} # Old files: type number -> name
-            count = 0
-            legacy_layers = True
-            self.file_um_per_px = None
-
-            # Determine format
-            if isinstance(raw_data, list):
-                # V1 Format
-                void_list = raw_data
-            elif isinstance(raw_data, dict):
-                legacy_layers = raw_data.get("layer_numbering") != "absolute"
-                self.file_um_per_px = raw_data.get("um_per_px")
-                # Types stored in the file: declarations (config.json) win; types the
-                # declaration does not know are added so their voids keep color and shape
-                if "types" in raw_data:
-                    file_types = self.normalize_types(raw_data["types"])
-                    for name, t in file_types.items():
-                        self.types.setdefault(name, t)
-                    # Legacy files reference types by number: number -> name
-                    if isinstance(raw_data["types"], dict):
-                        for k, t in raw_data["types"].items():
-                            if str(k).lstrip("-").isdigit() and isinstance(t, dict) and t.get("name"):
-                                legacy_names[int(k)] = str(t["name"]).strip()
-                void_list = raw_data.get("voids", [])
-            else:
-                print("Unknown JSON format")
-                return
-
-            if legacy_layers and layer_offset:
-                print(f"Legacy void file: relative layers shifted by +{layer_offset}")
-
-            for item in void_list:
-                layer = self._field(item, "layer", 0)
-                if legacy_layers:
-                    layer += layer_offset
-                col = self._field(item, "col", 0)
-                row = self._field(item, "row", 0)
-                rel_cx = self._field(item, "center_x", 0)
-                rel_cy = self._field(item, "center_y", 0)
-                rx = self._field(item, "radius_x", 10.0)
-                ry = self._field(item, "radius_y", 10.0)
-                
-                # Resolve Type: by name; old files by number (their own number -> name table,
-                # else the declaration order)
-                type_name = self._field(item, "type")
-                if not type_name:
-                    t_id = item.get("type_id")
-                    order = list(self.types)
-                    if t_id in legacy_names:
-                        type_name = legacy_names[t_id]
-                    elif isinstance(t_id, int) and 0 <= t_id < len(order):
-                        type_name = order[t_id]
-                    else:
-                        type_name = order[0] if order else ""
-                
-                gx = self._field(item, "global_x")
-                gy = self._field(item, "global_y")
-                if gx is None or gy is None:
-                    # Calc Global from Relative (Grid-Dependent)
-                    chip_x0, chip_y0 = grid_cfg.cell_origin(row, col)
-                    gx = chip_x0 + rel_cx
-                    gy = chip_y0 + rel_cy
-                    
-                    # Convert Deskewed (gx) -> Raw, because storage expects Raw.
-                    # Without a transform the grid is assumed unrotated.
-                    if coord_transform:
-                         gx, gy = coord_transform.deskew_to_raw(gx, gy)
-                
-                if layer not in self.voids: self.voids[layer] = []
-                
-                v_obj = {
-                    "globalCX": gx,
-                    "globalCY": gy,
-                    "radiusX": rx,
-                    "radiusY": ry,
-                    "layer": layer,
-                    "type": type_name,
-                    "createdAt": self._field(item, "created_at", 0),
-                    "voidIndex": self._field(item, "void_index", 0)
-                }
-                p = self._field(item, "p")
-                if p is not None:
-                    v_obj["p"] = float(p)
-
-                self.voids[layer].append(v_obj)
-                count += 1
-            
+            count = self.load_from_data(raw_data, grid_cfg, coord_transform, layer_offset)
             print(f"Loaded {count} voids from {path}")
-            
         except Exception as e:
             print(f"Load failed: {e}")
+
+    def load_from_data(self, raw_data, grid_cfg, coord_transform=None, layer_offset=0, replace=True):
+        """
+        Voids from already parsed voids.json data (a file, or another system through the
+        receive plugin, see plugins/results_api.py). replace=False adds them to the current voids.
+        One undo step. Returns the number of voids; raises ValueError on an unknown format.
+        """
+        if not isinstance(raw_data, (list, dict)):
+            raise ValueError("Unknown void data format (expected a voids.json object or list)")
+        self.checkpoint() # Loading replaces / extends the current voids (undoable)
+        if replace:
+            self.voids.clear()
+        legacy_names = {} # Old files: type number -> name
+        count = 0
+        legacy_layers = True
+        self.file_um_per_px = None
+
+        # Determine format
+        if isinstance(raw_data, list):
+            # V1 Format
+            void_list = raw_data
+        elif isinstance(raw_data, dict):
+            legacy_layers = raw_data.get("layer_numbering") != "absolute"
+            self.file_um_per_px = raw_data.get("um_per_px")
+            # Types stored in the file: declarations (config.json) win; types the
+            # declaration does not know are added so their voids keep color and shape
+            if "types" in raw_data:
+                file_types = self.normalize_types(raw_data["types"])
+                for name, t in file_types.items():
+                    self.types.setdefault(name, t)
+                # Legacy files reference types by number: number -> name
+                if isinstance(raw_data["types"], dict):
+                    for k, t in raw_data["types"].items():
+                        if str(k).lstrip("-").isdigit() and isinstance(t, dict) and t.get("name"):
+                            legacy_names[int(k)] = str(t["name"]).strip()
+            void_list = raw_data.get("voids", [])
+
+        if legacy_layers and layer_offset:
+            print(f"Legacy void file: relative layers shifted by +{layer_offset}")
+
+        for item in void_list:
+            layer = self._field(item, "layer", 0)
+            if legacy_layers:
+                layer += layer_offset
+            col = self._field(item, "col", 0)
+            row = self._field(item, "row", 0)
+            rel_cx = self._field(item, "center_x", 0)
+            rel_cy = self._field(item, "center_y", 0)
+            rx = self._field(item, "radius_x", 10.0)
+            ry = self._field(item, "radius_y", 10.0)
+            
+            # Resolve Type: by name; old files by number (their own number -> name table,
+            # else the declaration order)
+            type_name = self._field(item, "type")
+            if not type_name:
+                t_id = item.get("type_id")
+                order = list(self.types)
+                if t_id in legacy_names:
+                    type_name = legacy_names[t_id]
+                elif isinstance(t_id, int) and 0 <= t_id < len(order):
+                    type_name = order[t_id]
+                else:
+                    type_name = order[0] if order else ""
+            
+            gx = self._field(item, "global_x")
+            gy = self._field(item, "global_y")
+            if gx is None or gy is None:
+                # Calc Global from Relative (Grid-Dependent)
+                chip_x0, chip_y0 = grid_cfg.cell_origin(row, col)
+                gx = chip_x0 + rel_cx
+                gy = chip_y0 + rel_cy
+                
+                # Convert Deskewed (gx) -> Raw, because storage expects Raw.
+                # Without a transform the grid is assumed unrotated.
+                if coord_transform:
+                     gx, gy = coord_transform.deskew_to_raw(gx, gy)
+            
+            if layer not in self.voids: self.voids[layer] = []
+            
+            v_obj = {
+                "globalCX": gx,
+                "globalCY": gy,
+                "radiusX": rx,
+                "radiusY": ry,
+                "layer": layer,
+                "type": type_name,
+                "createdAt": self._field(item, "created_at", 0),
+                "voidIndex": self._field(item, "void_index", 0)
+            }
+            p = self._field(item, "p")
+            if p is not None:
+                v_obj["p"] = float(p)
+
+            self.voids[layer].append(v_obj)
+            count += 1
+        return count
 
 
 class VoidTypeDialog(QDialog):

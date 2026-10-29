@@ -171,6 +171,32 @@ voids.json의 필드와 voids.csv의 컬럼 이름을 exe를 다시 빌드하지
 
 `bbox_rel_x`와 `bbox_rel_y`는 디펙 중심을 그 칸의 기준 bbox **좌상단**을 원점으로 한 좌표입니다(그리드 정렬 기준 픽셀). 칸에 bbox가 없으면 빈 값입니다.
 
+### UI 기본값 (`config.json` → `ui_defaults`)
+
+입력 칸의 시작 값을 선언합니다. 프로그램을 시작할 때와 Reload Declarations 때 적용하고, 프로그램은 이 값을 쓰지 않습니다(사용 중 바꾼 값은 저장되지 않음).
+
+```json
+"ui_defaults": {
+    "reject_values": ["X", "NG"],
+    "gpu_cache_mb": 4096,
+    "start_layer": 0, "end_layer": 11,
+    "show_grid": true, "grid_opacity": 40,
+    "um_per_px": 2.0,
+    "calib_enabled": false, "calib_robust": true, "calib_all_layers": true,
+    "target_mean": 30000, "target_std": 10000,
+    "void_type": "Edge",
+    "export": {"raw": true, "overlay": true, "mask": false, "merged": false, "json": true, "csv": true}
+}
+```
+
+- 모르는 키는 무시하고 콘솔에 쓸 수 있는 키 목록을 출력합니다.
+- `um_per_px`는 제품에 `um_per_px`가 있으면 제품 값이 우선합니다.
+- Detect Voids의 방법·Thr 기본값은 `"void_detect"`(`method`, `threshold`, `pc_threshold`)에 적습니다.
+
+### 결과 전송 / 불러오기 (Results API)
+
+마킹 결과를 다른 시스템으로 보내거나 다른 시스템에서 불러오는 부분은 직접 작성하는 플러그인 `plugins/results_api.py`로 분리했습니다(Extraction 패널의 **Results API: Preview / Send / Load**). 페이로드 만들기(`build_payload`), 전송(`send`), 요청(`fetch`), 응답 변환(`to_voids`) 네 함수를 고치면 되고, 버튼을 누를 때마다 파일을 다시 읽으므로 재시작·재빌드가 필요 없습니다. 설정은 `config.json`의 `"results_api"`입니다. 자세한 내용은 [docs/RESULTS_API.md](docs/RESULTS_API.md)를 보세요.
+
 ### WF 제품군 (`products.json`)
 
 ```json
@@ -242,7 +268,7 @@ Grid Configuration 묶음 아래쪽의 작은 Angle Preview(항상 표시)가 �
 ## 본딩맵
 
 - 엑셀에서 복사한 맵을 붙여넣고 "Import Map Data"를 누릅니다.
-- **Open Project:** Export 폴더(patches.json + raw 패치 + voids.json)를 다시 열면 패치를 원본 이미지와 같은 좌표계(같은 크기, 같은 회전 중심)로 다시 맞춰 붙입니다. 그래서 voids.json의 마킹과 그리드가 그대로 맞습니다. patches.json에 원본 크기(`image_size`)를 저장하고, 이전 Export는 패치 좌표에서 원본 크기를 계산합니다.
+- **Open Project:** Export 폴더에 함께 저장된 `bonding_map.txt`와 Reject Values(`bonding_map_reject.txt`)도 다시 불러옵니다. Export 폴더(patches.json + raw 패치 + voids.json)를 다시 열면 패치를 원본 이미지와 같은 좌표계(같은 크기, 같은 회전 중심)로 다시 맞춰 붙입니다. 그래서 voids.json의 마킹과 그리드가 그대로 맞습니다. patches.json에 원본 크기(`image_size`)를 저장하고, 이전 Export는 패치 좌표에서 원본 크기를 계산합니다.
 - overlay 패치에는 마킹과 함께 제품 layout(점선)도 그립니다. PNG는 가벼운 압축(파일 약 15% 증가)으로 여러 스레드에서 저장해, 이전보다 약 8배 빠릅니다.
 - Export 이미지(raw, overlay, mask, merged)는 **LEG(본딩맵 값)가 있는 칸만** 저장합니다. 본딩맵이 없으면 이미지 Export를 시작하지 않습니다. 붙여넣은 맵은 `bonding_map.txt`(그대로 다시 붙여넣을 수 있음), Reject Values는 `bonding_map_reject.txt`로 함께 저장합니다.
 - **Reject Values:** 쉼표로 구분한 값(예: `X, NG`)과 일치하는 칸은 본딩되지 않은 칸으로 처리합니다. ROI, Export, 칸 이동, 캘리브레이션, 각도 미리보기에서 모두 빠집니다. 값을 바꾸고 Enter를 누르면 바로 다시 적용합니다.

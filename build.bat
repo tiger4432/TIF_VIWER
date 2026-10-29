@@ -18,6 +18,8 @@ REM Editable deployment files live next to the exe
 copy /Y config.json dist\TIF_Viewer\ >nul || goto :error
 copy /Y products.json dist\TIF_Viewer\ >nul || goto :error
 copy /Y deploy.json dist\TIF_Viewer\ >nul || goto :error
+REM Results API plugin (edited per site, loaded at run time)
+if exist plugins xcopy /E /I /Y /Q plugins dist\TIF_Viewer\plugins >nul
 REM PatchCore models (used only when PatchCore is selected and onnxruntime is in the build)
 if exist models xcopy /E /I /Y /Q models dist\TIF_Viewer\models >nul
 
