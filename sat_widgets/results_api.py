@@ -62,6 +62,7 @@ def build_context(mw, settings):
         "product": mw.cb_product.currentText(),
         "source_file": source,
         "source_name": os.path.splitext(os.path.basename(source.rstrip("/\\")))[0],
+        "wafer_id": mw.le_wafer_id.text().strip(),
         "layers": layers,
         "current_layer": glw.current_layer,
         "grid": {"start_x": g.start_x, "start_y": g.start_y, "pitch_x": g.pitch_x, "pitch_y": g.pitch_y,
@@ -74,6 +75,29 @@ def build_context(mw, settings):
         "last_export_dir": getattr(mw, "last_export_dir", None),
         "settings": settings,
     }
+
+
+def normalize_bonding_map(result):
+    """
+    fetch_bonding_map() result -> (map text as pasted from Excel, reject values or None).
+    Accepted: text (tab / comma separated rows), a list of rows, or a dict with "text" or "rows"
+    and optionally "reject_values" (list or comma separated text).
+    """
+    reject = None
+    if isinstance(result, dict):
+        reject = result.get("reject_values")
+        if isinstance(reject, str):
+            reject = [v.strip() for v in reject.split(",") if v.strip()]
+        elif reject is not None:
+            reject = [str(v) for v in reject]
+        result = result.get("text", result.get("rows"))
+    if isinstance(result, (list, tuple)):
+        result = "\n".join("\t".join("" if v is None else str(v) for v in row) for row in result)
+    if not isinstance(result, str) or not result.strip():
+        raise ValueError(f"no bonding map in the result ({type(result).__name__})")
+    if "\t" not in result and "," in result: # CSV -> tab separated
+        result = "\n".join("\t".join(c.strip() for c in line.split(",")) for line in result.splitlines())
+    return result, reject
 
 
 def to_json(obj):

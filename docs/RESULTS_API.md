@@ -4,7 +4,7 @@
 
 - 플러그인: `plugins/results_api.py` (exe 빌드 시 `dist\TIF_Viewer\plugins\`로 복사)
 - 설정: `config.json`의 `"results_api"`
-- 화면: Extraction 패널의 **Results API: Preview / Send / Load**
+- 화면: Extraction 패널의 **Results API: Preview / Send / Load**, WF Product 묶음의 **Wafer ID / Fetch Map**
 
 버튼을 누를 때마다 플러그인 파일을 다시 읽으므로, **파일을 고치면 프로그램을 다시 시작하거나 exe를 다시 빌드하지 않아도** 바로 반영됩니다.
 
@@ -15,6 +15,8 @@
 | Preview | `build_payload(ctx)` → 결과 JSON을 창에 표시(저장·복사 가능) | 화면 |
 | Send | `build_payload(ctx)` → `send(payload, settings)` → `(ok, 메시지)`를 대화상자로 표시 | 만들기는 화면, 전송은 백그라운드 |
 | Load | `fetch(ctx, settings)` → `to_voids(data, ctx)` → voids.json 형식으로 불러오기 | 요청은 백그라운드, 변환·적용은 화면 |
+| Fetch Map | `fetch_bonding_map(ctx, settings)` → 본딩맵 칸에 넣고 적용(Reject Values 포함 가능) | 요청은 백그라운드 |
+| 파일 열기 | (있으면) `parse_wafer_id(file_name, settings)` → Wafer ID 칸. `"bonding_map": {"auto_fetch": true}`이면 이어서 Fetch Map | 화면 |
 
 - 전송·요청은 백그라운드에서 돌아서 화면이 멈추지 않습니다.
 - 플러그인에서 예외가 나면 오류 대화상자의 **자세히**에 traceback이 나옵니다(콘솔에도 출력).
@@ -34,16 +36,33 @@
         "after_export": false
     },
     "receive": {
-        "url": "http://server/api/voids?wafer={source_name}&layer={current_layer}",
+        "url": "http://server/api/voids?wafer={wafer_id}&layer={current_layer}",
         "timeout": 30,
         "replace": true
+    },
+    "bonding_map": {
+        "url": "http://mapserver/api/bondingmap/{wafer_id}",
+        "timeout": 30,
+        "auto_fetch": true
     }
 }
 ```
 
 - `plugin`: 프로그램 폴더 기준 상대 경로 또는 절대 경로. 공유 폴더의 파일(`\\server\share\results_api.py`)을 지정하면 한 곳에서 관리할 수 있습니다.
 - `settings`로 이 객체 전체가 플러그인에 전달됩니다. 필요한 키는 자유롭게 추가해 플러그인에서 읽으면 됩니다.
-- 기본 플러그인의 `fetch`는 URL의 `{source_name}`, `{product}`, `{current_layer}`를 채웁니다.
+- 기본 플러그인은 URL의 `{wafer_id}`, `{source_name}`, `{product}`, `{current_layer}`를 채웁니다(URL 인코딩).
+- `"bonding_map": {"auto_fetch": true}`: 파일을 열면 Wafer ID를 채운 뒤 바로 본딩맵을 가져옵니다. 프로젝트를 열 때는 저장된 `bonding_map.txt`가 있으면 가져오지 않습니다.
+
+## 2.5 Wafer ID
+
+- WF Product 묶음에 **File**(연 파일 이름, 마우스를 올리면 전체 경로)과 **Wafer ID** 칸이 있습니다. Wafer ID는 직접 고칠 수 있습니다.
+- 파일을 열면 이름에서 Wafer ID를 채웁니다. 순서:
+  1. 플러그인에 `parse_wafer_id(file_name, settings)`가 있으면 그 결과
+  2. `config.json`의 `"wafer_id": {"pattern": 정규식, "group": 1 또는 그룹 이름}` (파일 이름에서 `re.search`)
+  3. 확장자를 뺀 파일 이름
+- 예: `"wafer_id": {"pattern": "^(?P<lot>[A-Z]+\\d+)_W(?P<wafer>\\d+)", "group": "lot"}`. 맞지 않으면 파일 이름을 쓰고 콘솔에 알립니다.
+- Export하면 `patches.json`에 `wafer_id`를 저장하고, 프로젝트를 다시 열면 그 값을 씁니다.
+- `ctx["wafer_id"]`로 플러그인에 전달되고, 기본 페이로드에도 들어갑니다.
 
 ## 3. 함수
 
@@ -52,7 +71,15 @@ def build_payload(ctx) -> object        # JSON으로 보낼 내용 (json.dumps �
 def send(payload, settings) -> (bool, str)   # 성공 여부, 사용자에게 보일 메시지
 def fetch(ctx, settings) -> object      # 응답(파싱된 JSON 등), to_voids로 전달
 def to_voids(data, ctx) -> dict | list  # voids.json 형식
+def fetch_bonding_map(ctx, settings) -> str | list | dict   # ctx["wafer_id"]의 본딩맵
+def parse_wafer_id(file_name, settings) -> str              # 선택: 파일 이름 -> Wafer ID
 ```
+
+`fetch_bonding_map`이 돌려줄 수 있는 형식:
+
+- 엑셀에서 복사한 것과 같은 텍스트(탭 구분, 행·열 번호 머리글 허용) 또는 CSV 텍스트
+- 행 목록 `[["A", "A", "B"], ["A", "X", "B"], ...]`
+- `{"text": ... 또는 "rows": ..., "reject_values": ["X", "NG"] 또는 "X, NG"}` (Reject Values를 주면 그 값으로 바꿈)
 
 ### ctx (읽기 전용)
 
@@ -61,6 +88,7 @@ def to_voids(data, ctx) -> dict | list  # voids.json 형식
 | `app_version`, `timestamp`, `user`, `host` | 프로그램 버전, ISO 8601 시각, 사용자, PC 이름 |
 | `product` | 선택한 WF 제품 이름 |
 | `source_file`, `source_name` | 연 TIF 또는 프로젝트 폴더 경로, 확장자 없는 이름 |
+| `wafer_id` | Wafer ID 칸의 값 |
 | `layers`, `current_layer` | 불러온 절대 레이어 번호 목록, 현재 레이어 |
 | `grid` | `start_x, start_y, pitch_x, pitch_y, rows, cols, angle` |
 | `um_per_px` | Scale (0 = 미설정) |

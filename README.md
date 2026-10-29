@@ -193,6 +193,16 @@ voids.json의 필드와 voids.csv의 컬럼 이름을 exe를 다시 빌드하지
 - `um_per_px`는 제품에 `um_per_px`가 있으면 제품 값이 우선합니다.
 - Detect Voids의 방법·Thr 기본값은 `"void_detect"`(`method`, `threshold`, `pc_threshold`)에 적습니다.
 
+### Wafer ID
+
+WF Product 묶음에 연 파일 이름(**File**)과 **Wafer ID** 칸이 있습니다. 파일을 열면 이름에서 Wafer ID를 자동으로 채우고, 직접 고칠 수도 있습니다. 파싱 규칙은 `config.json`에 정규식으로 선언합니다(없으면 확장자를 뺀 파일 이름).
+
+```json
+"wafer_id": {"pattern": "^(?P<lot>[A-Z]+\\d+)_W(?P<wafer>\\d+)", "group": "lot"}
+```
+
+**Fetch Map**은 Wafer ID로 다른 서버에서 본딩맵을 가져와 적용합니다(`plugins/results_api.py`의 `fetch_bonding_map`, 주소는 `"results_api": {"bonding_map": {"url": ".../{wafer_id}", "auto_fetch": true}}`). `auto_fetch`면 파일을 열 때 자동으로 가져옵니다. 플러그인에 `parse_wafer_id`를 쓰면 정규식 대신 코드로 파싱할 수 있습니다. Export한 `patches.json`에 Wafer ID가 저장되어 프로젝트를 다시 열 때 복원됩니다. 자세한 내용은 [docs/RESULTS_API.md](docs/RESULTS_API.md)를 보세요.
+
 ### 결과 전송 / 불러오기 (Results API)
 
 마킹 결과를 다른 시스템으로 보내거나 다른 시스템에서 불러오는 부분은 직접 작성하는 플러그인 `plugins/results_api.py`로 분리했습니다(Extraction 패널의 **Results API: Preview / Send / Load**). 페이로드 만들기(`build_payload`), 전송(`send`), 요청(`fetch`), 응답 변환(`to_voids`) 네 함수를 고치면 되고, 버튼을 누를 때마다 파일을 다시 읽으므로 재시작·재빌드가 필요 없습니다. 설정은 `config.json`의 `"results_api"`입니다. 자세한 내용은 [docs/RESULTS_API.md](docs/RESULTS_API.md)를 보세요.

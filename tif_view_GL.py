@@ -7,6 +7,7 @@ import traceback
 from collections import OrderedDict
 from datetime import datetime
 import json
+import re
 
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -14,7 +15,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QPushButton, QDoubleSpinBox, QPlainTextEdit,
     QFileDialog, QProgressDialog, QCheckBox, QRadioButton,
     QButtonGroup, QComboBox, QDialog, QScrollArea, QMessageBox, QLineEdit,
-    QTextEdit, QAbstractSpinBox
+    QTextEdit, QAbstractSpinBox, QSizePolicy
 )
 from PySide6.QtGui import QSurfaceFormat, QAction, QImage, QPainter, QKeySequence
 from PySide6.QtCore import Qt, QTimer, QEvent, QPointF
@@ -135,6 +136,24 @@ class MainWindow(QMainWindow):
         form_product = QFormLayout(gb_product)
         self.cb_product = QComboBox()
         form_product.addRow("Product:", self.cb_product)
+        # Opened file and its wafer ID (parsed from the file name, editable)
+        self.lbl_source = QLabel("-")
+        self.lbl_source.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.lbl_source.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        form_product.addRow("File:", self.lbl_source)
+        h_wafer = QHBoxLayout()
+        self.le_wafer_id = QLineEdit()
+        self.le_wafer_id.setPlaceholderText("parsed from the file name")
+        self.le_wafer_id.setToolTip('Wafer ID: parsed from the file name (config.json "wafer_id": {"pattern": ...}),\n'
+                                    "editable. Used by the Results API plugin (payload, bonding map lookup).")
+        btn_fetch_map = QPushButton("Fetch Map")
+        btn_fetch_map.setToolTip("Get the bonding map of this wafer ID from the server\n"
+                                 "(fetch_bonding_map of plugins/results_api.py)")
+        btn_fetch_map.clicked.connect(self.fetch_bonding_map)
+        self.btn_fetch_map = btn_fetch_map
+        h_wafer.addWidget(self.le_wafer_id, 1)
+        h_wafer.addWidget(btn_fetch_map)
+        form_product.addRow("Wafer ID:", h_wafer)
         dock_layout.addWidget(gb_product)
 
         # 1. Grid Controls
@@ -492,7 +511,6 @@ class MainWindow(QMainWindow):
         scroll.setWidgetResizable(True)
         # scroll.setMaximumHeight(1000) # Removed fixed limit
         
-        from PySide6.QtWidgets import QSizePolicy
         scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         
         dock.setWidget(scroll)
@@ -996,7 +1014,94 @@ class MainWindow(QMainWindow):
         self.update_void_ui()
 
         self._start_layer_loader()
+        try:
+            with open(p_json, "r", encoding="utf-8") as f:
+                saved_wafer = json.load(f).get("wafer_id")
+        except Exception:
+            saved_wafer = None
+        # The project's own bonding map wins over a server lookup
+        self._set_source(folder, saved_wafer, allow_fetch=not os.path.exists(os.path.join(folder, "bonding_map.txt")))
         self.glw.update()
+
+    # -----------------------------------------------
+    # Source file / wafer ID / bonding map lookup
+    # -----------------------------------------------
+    def _set_source(self, path, wafer_id=None, allow_fetch=True):
+        """Shows the opened file and fills the wafer ID (saved one, else parsed from the name)."""
+        name = os.path.basename(path.rstrip("/\\"))
+        self.lbl_source.setText(name)
+        self.lbl_source.setToolTip(path)
+        self.le_wafer_id.setText(wafer_id or self.parse_wafer_id(name))
+        cfg = (self._results_settings().get("bonding_map") or {})
+        if allow_fetch and cfg.get("auto_fetch") and self.le_wafer_id.text().strip():
+            self.fetch_bonding_map()
+
+    def parse_wafer_id(self, file_name):
+        """
+        Wafer ID from a file / folder name: plugin parse_wafer_id(file_name, settings) if it has
+        one, else config.json "wafer_id": {"pattern": regex, "group": 1 or name}, else the name
+        without extension.
+        """
+        stem = os.path.splitext(file_name)[0]
+        settings = self._results_settings()
+        try:
+            plugin = results_api.load_plugin(settings)
+            if callable(getattr(plugin, "parse_wafer_id", None)):
+                wid = plugin.parse_wafer_id(file_name, settings)
+                if wid:
+                    return str(wid)
+        except Exception as e:
+            print(f"[wafer_id] plugin parse_wafer_id: {e}")
+        rule = self._config().get("wafer_id") or {}
+        pattern = rule.get("pattern")
+        if pattern:
+            try:
+                m = re.search(pattern, file_name)
+                if m:
+                    return m.group(rule.get("group", 1 if m.groups() else 0))
+                print(f"[wafer_id] pattern {pattern!r} does not match {file_name!r}")
+            except (re.error, IndexError) as e:
+                print(f"[wafer_id] pattern {pattern!r}: {e}")
+        return stem
+
+    def fetch_bonding_map(self):
+        """Bonding map of the wafer ID from another server (plugin fetch_bonding_map, background)."""
+        wafer_id = self.le_wafer_id.text().strip()
+        if not wafer_id:
+            QMessageBox.information(self, "Fetch Map", "Enter a wafer ID first.")
+            return
+        plugin, settings = self._results_plugin()
+        if plugin is None:
+            return
+        if not callable(getattr(plugin, "fetch_bonding_map", None)):
+            QMessageBox.warning(self, "Fetch Map", f"{results_api.plugin_path(settings)} has no fetch_bonding_map().")
+            return
+        ctx = results_api.build_context(self, settings)
+        self.btn_fetch_map.setEnabled(False)
+        self.statusBar().showMessage(f"Bonding map: fetching {wafer_id}...")
+        job = results_api.BackgroundCall(lambda: plugin.fetch_bonding_map(ctx, settings), self)
+        job.done.connect(lambda result, error: self._on_bonding_map_fetched(job, wafer_id, result, error))
+        self._map_job = job
+
+    def _on_bonding_map_fetched(self, job, wafer_id, result, error):
+        self.btn_fetch_map.setEnabled(True)
+        job.deleteLater()
+        if error:
+            self.statusBar().showMessage("Bonding map: fetch failed")
+            self._results_error("fetch_bonding_map() failed.", error)
+            return
+        try:
+            text, reject = results_api.normalize_bonding_map(result)
+        except Exception:
+            self._results_error("fetch_bonding_map() returned an unknown format.", traceback.format_exc())
+            return
+        if reject is not None:
+            self.le_reject.setText(", ".join(reject))
+        self.txt_map.setPlainText(text)
+        self.import_map_data()
+        bmap = self.glw.bonding_map
+        size = f"{bmap.rows}x{bmap.cols}" if bmap is not None else "not parsed"
+        self.statusBar().showMessage(f"Bonding map of {wafer_id}: {size}")
 
     def auto_level(self):
         c = self.sb_jump_x.value()
@@ -1547,6 +1652,9 @@ class MainWindow(QMainWindow):
             # 5. Show first layer, then load the others in the background (GPU cache budget)
             self.load_layer(0)
             self._start_layer_loader()
+
+            # 6. File name / wafer ID (may fetch the bonding map, see results_api "bonding_map")
+            self._set_source(path)
 
         except Exception as e:
             traceback.print_exc()

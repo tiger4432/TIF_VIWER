@@ -8,20 +8,27 @@ Settings: config.json "results_api" (passed as `settings`), e.g.
         "plugin": "plugins/results_api.py",        # this file (relative to the program folder or absolute)
         "send":    {"url": "http://server/api/voids", "method": "POST", "timeout": 30,
                     "headers": {"Authorization": "Bearer ..."}},
-        "receive": {"url": "http://server/api/voids?wafer={source_name}", "timeout": 30,
-                    "replace": true}
+        "receive": {"url": "http://server/api/voids?wafer={wafer_id}", "timeout": 30,
+                    "replace": true},
+        "bonding_map": {"url": "http://mapserver/api/bondingmap/{wafer_id}", "timeout": 30,
+                        "auto_fetch": true}    # fetch when a file is opened (wafer ID parsed)
     }
 
-The four functions below are called by the program:
+The functions below are called by the program:
     build_payload(ctx)          -> payload              GUI thread   what "Send" sends ("Preview" shows it)
     send(payload, settings)     -> (ok, message)        background   the request
     fetch(ctx, settings)        -> data                 background   the request of "Load"
     to_voids(data, ctx)         -> voids.json content   GUI thread   converts the response
+    fetch_bonding_map(ctx, settings) -> map             background   "Fetch Map" (wafer ID -> bonding map)
+    parse_wafer_id(file_name, settings) -> str          GUI thread   optional: wafer ID from the opened
+                                                                     file name (else config.json
+                                                                     "wafer_id": {"pattern": ...})
 
 ctx (read only) describes the current state:
     app_version, timestamp (ISO 8601), user, host
     product          selected WF product name ("" if none)
     source_file      opened TIF / project folder;  source_name: its name without folder / extension
+    wafer_id         the Wafer ID box (parsed from the file name, editable)
     layers           loaded absolute layer numbers;  current_layer
     grid             {"start_x", "start_y", "pitch_x", "pitch_y", "rows", "cols", "angle"}
     um_per_px        Scale (0 = not set)
@@ -34,6 +41,10 @@ ctx (read only) describes the current state:
     types            declared void types {name: {color, shape, ...}}
     last_export_dir  folder of the last export in this session, or None
     settings         config.json "results_api"
+
+fetch_bonding_map returns the map as text pasted from Excel (tab or comma separated rows, row /
+column headers allowed), a list of rows, or {"text" | "rows": ..., "reject_values": [...]}; the map
+is put into the Bonding Map box and applied (reject values too, when given).
 
 to_voids must return voids.json content: {"voids": [...]} (optionally "types", "um_per_px",
 "layer_numbering": "absolute") or a list of voids. Per void, either global_x / global_y (raw image
@@ -59,6 +70,7 @@ def build_payload(ctx):
             "product": ctx["product"],
             "layers": ctx["layers"],
         },
+        "wafer_id": ctx["wafer_id"],
         "sent_at": ctx["timestamp"],
         "sent_by": ctx["user"],
         "app_version": ctx["app_version"],
@@ -90,18 +102,45 @@ def send(payload, settings):
     return 200 <= status < 300, f"HTTP {status}: {text}"
 
 
+def _fill(url, ctx):
+    """{wafer_id}, {source_name}, {product}, {current_layer} in a URL are filled in (URL-encoded)."""
+    return url.format(**{k: urllib.parse.quote(str(ctx[k]))
+                         for k in ("wafer_id", "source_name", "product", "current_layer")})
+
+
 def fetch(ctx, settings):
     """Requests the markings. Returns the parsed response (passed to to_voids)."""
     cfg = settings.get("receive") or {}
     url = cfg.get("url")
     if not url:
         raise ValueError('Set config.json "results_api": {"receive": {"url": ...}}')
-    # {source_name}, {product}, {current_layer} in the URL are filled in (URL-encoded)
-    url = url.format(**{k: urllib.parse.quote(str(ctx[k])) for k in ("source_name", "product", "current_layer")})
-    status, body = _request(url, cfg)
+    status, body = _request(_fill(url, ctx), cfg)
     if not 200 <= status < 300:
         raise RuntimeError(f"HTTP {status}: {body[:300].decode('utf-8', 'replace')}")
     return json.loads(body.decode("utf-8"))
+
+
+def fetch_bonding_map(ctx, settings):
+    """Bonding map of ctx["wafer_id"]. Default: GET the URL; JSON ({"text" | "rows", "reject_values"}) or text."""
+    cfg = settings.get("bonding_map") or {}
+    url = cfg.get("url")
+    if not url:
+        raise ValueError('Set config.json "results_api": {"bonding_map": {"url": ".../{wafer_id}"}}')
+    status, body = _request(_fill(url, ctx), cfg)
+    if not 200 <= status < 300:
+        raise RuntimeError(f"HTTP {status}: {body[:300].decode('utf-8', 'replace')}")
+    text = body.decode("utf-8-sig")
+    try:
+        return json.loads(text)
+    except ValueError:
+        return text # Plain text map
+
+
+# Optional: wafer ID from the opened file name (overrides config.json "wafer_id": {"pattern": ...}).
+# def parse_wafer_id(file_name, settings):
+#     # e.g. "LOT1234_W07_SAT.tif" -> "LOT1234-07"
+#     lot, wafer = file_name.split("_")[:2]
+#     return f"{lot}-{wafer[1:]}"
 
 
 def to_voids(data, ctx):

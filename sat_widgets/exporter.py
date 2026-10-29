@@ -216,6 +216,7 @@ class ExportManager(QObject):
                             "image_size": [self.data_stack.width, self.data_stack.height],
                             "um_per_px": self.void_manager.um_per_px or None
                         },
+                        "wafer_id": self.main_window.le_wafer_id.text().strip() or None,
                         "patches": patch_metadata_list
                     }
                     json.dump(out_data, f, indent=2)
