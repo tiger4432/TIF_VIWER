@@ -733,6 +733,9 @@ class MainWindow(QMainWindow):
             w, h = declared.get("def_w", 0.0), declared.get("def_h", 0.0)
         t = self.void_manager.types[name]
         t["def_w"], t["def_h"] = float(w), float(h)
+        # Existing bboxes follow the product size (centers kept)
+        if self.void_manager.apply_bbox_size():
+            self.glw.update()
 
     def on_scale_changed(self, value):
         self.void_manager.um_per_px = value

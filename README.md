@@ -242,7 +242,8 @@ WF Product 묶음에 연 파일 이름(**File**)과 **Wafer ID** 칸이 있습�
   - `SL`은 스크라이브 라인 폭(x, y, um)입니다. `snap_offset: "SL"`인 타입은 bbox 코너에서 이만큼 안쪽 지점을 기준으로 그립니다.
   - 박스는 `"inset": "SL"`(bbox를 SL만큼 안쪽으로 줄인 영역), `"rect": [x, y, w, h]`, `"repeat"`(배열 반복)로 정의합니다.
 - 이전 형식(`"bbox": {"w", "h"}` 픽셀 + `layout.design_size`)도 그대로 읽습니다.
-- bbox 크기는 **제품마다** 다르게 적습니다(`chip_size_um` 또는 `bbox`). 제품을 바꾸면 bbox 타입의 기본 크기(그리기, Detect BBOX)가 그 제품 값으로 바뀌고, 둘 다 없는 제품은 `config.json`의 bbox 타입 크기로 돌아갑니다. 이미 그린 bbox는 그대로입니다.
+- bbox 크기는 **제품마다** 다르게 적습니다(`chip_size_um` 또는 `bbox`). 제품을 바꾸면 bbox 타입의 기본 크기(그리기, Detect BBOX)가 그 제품 값으로 바뀌고, 둘 다 없는 제품은 `config.json`의 bbox 타입 크기로 돌아갑니다.
+- bbox 크기는 **항상 선택한 제품 크기**를 따릅니다. 이미 그린 bbox도 제품·Scale을 바꾸면 중심은 그대로 두고 크기만 바뀌고, voids.json·프로젝트·API에서 불러온 bbox도 저장된 크기 대신 **중심 좌표만** 쓰고 제품 크기로 그립니다. bbox는 손으로 크기를 조절할 수 없고(가장자리를 잡아도 이동), 크기가 정해지지 않은 경우(Scale 없음, 크기 선언 없음)에만 처음 그릴 때 드래그로 크기를 정합니다.
 
 ### 축척 (Scale)
 

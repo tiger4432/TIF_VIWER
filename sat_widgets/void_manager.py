@@ -408,6 +408,7 @@ class VoidManager:
         state = self._undo.pop()
         self.voids.clear()
         self.voids.update(state)
+        self.apply_bbox_size() # The product may have changed since the snapshot
         self.touch()
         self._undo_key = None
         return True
@@ -642,7 +643,8 @@ class VoidManager:
             band = min(margin, 0.35 * min(rx, ry)) if inside else margin
             key = (self.is_bbox(v), dist)
             if best is None or key < best[0]:
-                best = (key, v, 'edge' if dist <= band else 'center')
+                # Bboxes are only moved: their size is the product's chip size
+                best = (key, v, 'edge' if dist <= band and not self.is_bbox(v) else 'center')
 
         if best is not None:
             return best[1], best[2]
@@ -700,6 +702,27 @@ class VoidManager:
     def is_bbox(self, v):
         """True if the void is a reference bbox marking (type name 'bbox', case-insensitive)."""
         return str(v.get("type", "")).strip().lower() == self.BBOX_TYPE_NAME
+
+    def apply_bbox_size(self):
+        """
+        Sizes every bbox marking to the bbox type's size (the selected product's chip size), keeping
+        its center. The size is not edited by hand; without a declared size the markings keep theirs.
+        Not an undo step (follows the product). Returns the number of bboxes resized.
+        """
+        name = self.resolve_type(self.BBOX_TYPE_NAME)
+        t = self.types.get(name) or {}
+        w, h = float(t.get("def_w") or 0.0), float(t.get("def_h") or 0.0)
+        if w <= 0 or h <= 0:
+            return 0
+        n = 0
+        for v_list in self.voids.values():
+            for v in v_list:
+                if self.is_bbox(v) and (v["radiusX"] != w / 2.0 or v["radiusY"] != h / 2.0):
+                    v["radiusX"], v["radiusY"] = w / 2.0, h / 2.0
+                    n += 1
+        if n:
+            self.touch()
+        return n
 
     @staticmethod
     def bbox_at(refs, grid_cfg, gx, gy):
@@ -944,6 +967,8 @@ class VoidManager:
 
             self.voids[layer].append(v_obj)
             count += 1
+        # Bboxes: only the center is taken from the data, the size follows the selected product
+        self.apply_bbox_size()
         return count
 
 
