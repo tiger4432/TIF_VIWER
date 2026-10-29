@@ -40,18 +40,15 @@ def diff(m, golden, spread):
 
 def layer_change(m, m_other):
     """
-    What changed between two layers of the same chip: the other layer's chip is moved onto this
-    one (sub-pixel), then fitted to it like the layout fit (its own structure x contrast incl.
-    inverted, blurred structure, brightness; smoothly varying across the chip), and the fit is
-    subtracted. The structure is the same on every layer, only brightness / contrast change, so
-    the chip's own layout cancels and what appears or disappears between the layers stays.
+    What changed between two layers of the same chip: the layers of a scan are aligned (and the
+    chips registered with one shift for all layers), only brightness / contrast differ while the
+    structure is the same. The other layer's chip is fitted to this one like the layout fit (its
+    structure x contrast incl. inverted, blurred structure, brightness; smoothly varying across
+    the chip) and subtracted: the chip's own layout cancels, what appeared or disappeared stays.
     """
-    from .void_detect import _LayoutFit, _phase_shift, _translate
+    from .void_detect import _LayoutFit
     m = np.asarray(m, np.float32)
     o = np.asarray(m_other, np.float32)
-    dx, dy = _phase_shift(o, m)
-    if abs(dx) < 0.15 * o.shape[1] and abs(dy) < 0.15 * o.shape[0]:
-        o = _translate(o, dx, dy)
     return _LayoutFit(o).apply(m) - o
 
 

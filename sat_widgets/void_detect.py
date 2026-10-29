@@ -399,6 +399,7 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
     if diag is not None:
         diag.setup(p, size, factor, rects, min_area, max_area, gap)
     layer_diffs = None
+    reg_shifts = None # Chip registration, measured once (first searched layer), used for all layers
     seg_model = p.get("seg_model")
     if seg_model is not None and getattr(seg_model, "neighbors", 0) and p.get("dump") is None:
         # Multi-layer model: the chips of all layers first (the neighbours of each layer)
@@ -448,7 +449,14 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
         else:
             # Each chip moved onto the median chip first (the bbox may be off by a few px)
             if p.get("register", True):
-                src, shifts = _register(chips)
+                # One shift per chip for every layer: the layers of a scan are aligned with each
+                # other, only the bbox may sit off the chip (measured on the first searched layer)
+                if reg_shifts is None:
+                    src, reg_shifts = _register(chips)
+                else:
+                    src = {c: (_translate(a.astype(np.float32), *reg_shifts[c]).astype(np.float16)
+                               if reg_shifts.get(c, (0.0, 0.0)) != (0.0, 0.0) else a) for c, a in chips.items()}
+                shifts = reg_shifts
             else:
                 src, shifts = chips, {}
             dctx = {"shifts": shifts}
