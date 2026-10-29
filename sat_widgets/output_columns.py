@@ -27,7 +27,7 @@ pixels in both) in config.json:
 
     "output_scale": {"pitch_x": 300}
 
-voids.json records the scale ("pixel_scale"); reading prefers the *_raw fields, else divides by
+meta.json (next to voids.json) records the scale ("pixel_scale"); reading prefers the *_raw fields, else divides by
 the recorded scale (files without either are actual pixels).
 """
 

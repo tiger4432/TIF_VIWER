@@ -1,5 +1,6 @@
 import time
 import json
+import os
 import math
 import numpy as np
 
@@ -913,36 +914,52 @@ class VoidManager:
             return 1.0
         return self.norm_pitch / float(grid_cfg.pitch_x)
 
-    def to_data(self, grid_cfg, bonding_map=None, coord_transform=None):
-        """The voids.json content (also what the results plugin gets as ctx["voids_json"])."""
-        return {
-            "version": 3,
+    def meta_data(self, grid_cfg, extra=None):
+        """Everything about the markings except the markings themselves (meta.json)."""
+        meta = {
+            "version": 4,
             "layer_numbering": "absolute",
             "um_per_px": self.um_per_px or None,
             # Plain pixel fields = actual pixels x scale (grid x pitch normalized); *_raw = actual
             "pixel_scale": {"pitch_x": self.norm_pitch, "pitch_x_raw": float(grid_cfg.pitch_x),
                             "scale": self.pixel_scale(grid_cfg)} if self.norm_pitch else None,
+            "grid": {k: getattr(grid_cfg, k) for k in ("start_x", "start_y", "pitch_x", "pitch_y", "rows", "cols", "angle")},
             "types": self.types, # name -> {name, color, shape, ...}
-            "voids": [
-                {name: rec[key] for key, name in self.json_fields.items() if name}
-                for rec in self.void_records(grid_cfg, bonding_map, coord_transform)
-            ]
         }
+        meta.update(extra or {})
+        return meta
 
-    def save_to_file(self, path, grid_cfg, bonding_map=None, coord_transform=None):
+    def void_list(self, grid_cfg, bonding_map=None, coord_transform=None):
+        """The markings (voids.json): one object per void, field names from output_columns."""
+        return [{name: rec[key] for key, name in self.json_fields.items() if name}
+                for rec in self.void_records(grid_cfg, bonding_map, coord_transform)]
+
+    def to_data(self, grid_cfg, bonding_map=None, coord_transform=None):
+        """meta.json with the voids.json list as "voids" (what the results plugin gets as ctx["voids_json"])."""
+        return dict(self.meta_data(grid_cfg), voids=self.void_list(grid_cfg, bonding_map, coord_transform))
+
+    @staticmethod
+    def meta_path(path):
+        """meta.json next to voids.json; <name>_meta.json next to another name."""
+        folder, name = os.path.split(path)
+        stem = os.path.splitext(name)[0]
+        return os.path.join(folder, "meta.json" if stem.lower() == "voids" else f"{stem}_meta.json")
+
+    def save_to_file(self, path, grid_cfg, bonding_map=None, coord_transform=None, extra_meta=None):
         """
-        Converts Global -> Chip Relative using current Grid Config.
-        coord_transform is required for correct cells when the grid is rotated.
-        Saves as Dict with 'types' and 'voids'. Field names come from output_columns.
-        "type" field uses Type Name (User Request).
-        patchLabel uses x_y_layer_bondinglabel format.
-        "layer" is the absolute layer number (version 3).
+        voids.json: only the markings (a list; cell-relative values from the current grid, field
+        names from output_columns, "layer" absolute, "type" by name). Everything else (format,
+        scale, grid, void types, extra_meta such as source and wafer ID) goes to meta.json next to
+        it (meta_path). coord_transform is required for correct cells when the grid is rotated.
         """
-        data = self.to_data(grid_cfg, bonding_map, coord_transform)
+        voids = self.void_list(grid_cfg, bonding_map, coord_transform)
+        meta_path = self.meta_path(path)
         try:
             with open(path, 'w') as f:
-                json.dump(data, f, indent=2)
-            print(f"Saved {len(data['voids'])} voids and {len(self.types)} types to {path}")
+                json.dump(voids, f, indent=2)
+            with open(meta_path, 'w', encoding="utf-8") as f:
+                json.dump(self.meta_data(grid_cfg, extra_meta), f, indent=2, ensure_ascii=False)
+            print(f"Saved {len(voids)} voids to {path}, {len(self.types)} types and settings to {meta_path}")
         except Exception as e:
             print(f"Save failed: {e}")
 
@@ -965,6 +982,16 @@ class VoidManager:
         try:
             with open(path, 'r') as f:
                 raw_data = json.load(f)
+            if isinstance(raw_data, list):
+                # voids.json holds only the markings; meta.json next to it the rest
+                meta_path = self.meta_path(path)
+                if os.path.exists(meta_path):
+                    with open(meta_path, 'r', encoding="utf-8") as f:
+                        raw_data = dict(json.load(f), voids=raw_data)
+                elif any(isinstance(v, dict) and any(str(k).endswith("_raw") for k in v) for v in raw_data):
+                    # Written by this version (has *_raw fields): absolute layers, actual pixels in *_raw
+                    print(f"{os.path.basename(meta_path)} not found: void types and scale not restored")
+                    raw_data = {"layer_numbering": "absolute", "voids": raw_data}
             count = self.load_from_data(raw_data, grid_cfg, coord_transform, layer_offset)
             print(f"Loaded {count} voids from {path}")
         except Exception as e:

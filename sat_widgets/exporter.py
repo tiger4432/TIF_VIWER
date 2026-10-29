@@ -414,7 +414,8 @@ class ExportManager(QObject):
         path = os.path.join(output_dir, "voids.json")
         # Same as "Save JSON" (the transform is needed for rotated grids)
         glw = self.main_window.glw
-        self.void_manager.save_to_file(path, glw.grid_cfg, glw.bonding_map, glw.coord_transform)
+        self.void_manager.save_to_file(path, glw.grid_cfg, glw.bonding_map, glw.coord_transform,
+                                       self.main_window.void_meta())
 
     def _export_bonding_map(self, output_dir):
         """bonding_map.txt: the pasted map as is (can be pasted again); reject values alongside."""

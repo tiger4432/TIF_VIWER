@@ -1342,7 +1342,16 @@ class MainWindow(QMainWindow):
     def save_voids(self):
         path, _ = QFileDialog.getSaveFileName(self, "Save Voids JSON", "voids.json", "JSON (*.json)")
         if path:
-            self.void_manager.save_to_file(path, self.glw.grid_cfg, self.glw.bonding_map, self.glw.coord_transform)
+            self.void_manager.save_to_file(path, self.glw.grid_cfg, self.glw.bonding_map, self.glw.coord_transform,
+                                           self.void_meta())
+
+    def void_meta(self):
+        """Source information written to meta.json next to voids.json."""
+        prod = getattr(self, "current_product", None)
+        return {"app_version": APP_VERSION, "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "source_file": self.lbl_source.toolTip(), "wafer_id": self.le_wafer_id.text(),
+                "product": self.cb_product.currentText() if prod is not None else "",
+                "layers": [self.abs_layer(z) for z in range(len(self.full_data))] if self.full_data is not None else []}
             
     def clear_voids(self):
         # Clear CURRENT LAYER Only
@@ -2393,7 +2402,7 @@ class ExportDialog(QDialog):
         self.chk_overlay = QCheckBox("Overlay Patches (/overlay)")
         self.chk_mask = QCheckBox("Mask Patches (/mask)")
         self.chk_merged = QCheckBox("Merged Patches (/merged)")
-        self.chk_json = QCheckBox("Metadata JSON (voids.json)")
+        self.chk_json = QCheckBox("Voids JSON (voids.json + meta.json)")
         self.chk_csv = QCheckBox("Metadata CSV (voids.csv)")
         
         # Defaults

@@ -93,7 +93,7 @@ def parse_wafer_id(file_name, settings) -> str              # 선택: 파일 이
 | `grid` | `start_x, start_y, pitch_x, pitch_y, rows, cols, angle` |
 | `um_per_px` | Scale (0 = 미설정) |
 | `bonding_map` | `{"text": 붙여넣은 맵, "reject_values": [...], "rows": [[칸별 LEG]]}` 또는 None |
-| `voids_json` | "Save JSON"과 같은 내용(`version, layer_numbering, um_per_px, types, voids`). 각 보이드의 필드 이름은 `config.json`의 `output_columns`를 따릅니다 |
+| `voids_json` | "Save JSON"이 쓰는 meta.json 내용(`version, layer_numbering, um_per_px, pixel_scale, grid, types`)에 voids.json의 보이드 목록을 `voids`로 합친 dict. 각 보이드의 필드 이름은 `config.json`의 `output_columns`를 따릅니다 |
 | `records` | 보이드마다 내부 이름의 dict: `layer, row, col, label(LEG), type, center_x/y, radius_x/y, p, global_x/y, bbox_rel_x/y, *_raw, *_um ...` (`sat_widgets/output_columns.py`). 픽셀 값은 그리드 X 피치 300 기준으로 정규화, `*_raw`는 실제 픽셀 (README "픽셀 값의 정규화") |
 | `types` | 선언된 타입 `{이름: {color, shape, ...}}` |
 | `last_export_dir` | 이번 실행에서 마지막으로 Export한 폴더 또는 None |

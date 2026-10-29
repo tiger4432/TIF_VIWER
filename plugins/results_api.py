@@ -33,7 +33,8 @@ ctx (read only) describes the current state:
     grid             {"start_x", "start_y", "pitch_x", "pitch_y", "rows", "cols", "angle"}
     um_per_px        Scale (0 = not set)
     bonding_map      {"text": pasted map, "reject_values": [...], "rows": [[LEG per cell]]} or None
-    voids_json       exactly what "Save JSON" writes (version, layer_numbering, um_per_px, types, voids);
+    voids_json       what "Save JSON" writes: meta.json (version, layer_numbering, um_per_px, pixel_scale,
+                     grid, types) with the voids.json list as "voids";
                      field names of each void follow config.json "output_columns"
     records          one dict per void with the internal names (see sat_widgets/output_columns.py):
                      layer, row, col, label (LEG), type, center_x/y, radius_x/y, p, global_x/y,

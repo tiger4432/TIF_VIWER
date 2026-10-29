@@ -181,7 +181,7 @@ voids.json·voids.csv·결과 API의 픽셀 값(`globalCX/Y`, `centerX/Y`, `radi
 "output_scale": {"pitch_x": 300}
 ```
 
-`null`이면 정규화하지 않습니다(두 필드 모두 실제 픽셀). voids.json에는 쓴 비율이 `"pixel_scale": {"pitch_x": 300, "pitch_x_raw": 실제 X 피치, "scale": 비율}`로 남습니다. 불러올 때는 `_raw` 필드를 먼저 쓰고, 없으면 일반 필드를 기록된 비율로 나눕니다. 비율 기록이 없는 예전 파일은 실제 픽셀로 읽습니다. `_raw` 필드 이름도 `output_columns`로 바꿀 수 있습니다(`radius_x_raw` 등).
+`null`이면 정규화하지 않습니다(두 필드 모두 실제 픽셀). meta.json에는 쓴 비율이 `"pixel_scale": {"pitch_x": 300, "pitch_x_raw": 실제 X 피치, "scale": 비율}`로 남습니다. 불러올 때는 `_raw` 필드를 먼저 쓰고, 없으면 일반 필드를 기록된 비율로 나눕니다. 비율 기록이 없는 예전 파일은 실제 픽셀로 읽습니다. `_raw` 필드 이름도 `output_columns`로 바꿀 수 있습니다(`radius_x_raw` 등).
 
 ### UI 기본값 (`config.json` → `ui_defaults`)
 
@@ -258,7 +258,7 @@ WF Product 묶음에 연 파일 이름(**File**)과 **Wafer ID** 칸이 있습�
 
 ### 축척 (Scale)
 
-Grid 패널의 **Scale (um/px)**은 1픽셀의 실제 크기입니다. 값이 있으면 voids.json / voids.csv에 um 컬럼(`RelativeX_um`, `RelativeY_um`, `RadiusX_um`, `RadiusY_um`, `BBoxRelX_um`, `BBoxRelY_um`)을 채웁니다. 이 컬럼 이름도 `output_columns`로 바꿀 수 있습니다. voids.json과 patches.json에 `um_per_px`를 함께 저장하고, 그 voids.json을 불러오면 Scale 칸에 값을 다시 넣습니다.
+Grid 패널의 **Scale (um/px)**은 1픽셀의 실제 크기입니다. 값이 있으면 voids.json / voids.csv에 um 컬럼(`RelativeX_um`, `RelativeY_um`, `RadiusX_um`, `RadiusY_um`, `BBoxRelX_um`, `BBoxRelY_um`)을 채웁니다. 이 컬럼 이름도 `output_columns`로 바꿀 수 있습니다. meta.json과 patches.json에 `um_per_px`를 함께 저장하고, 그 voids.json을 불러오면 Scale 칸에 값을 다시 넣습니다.
 
 ### 업데이트 알림
 
@@ -330,6 +330,8 @@ Grid Configuration 묶음 아래쪽의 작은 Angle Preview(항상 표시)가 �
 | 삭제 | 빨간 원에 X |
 
 레이어 번호는 **절대 번호**(파일 안의 페이지 번호)로 저장합니다. `layer_numbering`이 없는 이전 voids.json은 "현재 연 범위의 시작 레이어 기준 상대 번호"로 해석합니다.
+
+**저장 파일:** `voids.json`에는 **마킹 결과만**(보이드 목록) 저장하고, 나머지는 같은 폴더의 `meta.json`에 저장합니다. meta.json에는 형식 버전, 레이어 번호 방식, Scale(`um_per_px`), 픽셀 환산 비율(`pixel_scale`), 그리드, 타입 선언, 연 파일, Wafer ID, 제품, 불러온 레이어, 저장 시각, 프로그램 버전이 들어갑니다. Save JSON에서 다른 이름(예: `run1.json`)으로 저장하면 `run1_meta.json`이 됩니다. 불러올 때는 옆의 meta 파일을 함께 읽습니다. meta 파일이 없으면 마킹은 그대로 읽지만 파일에 있던 타입 선언과 Scale은 복원하지 않습니다. 예전 한 파일 형식(voids.json 안에 types 등)도 그대로 읽습니다.
 
 ## 자동 보이드 인식 (Detect Voids)
 
