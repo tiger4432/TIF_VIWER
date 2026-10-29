@@ -8,8 +8,9 @@ onnxruntime). See docs/SEGMENTATION.md.
     python tools/train_seg.py --mode recon --out models/void_recon.onnx
 
 Modes:
-  seg    (default) the model marks void pixels. Input: chip, golden chip, difference (the viewer
-         builds the same 3 channels). Labels: the reviewed masks (void / unknown band /
+  seg    (default) the model marks void pixels. Input: chip, golden chip, difference, and (with
+         --neighbors 1, default) what changed against the same chip on the layer above / below
+         (void_seg.inputs; the viewer builds the same channels). Labels: the reviewed masks (void / unknown band /
          background) plus synthetic voids pasted into the chips during training.
   recon  the model redraws the chip without voids (a golden chip of its own); the viewer compares
          the chip with it. Trained on chips with synthetic voids pasted in, target = the chip
@@ -44,13 +45,20 @@ import torch.nn.functional as F # noqa: E402
 
 
 # ----- data -----
-def load_data(root):
-    """All included samples: [(group, m float32, y uint8, golden, spread)]."""
+def load_data(root, neighbors=False):
+    """
+    All included samples: [(group, m float32, y uint8, golden, spread, (chip above, chip below))].
+    The neighbouring layers of the same chip are taken from all stored samples (left-out ones too:
+    they are context, not labels); None where there is no such layer.
+    """
     out = []
     for folder, index in void_seg.list_sources(root):
         if not index.get("include", True):
             continue
-        refs = {}
+        refs, chips = {}, {}
+        if neighbors:
+            for s in index["samples"]:
+                chips[(s["row"], s["col"], s["layer"])] = s["id"]
         for s in index["samples"]:
             if not s.get("include", True):
                 continue
@@ -59,8 +67,13 @@ def load_data(root):
                 r = np.load(os.path.join(folder, f"L{layer}_ref.npz"))
                 refs[layer] = (r["golden"].astype(np.float32), r["spread"].astype(np.float32))
             d = np.load(os.path.join(folder, s["id"] + ".npz"))
+            nb = None
+            if neighbors:
+                nb = tuple(np.load(os.path.join(folder, chips[k] + ".npz"))["m"].astype(np.float32)
+                           if k in chips else None
+                           for k in ((s["row"], s["col"], layer - 1), (s["row"], s["col"], layer + 1)))
             group = f"{index.get('source')}|{s['row']},{s['col']}" # Chip: train / validation split unit
-            out.append((group, d["m"].astype(np.float32), d["y"], *refs[layer]))
+            out.append((group, d["m"].astype(np.float32), d["y"], *refs[layer], nb))
     return out
 
 
@@ -69,8 +82,20 @@ def split(samples, val_frac, seed=0):
     return [s for s in samples if not val(s[0])], [s for s in samples if val(s[0])]
 
 
-def synth_voids(m, y, rng, n_max=3):
-    """Pastes faint synthetic voids into m (in place copy); marks them in y. Returns (m, y)."""
+def paste_void(m, v, rng, scale=1.0, amp=None):
+    """Adds void v (dict cx, cy, rx, ry, p, amp) to a copy of m, optionally resized / re-shaded."""
+    h, w = m.shape
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    t = (np.abs((xx - v["cx"]) / (v["rx"] * scale)) ** v["p"] + np.abs((yy - v["cy"]) / (v["ry"] * scale)) ** v["p"]) ** (1.0 / v["p"])
+    soft = _blur(np.clip((1.25 - t) / 0.5, 0, 1).astype(np.float32), rng.uniform(0.5, 2.5))
+    return m + (v["amp"] if amp is None else amp) * soft
+
+
+def synth_voids(m, y, rng, n_max=3, keep=None):
+    """
+    Pastes faint synthetic voids into m (in place copy); marks them in y. Returns (m, y). keep: a
+    list that receives the voids' parameters (to add them to the deeper layer too).
+    """
     m, y = m.copy(), y.copy()
     h, w = m.shape
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
@@ -83,6 +108,8 @@ def synth_voids(m, y, rng, n_max=3):
         soft = _blur(soft.astype(np.float32), rng.uniform(0.5, 2.5))
         amp = math.exp(rng.uniform(math.log(0.3), math.log(3.0))) * rng.choice([-1.0, 1.0]) # Faint ones as often as clear ones
         m += amp * soft
+        if keep is not None:
+            keep.append({"cx": cx, "cy": cy, "rx": rx, "ry": ry, "p": p, "amp": amp})
         y[(t <= void_seg.CORE) & (y != 1)] = 1
         band = (t > void_seg.CORE) & (t <= void_seg.BAND) & (y == 0)
         y[band] = 255
@@ -105,13 +132,23 @@ def appearance(a, rng):
 def make_batch(samples, n, crop, mode, rng, synth_p=0.5):
     xs, ys, ts = [], [], []
     for _ in range(n):
-        _, m, y, g, sp = samples[rng.integers(len(samples))]
+        _, m, y, g, sp, nb = samples[rng.integers(len(samples))]
         clean = m
+        added = []
         if rng.random() < synth_p:
-            m, y = synth_voids(m, y, rng)
+            m, y = synth_voids(m, y, rng, keep=added)
         m_in, g_in = appearance(m, rng), appearance(g, rng)
-        x = void_seg.inputs(m_in, g_in, sp)
-        tgt = void_seg.inputs(clean, g, sp)[0] if mode == "recon" else None
+        nbs = None
+        if nb is not None:
+            above, below = nb
+            # A void stays visible deeper down, with another size / shade; the layer above lacks it
+            if below is not None:
+                for v in added:
+                    scale = math.exp(rng.uniform(math.log(0.4), math.log(2.5))) # Size changes a lot between layers
+                    below = paste_void(below, v, rng, scale, v["amp"] * rng.choice([-1.0, 1.0]) * rng.uniform(0.5, 1.5))
+            nbs = [None if o is None else appearance(o, rng) for o in (above, below)]
+        x = void_seg.inputs(m_in, g_in, sp, nbs)
+        tgt = np.clip(clean, -10, 10) / 5.0 if mode == "recon" else None
         h, w = y.shape
         ph, pw = max(0, crop - h), max(0, crop - w)
         if ph or pw:
@@ -213,8 +250,8 @@ def evaluate(model, samples, mode, thr=0.5):
     found = total = det = det_ok = 0
     l1 = []
     with torch.no_grad():
-        for _, m, y, g, sp in samples:
-            x = void_seg.inputs(m, g, sp)
+        for _, m, y, g, sp, nb in samples:
+            x = void_seg.inputs(m, g, sp, list(nb) if nb is not None else None)
             h, w = y.shape
             ph, pw = (-h) % void_seg.PAD, (-w) % void_seg.PAD
             xt = torch.from_numpy(np.pad(x, ((0, 0), (0, ph), (0, pw)), mode="edge")[None]).float()
@@ -258,6 +295,8 @@ def main():
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--val", type=float, default=0.15, help="fraction of chips held out")
     ap.add_argument("--synth", type=float, default=0.5, help="probability of pasting synthetic voids")
+    ap.add_argument("--neighbors", type=int, choices=[0, 1], default=1,
+                    help="1: also give the same chip on the layer above / below (what changed between layers)")
     ap.add_argument("--threads", type=int, default=os.cpu_count() or 4)
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
@@ -267,14 +306,17 @@ def main():
     repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     out = a.out or os.path.join(repo, "models", "void_recon.onnx" if a.mode == "recon" else "void_unet.onnx")
 
-    samples = load_data(a.data)
+    if a.mode == "recon":
+        a.neighbors = 0
+    samples = load_data(a.data, bool(a.neighbors))
     if not samples:
         sys.exit(f"No included training samples in {a.data} (Seg Data window in the viewer)")
     train, val = split(samples, a.val, a.seed)
     n_void = sum(int((s[2] == 1).any()) for s in samples)
     print(f"{len(samples)} samples ({n_void} with voids): {len(train)} train, {len(val)} validation chips' samples")
 
-    model = UNet(3, a.base)
+    cin = 3 + 2 * a.neighbors
+    model = UNet(cin, a.base)
     print(f"U-Net base {a.base}: {sum(p.numel() for p in model.parameters()) / 1e6:.2f} M parameters")
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=a.lr, total_steps=a.epochs * a.steps)
@@ -303,7 +345,7 @@ def main():
     model.eval()
 
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-    dummy = torch.zeros(1, 3, a.crop, a.crop)
+    dummy = torch.zeros(1, cin, a.crop, a.crop)
     kw = dict(input_names=["input"], output_names=["output"], opset_version=17,
               dynamic_axes={"input": {0: "n", 2: "h", 3: "w"}, "output": {0: "n", 2: "h", 3: "w"}})
     try:
@@ -312,7 +354,7 @@ def main():
         torch.onnx.export(model, dummy, out, **kw) # Older torch (no dynamo argument)
     info = {"mode": a.mode, "inputs": "chip, golden, (chip - golden) / spread; clip +-10, / 5 (void_seg.inputs)",
             "trained_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "samples": len(samples), "samples_with_voids": n_void,
-            "base": a.base, "epochs": a.epochs, "best_epoch": best[1] + 1, "validation": best[2],
+            "neighbor_layers": a.neighbors, "channels": cin, "base": a.base, "epochs": a.epochs, "best_epoch": best[1] + 1, "validation": best[2],
             "suggested_threshold": 5}
     with open(os.path.splitext(out)[0] + ".json", "w", encoding="utf-8") as f:
         json.dump(info, f, indent=1)

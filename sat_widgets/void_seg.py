@@ -3,9 +3,11 @@ Void segmentation with a small U-Net (trained offline with tools/train_seg.py, r
 onnxruntime): per chip, a void probability map replaces the die-to-die deviation map; the rest of
 Detect Voids (blobs, sizes, layer rule, type rules) is unchanged. See docs/SEGMENTATION.md.
 
-Model input (inputs()): 3 channels of the chip as Detect Voids sees it (registered, matched to the
-golden chip): the chip, the golden chip, (chip - golden) / chip-to-chip spread; each clipped to
-+-10 and divided by 5. Output: one logit per pixel.
+Model input (inputs()): the chip as Detect Voids sees it (registered, matched to the golden chip):
+the chip, the golden chip, (chip - golden) / chip-to-chip spread; multi-layer models add what
+changed against the same chip on the layer above and below (layer_change: brightness / contrast
+differ per layer, the structure does not; a person flips through the layers too). Each
+clipped to +-10 and divided by 5. Output: one logit per pixel.
 
 Training data (Seg Data in Void Marking): per source file a folder in DATA_DIR with
   index.json            source, meta, samples [{id, layer, row, col, voids, include}], include
@@ -31,12 +33,40 @@ CORE, BAND = 0.75, 1.35 # Mask: void inside CORE x the marking, unknown up to BA
 PAD = 8 # Input sizes are padded to a multiple of this (U-Net with 3 poolings)
 
 
-def inputs(m, golden, spread):
-    """(3, H, W) float32 model input from the matched chip, the golden chip and the spread."""
+def diff(m, golden, spread):
+    """Die-to-die difference of a matched chip: (chip - golden) / spread."""
+    return (np.asarray(m, np.float32) - np.asarray(golden, np.float32)) / np.maximum(np.asarray(spread, np.float32), 1e-3)
+
+
+def layer_change(m, m_other):
+    """
+    What changed between two layers of the same chip: the other layer's chip is moved onto this
+    one (sub-pixel), then fitted to it like the layout fit (its own structure x contrast incl.
+    inverted, blurred structure, brightness; smoothly varying across the chip), and the fit is
+    subtracted. The structure is the same on every layer, only brightness / contrast change, so
+    the chip's own layout cancels and what appears or disappears between the layers stays.
+    """
+    from .void_detect import _LayoutFit, _phase_shift, _translate
+    m = np.asarray(m, np.float32)
+    o = np.asarray(m_other, np.float32)
+    dx, dy = _phase_shift(o, m)
+    if abs(dx) < 0.15 * o.shape[1] and abs(dy) < 0.15 * o.shape[0]:
+        o = _translate(o, dx, dy)
+    return _LayoutFit(o).apply(m) - o
+
+
+def inputs(m, golden, spread, neighbors=None):
+    """
+    Model input (C, H, W) float32: the matched chip, the golden chip, the difference, and for
+    multi-layer models (neighbors = [the same chip on the layer above, below], None = no such
+    layer) what changed against each neighbouring layer (layer_change). Each clipped to +-10, / 5.
+    """
     m = np.asarray(m, np.float32)
     g = np.asarray(golden, np.float32)
-    d = (m - g) / np.maximum(np.asarray(spread, np.float32), 1e-3)
-    return np.stack([np.clip(m, -10, 10), np.clip(g, -10, 10), np.clip(d, -10, 10)]) / 5.0
+    chans = [m, g, diff(m, g, spread)]
+    for o in (neighbors or []):
+        chans.append(np.zeros_like(m) if o is None else layer_change(m, o))
+    return np.stack([np.clip(c, -10, 10) for c in chans]) / 5.0
 
 
 def rasterize(h, w, shapes):
@@ -181,6 +211,7 @@ class Model:
             with open(side, "r", encoding="utf-8") as f:
                 self.info = json.load(f)
         self.mode = self.info.get("mode", "recon" if "recon" in os.path.basename(path).lower() else "seg")
+        self.neighbors = int(self.info.get("neighbor_layers", 0)) # 1: the layers above / below as extra channels
 
     def predict(self, x):
         """seg: void probability (H, W); recon: the redrawn chip (H, W), for one input (3, H, W)."""

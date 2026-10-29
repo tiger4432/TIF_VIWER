@@ -398,6 +398,14 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
     types = {}
     if diag is not None:
         diag.setup(p, size, factor, rects, min_area, max_area, gap)
+    layer_diffs = None
+    seg_model = p.get("seg_model")
+    if seg_model is not None and getattr(seg_model, "neighbors", 0) and p.get("dump") is None:
+        # Multi-layer model: the chips of all layers first (the neighbours of each layer)
+        layer_diffs = _layer_chips(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, void_manager, p,
+                                   (lambda i, n, t: progress(i // 2, n, "Neighbour layers: " + t)) if progress else None)
+        if layer_diffs is None:
+            return None
 
     for z, layer in layer_z:
         # 1. Aligned, normalized chips of this layer
@@ -454,7 +462,7 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
                 continue
             seg = p.get("seg_model")
             if seg is not None:
-                items = _learned_maps(items, dctx, seg, p, diag)
+                items = _learned_maps(items, dctx, seg, p, diag, layer, layer_diffs)
 
         # 3. Blobs per chip
         count = 0
@@ -602,7 +610,22 @@ def _golden(chips, p):
     return spread, gmin, gmax, match
 
 
-def _learned_maps(items, dctx, model, p, diag=None):
+def _layer_chips(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, void_manager, p, progress):
+    """{layer: {cell: matched chip}} of every searched layer (neighbours for multi-layer models)."""
+    out = {}
+
+    def dump(layer, cell, m, golden, spread, shift, rect, size):
+        out.setdefault(layer, {})[cell] = np.asarray(m, np.float16)
+
+    q = {k: v for k, v in p.items() if k not in ("seg_model", "learned_model", "learn")}
+    q["dump"] = dump
+    if detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, void_manager, "", q,
+                    progress, apply=False) is None:
+        return None
+    return out
+
+
+def _learned_maps(items, dctx, model, p, diag=None, layer=None, layer_diffs=None):
     """
     Deviation maps from a trained U-Net (sat_widgets/void_seg.py), in place of the die-to-die map:
     - "seg": void probability x 10 (Thr 5 = 50 %);
@@ -615,7 +638,11 @@ def _learned_maps(items, dctx, model, p, diag=None):
     items = list(items)
     if model.mode == "seg":
         for cell, _, _, m in items:
-            x = void_seg.inputs(m, dctx["golden"], dctx["spread"])
+            nb = None
+            if model.neighbors and layer_diffs is not None:
+                nb = [(layer_diffs.get(layer + k) or {}).get(cell) for k in (-1, 1)]
+                nb = [None if o is None else o.astype(np.float32) for o in nb]
+            x = void_seg.inputs(m, dctx["golden"], dctx["spread"], nb)
             prob = model.predict(x)
             yield cell, prob * 10.0, np.sign(m - dctx["golden"]), m
         return

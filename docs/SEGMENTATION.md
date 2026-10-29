@@ -44,6 +44,7 @@ python tools\train_seg.py --data D:\seg_data --threads 8
 | 옵션 | 기본 | 뜻 |
 |---|---|---|
 | `--mode` | seg | `seg`: 보이드 픽셀 표시. `recon`: 보이드를 지운 칩을 다시 그림(칩별 golden) |
+| `--neighbors` | 1 | 1: 같은 칩의 위·아래 레이어와 비교한 변화도 입력(레이어마다 밝기·대비는 달라도 구조는 같으니, 이웃 레이어를 현재 레이어 밝기로 맞춰 빼면 그 칩의 레이아웃은 사라지고 생긴/없어진 것이 남음). 0: 한 레이어만 |
 | `--epochs`, `--steps` | 40, 100 | 에폭 수, 에폭당 배치 수 |
 | `--batch`, `--crop` | 16, 128 | 배치 크기, 학습 잘라내기 크기(작업 픽셀) |
 | `--base` | 16 | U-Net 기본 채널(16 → 약 0.5M 파라미터, 24 → 약 1M) |
@@ -52,7 +53,7 @@ python tools\train_seg.py --data D:\seg_data --threads 8
 
 학습 방식(결함 분할 문헌: DRAEM, FC-EF 변화 검출, "simulated reference" die-to-die 검사 참고):
 
-- 입력 3채널: 칩, golden 칩, (칩 − golden) / spread. 앱이 같은 방식으로 만듭니다(`void_seg.inputs`).
+- 입력: 칩, golden 칩, (칩 − golden) / spread, 그리고 (`--neighbors 1`) 위·아래 레이어와의 변화 2채널. 앱이 같은 방식으로 만듭니다(`void_seg.inputs`). 다중 레이어 모델은 Detect Voids가 모든 레이어를 한 번 더 읽어 이웃 레이어를 준비합니다(시간 약 2배).
 - 칩과 golden에 **서로 다른** 대비·감마·흐림·±1.5 px 이동을 줍니다. 칩마다 다른 레이아웃 모양이 "정상"이라는 것을 배웁니다.
 - 흐릿한 가짜 보이드(타원·초타원, 부드러운 경계, 밝게/어둡게, 칩 잡음의 0.3~3배, 흐린 것도 자주)를 칩에 붙입니다. 실제 마킹이 적어도 학습이 됩니다.
 - 손실: Focal + Dice, 모름 픽셀 제외. 회전·뒤집기 증강.
