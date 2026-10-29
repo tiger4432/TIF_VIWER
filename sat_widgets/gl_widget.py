@@ -1301,64 +1301,30 @@ class GLImageWidget(QOpenGLWidget):
                  start_x = getattr(self, '_void_start_gx', gx)
                  start_y = getattr(self, '_void_start_gy', gy)
                  
-                 shape = self.void_manager.shape_of(self.active_void)
-                 
-                 if shape == "rectangle":
-                     # Rectangle Sizing: Defined by Center and Radii
-                     # Start and Current define bbox
-                     min_x = min(start_x, gx)
-                     max_x = max(start_x, gx)
-                     min_y = min(start_y, gy)
-                     max_y = max(start_y, gy)
-                     
-                     # Center
-                     cx = (min_x + max_x) / 2.0
-                     cy = (min_y + max_y) / 2.0
-                     
-                     # Radii (Half-Dims)
-                     rx = (max_x - min_x) / 2.0
-                     ry = (max_y - min_y) / 2.0
-                     
-                     self.active_void["radiusX"] = max(1.0, rx) # Half-Width
-                     self.active_void["radiusY"] = max(1.0, ry) # Half-Height
-                     
-                     # Store Center in RAW
-                     cx_raw, cy_raw = self.deskew_to_raw(cx, cy)
-                     self.active_void["globalCX"] = cx_raw
-                     self.active_void["globalCY"] = cy_raw
-                     
+                 # The drawn box spans press point -> mouse
+                 bx0, bx1 = sorted((start_x, gx))
+                 by0, by1 = sorted((start_y, gy))
+                 v = self.active_void
+                 vm = self.void_manager
+                 anchor = vm.snap_anchor(v)
+                 k = vm.corner_for_box((bx0, by0, bx1, by1), self.grid_cfg, self.coord_transform) if anchor else None
+                 if k is not None:
+                     # Corner-snap types: the bbox corner nearest to the drawn box; on release the
+                     # shape spans that corner -> the box point farthest from it (see _snap_on_release)
+                     _, _, ix, iy = k
+                     near = (bx0 if ix > 0 else bx1, by0 if iy > 0 else by1)
+                     far = (bx1 if ix > 0 else bx0, by1 if iy > 0 else by0)
+                     self._snap_hint, self._snap_drag_point = near, far
+                 if k is not None and anchor == "center":
+                     # Quadrant shape inside the drawn box, oriented as it will attach
+                     cx, cy = near
+                     rx, ry = bx1 - bx0, by1 - by0
+                     self._free_quadrant = (ix, iy)
                  else:
-                     # Ellipse Sizing (Center/Radius)
-                     # Start and Current define bbox
-                     min_x = min(start_x, gx)
-                     max_x = max(start_x, gx)
-                     min_y = min(start_y, gy)
-                     max_y = max(start_y, gy)
-                     
-                     # Center
-                     cx = (min_x + max_x) / 2.0
-                     cy = (min_y + max_y) / 2.0
-                     
-                     # Radii
-                     rx = (max_x - min_x) / 2.0
-                     ry = (max_y - min_y) / 2.0
-                     
-                     self.active_void["radiusX"] = max(1.0, rx)
-                     self.active_void["radiusY"] = max(1.0, ry)
-                     
-                     # Store Center in RAW
-                     cx_raw, cy_raw = self.deskew_to_raw(cx, cy)
-                     self.active_void["globalCX"] = cx_raw
-                     self.active_void["globalCY"] = cy_raw
-                 
-                 if self.void_manager.snap_anchor(self.active_void) == "center":
-                     # Center-anchored snap types: the drawn quadrant spans press point -> mouse
-                     self.active_void["radiusX"] = max(1.0, abs(gx - start_x))
-                     self.active_void["radiusY"] = max(1.0, abs(gy - start_y))
-                     self.active_void["globalCX"], self.active_void["globalCY"] = self.deskew_to_raw(start_x, start_y)
-                     self._free_quadrant = (1 if gx >= start_x else -1, 1 if gy >= start_y else -1)
-                 # Snap types are drawn as dragged; they snap when the mouse is released
-                 self._snap_drag_point = (gx, gy)
+                     cx, cy = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0
+                     rx, ry = (bx1 - bx0) / 2.0, (by1 - by0) / 2.0
+                 v["radiusX"], v["radiusY"] = max(1.0, rx), max(1.0, ry)
+                 v["globalCX"], v["globalCY"] = self.deskew_to_raw(cx, cy)
                  self.update()
                  
              elif self.active_void_action == 'center' and self.active_void:

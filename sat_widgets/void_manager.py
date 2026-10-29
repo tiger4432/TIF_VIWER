@@ -327,15 +327,34 @@ class VoidManager:
     def snap_anchor(self, v):
         """
         Declared in the type (config.json): "snap": "bbox_corner" makes the void attach to a
-        corner of its cell's reference bbox. "snap_anchor": "edge" (default) puts a corner of the
-        shape's bounding box on the (offset) corner, "center" puts the shape center on it and only
-        the inward quadrant is drawn (e.g. a quarter superellipse fitted from the SL corner).
+        corner of its cell's reference bbox. "snap_anchor": "center" (default) puts the shape center
+        on the (offset) corner and only the inward quadrant is drawn (e.g. a quarter superellipse
+        fitted from the SL corner); "edge" puts a corner of the whole shape's bounding box on it.
         Returns None when the type does not snap.
         """
         t = self.type_of(v)
         if t.get("snap") != "bbox_corner":
             return None
-        return t.get("snap_anchor", "edge")
+        return t.get("snap_anchor", "center")
+
+    def corner_for_box(self, box, grid_cfg, coord_transform=None):
+        """
+        Corner (x, y, inward x, inward y) of the reference bbox nearest to a drawn Deskewed box
+        (x0, y0, x1, y1): the corner a snap-type void drawn as that box attaches to. None without
+        a bbox.
+        """
+        bx, by = (box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0
+        bbox = self.bbox_at(self.reference_bboxes(grid_cfg, coord_transform), grid_cfg, bx, by)
+        if bbox is None:
+            return None
+        x0, y0, w, h = bbox
+        corners = [(x0, y0, 1, 1), (x0 + w, y0, -1, 1), (x0 + w, y0 + h, -1, -1), (x0, y0 + h, 1, -1)]
+
+        def distance(k):
+            kx, ky = k[0], k[1]
+            gap = math.hypot(max(box[0] - kx, 0.0, kx - box[2]), max(box[1] - ky, 0.0, ky - box[3]))
+            return gap, math.hypot(bx - kx, by - ky) # Ties (corner inside the box): the box center
+        return min(corners, key=distance)
 
     def quadrant_of(self, v, gx, gy, refs, grid_cfg):
         """
