@@ -1488,7 +1488,7 @@ class MainWindow(QMainWindow):
                 item.setToolTip("All loaded layers at once (load the layers to compare). Each layer of a chip is explained\n"
                                 "from the chip's layers above it and the median chips; what is left is new on that layer.\n"
                                 "Marks the layer where the void first appears (Mark on layer). Skipped layers still serve\n"
-                                "as the layers above. Thr: evidence over the layers (default 10).")
+                                "as the layers above. Thr: evidence from the void's first layer down (default 20).")
                 if cfg.get("method") == "layer_change":
                     start = i
                 continue

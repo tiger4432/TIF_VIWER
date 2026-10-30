@@ -64,7 +64,7 @@ def _fmt(x, digits=2):
 
 def _threshold(p):
     """The threshold of the method that ran."""
-    return {"patchcore": p.get("pc_threshold"), "layer_change": p.get("lc_threshold", 10.0)}.get(p.get("method"), p.get("threshold"))
+    return {"patchcore": p.get("pc_threshold"), "layer_change": p.get("lc_threshold", 20.0)}.get(p.get("method"), p.get("threshold"))
 
 
 def _med(values):
@@ -394,7 +394,8 @@ class Evaluation:
         if p.get("method") == "die_to_die":
             rule += f" sm{_fmt(p.get('smooth', 0))}" + (" lf" if p.get("layout_fit", True) else "") + (" rg" if p.get("register", True) else "")
         elif p.get("method") == "layer_change":
-            rule += f" lo{_fmt(p.get('lc_tlo', 3.0))}" + (" rg" if p.get("register", True) else "") + \
+            rule += f" lo{_fmt(p.get('lc_tlo', 3.0))}" + (" pr" if p.get("lc_place") == "rms" else "") + \
+                (" rg" if p.get("register", True) else "") + \
                 (" lr" if p.get("lc_register", False) else "")
         elif p.get("pc_position_norm", False):
             rule += " pn"

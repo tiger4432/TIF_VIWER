@@ -68,6 +68,7 @@ Y25
 | `rg` | 칩 맞추기 사용 (`register`). Die-to-die: 칩마다 기준 칩에 0.1 px 단위로 맞춤. Layer change: 그래디언트 크기로 정수 px만 맞춤. `a`는 맞추기 전 bbox의 어긋남 |
 | `lo` | Layer change: 보이드 없는 레이어의 증거 수준 (`lc_tlo`, 첫 레이어 판정 기준) |
 | `lr` | Layer change: 칩마다 레이어끼리 위치 맞춤 (`lc_register`, 기본 꺼짐) |
+| `pr` | Layer change: 자리 점수를 예전 방식(레이어 평균, `lc_place: "rms"`)으로 계산 |
 | `pn` | PatchCore 위치별 정규화 사용 (`pc_position_norm`, 기본 꺼짐) |
 | `lm` | 학습 필터 사용 (Learned filter) |
 | `t` | 임계값 (Thr) |
