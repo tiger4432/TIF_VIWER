@@ -6,3 +6,7 @@ sample_*.tif
 .venv-build/
 .venv-dev/
 python.local
+
+# experiment E: generated wafers and caches
+/cache/
+/data/
