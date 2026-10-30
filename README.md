@@ -203,7 +203,7 @@ voids.json·voids.csv·결과 API의 픽셀 값(`globalCX/Y`, `centerX/Y`, `radi
 
 - 모르는 키는 무시하고 콘솔에 쓸 수 있는 키 목록을 출력합니다.
 - `um_per_px`는 제품에 `um_per_px`가 있으면 제품 값이 우선합니다.
-- Detect Voids의 방법·Thr 기본값은 `"void_detect"`(`method`, `threshold`, `pc_threshold`)에 적습니다.
+- Detect Voids의 방법·Thr 기본값은 `"void_detect"`(`method`: `die_to_die` / `layer_change` / `patchcore`, `threshold`, `lc_threshold`, `pc_threshold`)에 적습니다.
 
 ### Wafer ID
 
@@ -359,6 +359,13 @@ Void Marking 패널의 **Detect Voids**는 대략적인 보이드를 자동으�
 - **학습 필터(Learned filter / Train)**: 보이드와 칩마다 다른 레이아웃 차이가 비슷한 세기라 임계값으로 못 가를 때 씁니다. 파일을 열고 손 마킹(또는 검토한 voids.json)을 불러온 뒤 **Train**을 누르면, 그 파일의 후보(편차 지도의 국부 최대점)를 손 마킹으로 라벨링해 학습 데이터에 더하고 전체로 다시 학습합니다(파일마다 한 묶음, 같은 파일을 다시 학습하면 교체). 결과 창에 칩 단위 교차검증 성능이 짧은 코드(`L1 f.. v.. n.. c.. h..` / `R.. P..`)로 나옵니다. **Learned filter**를 켜면 Detect Voids·Evaluate가 임계값 대신 학습한 모델로 후보를 고릅니다(Die-to-die). 학습 데이터와 모델은 `사용자 폴더\TIF_Viewer_train\`(`dataset.jsonl`, `void_classifier.json`), 공유 모델은 `config.json`의 `"void_detect": {"classifier": 경로}`. 이미 마킹된 예전 파일도 열고 불러와 Train하면 쓸 수 있습니다(좌표가 조금 어긋나도 되도록 여유를 두고 매칭). 마킹이 칩과 크게 어긋난 파일은 빼세요.
 - **U-Net 세그멘테이션 (Seg Data / Segmentation U-Net)**: 손 마킹으로 작은 U-Net을 학습해 보이드 확률 지도를 편차 지도 대신 씁니다. **Seg Data** 창에서 연 파일 또는 저장 결과 폴더(voids.json + meta.json)로 학습 데이터를 만들고 칩 썸네일을 보며 넣을 것/뺄 것을 고른 뒤, PyTorch가 있는 PC에서 `tools/train_seg.py`로 학습해 `models/void_unet.onnx`를 만들면 방법 상자의 **Segmentation U-Net**이 켜집니다. 자세한 내용은 [docs/SEGMENTATION.md](docs/SEGMENTATION.md).
 - **Evaluate**: 검출을 마킹 없이 돌려 손 마킹과 비교합니다. 놓친 것·잘못 잡은 것·크기 차이를 원인별로 휴대폰으로 입력해 보낼 수 있는 짧은 코드로 보여 주고, 칩 이미지가 든 보고서 폴더를 만듭니다. 코드 읽는 법은 [docs/VOID_EVAL.md](docs/VOID_EVAL.md).
+- **Layer change (방법 상자):** 불러온 **모든 레이어를 한 번에** 봅니다. 같은 칩은 레이어가 바뀌어도 구조가 같고(레이어마다 구조별 밝기·대비·극성만 다름), 보이드는 어느 레이어에서 생기면 그 아래 레이어에서 계속 보인다는 점을 씁니다.
+  1. 칩의 레이어 k를 **같은 칩의 위 레이어들**(보이드가 처음 생기는 레이어라면 그 위는 보이드가 없음)과 **레이어별 기준 칩**으로 설명합니다. 강건 최소제곱이라 보이드가 맞춤을 끌어당기지 않고, 칩 안에서 계수가 부드럽게 변하며, 레이아웃 영역(패드·다이...)마다 계수를 따로 둡니다.
+  2. 설명하고 남은 것을 칩 간 흩어짐으로 나눈 뒤 여러 크기의 원형 필터로 보고, 레이어들에 걸친 증거가 Thr(기본 10)을 넘는 자리를 찾습니다.
+  3. **Mark on layer = First**면 증거가 계속 쌓이기 시작하는 레이어(CUSUM 변화점)에 마킹합니다. 크기는 그 레이어에서 잰 크기입니다.
+  - 비교할 레이어를 모두 불러온 뒤 쓰세요. Skip layers에 넣은 레이어는 검출·마킹은 하지 않지만 아래 레이어를 설명하는 데는 씁니다.
+  - 합성 8레이어 웨이퍼(`tools/synth`, 칩마다 레이아웃 대비·극성·흐림이 다르고 보이드가 레이어마다 크기·명암이 바뀜)에서 보이드 50개 중 32개를 처음 나온 레이어에, 8개를 다른 레이어에 찾고 잘못 잡은 것 4개(Die-to-die: 0개, 443개). 14×14칩 8레이어에 약 2분(4코어).
+  - 설정(`config.json`의 `"void_detect"`): `lc_threshold`, `lc_tlo`(보이드 없는 레이어의 증거 수준, 첫 레이어 판정), `lc_scales`, `lc_sources`(위 레이어 몇 장까지), `lc_goldens`, `lc_regions`, `lc_register`(레이어끼리 위치 맞춤, 기본 꺼짐: 한 스캔의 레이어는 정렬되어 있음). 실험 기록: 브랜치 `exp/C-layer-change`.
 - 방법 상자에서 **PatchCore**(CNN 특징 기반, CPU, 선택 설치)를 고를 수도 있습니다. 검토 결과와 운영 셋업(오프라인 설치, 빌드, 설정, 임계값 보정)은 [docs/PATCHCORE.md](docs/PATCHCORE.md)를 보세요. 이 데이터에서는 기본 방식(Die-to-die)이 더 정확하고 빠릅니다.
 - 14900×14900 샘플(841칩)에서 레이어당 약 16초, 생성기의 정답(보이드 92개, 코너 박리 51개)을 모두 찾았고 모두 처음 나타난 레이어에 마킹했습니다(추가 검출 5). 칩마다 밝기·대비·감마·기울기를 크게 다르게 만든 합성 데이터에서도 98%를 찾았습니다.
 

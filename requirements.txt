@@ -6,3 +6,4 @@ PyOpenGL-accelerate==3.1.10
 Pillow==11.3.0
 tifffile==2025.5.10
 imagecodecs==2025.3.30   # compressed TIFFs (LZW, JPEG, ...) through tifffile
+threadpoolctl==3.6.0   # Detect Voids "Layer change": one BLAS thread per chip worker (3x faster)

@@ -28,7 +28,7 @@ S1 d6 3 1 37 22 bt33 dup2
 | 위치 | 뜻 |
 |---|---|
 | 1줄 `S1` | 짧은 코드 버전 |
-| `d6` / `l6` / `p10` | Die-to-die / Die-to-die + 학습 필터 / PatchCore, 임계값 |
+| `d6` / `l6` / `c10` / `p10` | Die-to-die / Die-to-die + 학습 필터 / Layer change / PatchCore, 임계값 (Layer change의 `pk`는 그 레이어의 증거 ÷ 임계값) |
 | 다음 네 숫자 | ok(찾음), ly(다른 레이어), ms(놓침), fp(잘못 잡음) |
 | 나머지 | 많은 놓친 이유 2개 (`M` 줄과 같은 코드) |
 | 2줄 첫 네 숫자 | 임계값 미달로 놓친 것의 중앙값: `pk`×100, `s`×100, `c`×100, `z` (아래 `B` 줄과 같음) |
@@ -60,12 +60,14 @@ Y25
 | 항목 | 뜻 |
 |---|---|
 | `VD1` | 코드 형식 버전 |
-| `dd` / `pcm` / `pcr` | Die-to-die / PatchCore MobileNetV2 / PatchCore ResNet50 |
+| `dd` / `lc` / `pcm` / `pcr` | Die-to-die / Layer change / PatchCore MobileNetV2 / PatchCore ResNet50 |
 | `rf` / `rs` / `rl` | 여러 레이어에서 잡힌 자리를 마킹할 레이어: 처음(first) / 가장 강한 곳(strongest) / 마지막(last) |
 | `sk` | 검출하지 않은 레이어 (`sk0` = 0번 제외) |
 | `sm` | Die-to-die 평균화 반경 (작업 픽셀, 0 = 화소 단위) |
 | `lf` | Die-to-die 레이아웃 맞춤 사용 (칩마다 다른 레이아웃 대비·선명도를 golden으로 맞춰 제거, `layout_fit`) |
-| `rg` | Die-to-die 칩 맞추기 사용 (칩마다 기준 칩에 0.1 px 단위로 위치를 맞춤, `register`). `a`는 맞추기 전 bbox의 어긋남 |
+| `rg` | 칩 맞추기 사용 (`register`). Die-to-die: 칩마다 기준 칩에 0.1 px 단위로 맞춤. Layer change: 그래디언트 크기로 정수 px만 맞춤. `a`는 맞추기 전 bbox의 어긋남 |
+| `lo` | Layer change: 보이드 없는 레이어의 증거 수준 (`lc_tlo`, 첫 레이어 판정 기준) |
+| `lr` | Layer change: 칩마다 레이어끼리 위치 맞춤 (`lc_register`, 기본 꺼짐) |
 | `pn` | PatchCore 위치별 정규화 사용 (`pc_position_norm`, 기본 꺼짐) |
 | `lm` | 학습 필터 사용 (Learned filter) |
 | `t` | 임계값 (Thr) |

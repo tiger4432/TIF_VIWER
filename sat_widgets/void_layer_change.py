@@ -28,6 +28,7 @@ explanation leaves:
 Tuned on synthetic 8-layer wafers (tools/synth/experiments/C on branch exp/C-layer-change;
 ml_204: 35 of 50 voids on their first layer, 14 false detections; die-to-die: 0 and 443).
 """
+import contextlib
 import math
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -42,8 +43,8 @@ DEFAULTS = {
     "lc_goldens": 8, # Golden chips of the nearest this many layers as sources
     "lc_regions": 4, # Layout regions with their own coefficients (k-means of the goldens)
     "lc_border": 10, # Working px at the chip border not searched
-    "lc_register": True, # Layers of each chip moved onto its first layer (sub-pixel)
-    "lc_workers": 0, # Chips fitted in parallel (0 = CPU count)
+    "lc_register": False, # Layers of each chip moved onto its first layer (sub-pixel; a scan's layers are aligned)
+    "lc_workers": 0, # Chips fitted in parallel (0 = CPU count, 1 without threadpoolctl)
 }
 
 _GM = {}
@@ -85,9 +86,20 @@ def _gradmag(a):
     return g - g.mean()
 
 
+def _shift(a, sx, sy, pad=8):
+    """a with its content moved by (sx, sy) px, sub-pixel without blurring (Fourier phase ramp;
+    mirrored margin so the edges do not wrap)."""
+    h, w = a.shape
+    ap = np.pad(np.asarray(a, np.float32), pad, mode="reflect")
+    H, W = ap.shape
+    ky = np.fft.fftfreq(H)[:, None]
+    kx = np.fft.rfftfreq(W)[None, :]
+    out = np.fft.irfft2(np.fft.rfft2(ap) * np.exp(-2j * np.pi * (ky * sy + kx * sx)), s=(H, W))
+    return out[pad:pad + h, pad:pad + w].astype(np.float32)
+
+
 def register_layers(chip, maxs=2, b=6):
     """(NL, h, w): each layer moved onto the first (gradient magnitude correlation, parabolic peak)."""
-    from .void_detect import _translate
     ref = _gradmag(chip[0])[b:-b, b:-b]
     out = [np.asarray(chip[0], np.float32)]
     n = 2 * maxs + 1
@@ -104,8 +116,55 @@ def register_layers(chip, maxs=2, b=6):
             den = a - 2 * c0 + c
             sub.append(float(np.clip(0.5 * (a - c) / den, -0.5, 0.5)) if den < 0 else 0.0)
         sy, sx = i - maxs + sub[0], j - maxs + sub[1] # Content of layer k sits at +(sx, sy) from layer 0
-        out.append(_translate(chip[k], -sx, -sy) if (sx or sy) else np.asarray(chip[k], np.float32))
+        out.append(_shift(chip[k], -sx, -sy) if (sx or sy) else np.asarray(chip[k], np.float32))
     return np.stack(out)
+
+
+def _whole(cc, y, x):
+    """Whole-px (dx, dy) of the circular correlation peak at (y, x); a 1 px peak whose sub-pixel
+    (parabola) position is under 0.75 px stays 0 (a near-tie between 0 and 1 px)."""
+    h, w = cc.shape
+    out = []
+    for lo, mid, hi, d in ((cc[y, (x - 1) % w], cc[y, x], cc[y, (x + 1) % w], x if x <= w // 2 else x - w),
+                           (cc[(y - 1) % h, x], cc[y, x], cc[(y + 1) % h, x], y if y <= h // 2 else y - h)):
+        den = lo - 2 * mid + hi
+        f = d + (float(np.clip(0.5 * (lo - hi) / den, -0.5, 0.5)) if den < 0 else 0.0)
+        out.append(0 if abs(d) == 1 and abs(f) < 0.75 else d)
+    return out
+
+
+def align_chips(X, max_frac=0.06):
+    """
+    (NL, n, h, w) chips -> each chip moved (whole px, every layer alike) onto the median chip, and
+    the shifts [(dx, dy)]. The bbox may sit a few px off the chip. Matched on the gradient magnitude
+    summed over the layers: the layout's contrast and polarity differ from chip to chip, which
+    misleads a match on the intensities. The search is limited to max_frac of the chip, so a
+    periodic layout cannot pull a chip a whole period off.
+    """
+    from .void_detect import _translate
+    nl, n, h, w = X.shape
+    G = np.zeros((n, h, w), np.float32)
+    for k in range(nl):
+        for i in range(n):
+            g = _gradmag(X[k, i])
+            G[i] += g / (float(np.abs(g).mean()) + 1e-9)
+    win = np.outer(np.hanning(h), np.hanning(w)).astype(np.float32)
+    G = (G - G.mean(axis=(1, 2), keepdims=True)) * win
+    F = np.fft.rfft2(G)
+    ref = np.fft.rfft2(np.median(G, axis=0))
+    m = max(1, int(max_frac * max(h, w)))
+    dy = np.r_[0:m + 1, -m:0]
+    out, shifts = X.copy(), []
+    for i in range(n):
+        cc = np.fft.irfft2(ref * np.conj(F[i]), s=(h, w)) # cc[y, x]: chip rolled by (x, y) vs the median chip
+        win_cc = cc[np.ix_(dy % h, dy % w)]
+        a, b = np.unravel_index(int(np.argmax(win_cc)), win_cc.shape)
+        sx, sy = _whole(cc, int(dy[a]) % h, int(dy[b]) % w) # Rolling the chip by (sx, sy) matches
+        if sx or sy:
+            for k in range(nl):
+                out[k, i] = _translate(X[k, i], -sx, -sy)
+        shifts.append((sx, sy))
+    return out, shifts
 
 
 def _tents(h, w):
@@ -140,8 +199,13 @@ def _feats(L):
 
 
 def _robust_fit(y, X, iters=4, clip=3.0, sub=2):
-    """Remainder y - X coef; coef by least squares on every sub-th pixel, outliers (> clip MADs) refitted out."""
+    """
+    Remainder y - X coef; coef by least squares on every sub-th pixel, outliers (> clip MADs) refitted
+    out. Columns scaled to unit size first, so the small ridge does not depend on the intensity scale.
+    """
     idx = np.arange(0, y.size, sub)
+    unit = 1.0 / (np.sqrt((X[idx] ** 2).mean(0)) + 1e-12)
+    X = X * unit
     keep = idx
     for _ in range(iters):
         Xk = X[keep]
@@ -199,6 +263,18 @@ def _normalise(R):
     return R / np.maximum(spread, 0.5 * float(np.median(spread)))
 
 
+@contextlib.contextmanager
+def _single_blas():
+    """BLAS limited to one thread (threadpoolctl); yields False when that is not possible."""
+    try:
+        from threadpoolctl import threadpool_limits
+    except ImportError:
+        yield False
+        return
+    with threadpool_limits(1, "blas"):
+        yield True
+
+
 def find(X, searched, p, rule="first", progress=None):
     """
     X: (NL, n, h, w) chips of all layers (index = loaded layer), searched: [bool] per layer.
@@ -218,14 +294,16 @@ def find(X, searched, p, rule="first", progress=None):
         chip = register_layers(X[:, i]) if reg else X[:, i].astype(np.float32)
         return ctx.remainders(chip)
 
-    workers = int(p["lc_workers"]) or os.cpu_count() or 1
-    with ThreadPoolExecutor(max_workers=workers) as ex:
-        for i, out in enumerate(ex.map(work, range(n))):
-            for k, r in out.items():
-                rem[k][i] = r
-            if progress is not None and not progress(i, n, f"Explaining layers: chip {i + 1}/{n}"):
-                ex.shutdown(cancel_futures=True)
-                return None
+    with _single_blas() as limited:
+        # One chip per core; BLAS itself on one thread (both multithreaded: 3x slower)
+        workers = int(p["lc_workers"]) or ((os.cpu_count() or 1) if limited else 1)
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for i, out in enumerate(ex.map(work, range(n))):
+                for k, r in out.items():
+                    rem[k][i] = r
+                if progress is not None and not progress(i, n, f"Explaining layers: chip {i + 1}/{n}"):
+                    ex.shutdown(cancel_futures=True)
+                    return None
 
     # Evidence per layer: best centre-surround score over the scales
     scales = [float(s) for s in p["lc_scales"]]

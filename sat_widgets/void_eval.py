@@ -62,6 +62,11 @@ def _fmt(x, digits=2):
     return s[1:] if s.startswith("0.") else ("-" + s[2:] if s.startswith("-0.") else s)
 
 
+def _threshold(p):
+    """The threshold of the method that ran."""
+    return {"patchcore": p.get("pc_threshold"), "layer_change": p.get("lc_threshold", 10.0)}.get(p.get("method"), p.get("threshold"))
+
+
 def _med(values):
     values = [v for v in values if v is not None]
     return float(np.median(values)) if values else None
@@ -347,10 +352,11 @@ class Evaluation:
         pk, s, c, w, h x100 as integers (medians of the threshold misses / matched sizes), 0 = none.
         """
         p = self.p
-        m = ("l" if p.get("learned_model") is not None else "d") if p.get("method") == "die_to_die" else "p"
+        m = ("l" if p.get("learned_model") is not None else "d") if p.get("method") == "die_to_die" else \
+            "c" if p.get("method") == "layer_change" else "p"
         if p.get("seg_model") is not None:
             m = "s" if p["seg_model"].mode == "seg" else "r"
-        thr = p.get("pc_threshold") if p.get("method") == "patchcore" else p.get("threshold")
+        thr = _threshold(p)
         top = lambda d: [f"{k}{v}" for k, v in sorted(d.items(), key=lambda kv: -kv[1])[:2]]
         miss, false = {}, {}
         for t in self.truths:
@@ -373,10 +379,11 @@ class Evaluation:
     def code(self, s):
         """Short text for the phone (see docs/VOID_EVAL.md)."""
         p = self.p
-        m = {"die_to_die": "dd"}.get(p.get("method"), "pc" + ("r" if "resnet" in str(p.get("pc_model", "")).lower() else "m"))
+        m = {"die_to_die": "dd", "layer_change": "lc"}.get(
+            p.get("method"), "pc" + ("r" if "resnet" in str(p.get("pc_model", "")).lower() else "m"))
         if p.get("seg_model") is not None:
             m = "sg" if p["seg_model"].mode == "seg" else "rc"
-        thr = p.get("pc_threshold") if p.get("method") == "patchcore" else p.get("threshold")
+        thr = _threshold(p)
         layers = sorted(self.layer_stats) or self.layers
         n_cells = len(self.rects)
         rule = {"first": "rf", "last": "rl", "strongest": "rs"}.get(p.get("layer_rule", "first"), "r" + str(p.get("layer_rule"))[:1])
@@ -386,6 +393,9 @@ class Evaluation:
             rule += " lm"
         if p.get("method") == "die_to_die":
             rule += f" sm{_fmt(p.get('smooth', 0))}" + (" lf" if p.get("layout_fit", True) else "") + (" rg" if p.get("register", True) else "")
+        elif p.get("method") == "layer_change":
+            rule += f" lo{_fmt(p.get('lc_tlo', 3.0))}" + (" rg" if p.get("register", True) else "") + \
+                (" lr" if p.get("lc_register", False) else "")
         elif p.get("pc_position_norm", False):
             rule += " pn"
         lines = [f"VD{VERSION} {m} {rule} t{_fmt(thr)} f{self.factor} w{max(self.size)} m{_fmt(p.get('min_size_px'))} "

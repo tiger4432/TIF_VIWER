@@ -33,6 +33,7 @@ from sat_widgets.roi_inspector import ROIInspector
 from sat_widgets.angle_preview import AnglePreview
 from sat_widgets.auto_bbox import place_bboxes
 from sat_widgets import void_detect
+from sat_widgets import void_layer_change
 from sat_widgets import void_eval
 from sat_widgets import void_learn
 from sat_widgets import void_seg, seg_data
@@ -476,11 +477,14 @@ class MainWindow(QMainWindow):
         # Scorer: die-to-die (default) or the optional PatchCore (onnxruntime + models/*.onnx)
         self.cb_detect_method = QComboBox()
         self.cb_detect_method.addItem("Die-to-die", ("die_to_die", None))
+        self.cb_detect_method.addItem("Layer change", ("layer_change", None))
         self.cb_detect_method.addItem("PatchCore MobileNetV2", ("patchcore", "models/patchcore_mobilenetv2.onnx"))
         self.cb_detect_method.addItem("PatchCore ResNet50", ("patchcore", "models/patchcore_resnet50.onnx"))
         self.cb_detect_method.addItem("Segmentation U-Net", ("segmentation", "models/void_unet.onnx"))
         self.cb_detect_method.addItem("Reconstruction U-Net", ("segmentation", "models/void_recon.onnx"))
         self.cb_detect_method.setToolTip("Die-to-die: pixel comparison with the median chip (fast, exact outlines).\n"
+                                         "Layer change: every loaded layer at once; each layer explained from the layers\n"
+                                         "above it and the median chips; a void is what is new on its first layer.\n"
                                          "PatchCore: CNN features (optional, slower, coarse outlines), see docs/PATCHCORE.md.")
         self._detect_thr = {}
         self.cb_detect_method.currentIndexChanged.connect(self._on_detect_method)
@@ -1480,6 +1484,14 @@ class MainWindow(QMainWindow):
         for i in range(1, self.cb_detect_method.count()):
             method, model = self.cb_detect_method.itemData(i)
             item = self.cb_detect_method.model().item(i)
+            if method == "layer_change":
+                item.setToolTip("All loaded layers at once (load the layers to compare). Each layer of a chip is explained\n"
+                                "from the chip's layers above it and the median chips; what is left is new on that layer.\n"
+                                "Marks the layer where the void first appears (Mark on layer). Skipped layers still serve\n"
+                                "as the layers above. Thr: evidence over the layers (default 10).")
+                if cfg.get("method") == "layer_change":
+                    start = i
+                continue
             if method == "segmentation":
                 reason = void_seg.available(model)
                 item.setEnabled(not reason)
@@ -1504,7 +1516,9 @@ class MainWindow(QMainWindow):
         if last is not None:
             self._detect_thr[last] = self.sb_detect_thr.value()
         default = cfg.get("pc_threshold", patchcore.DEFAULTS["pc_threshold"]) if method == "patchcore" else \
-            cfg.get("seg_threshold", 5.0) if method == "segmentation" else cfg.get("threshold", void_detect.DEFAULTS["threshold"])
+            cfg.get("seg_threshold", 5.0) if method == "segmentation" else \
+            cfg.get("lc_threshold", void_layer_change.DEFAULTS["lc_threshold"]) if method == "layer_change" else \
+            cfg.get("threshold", void_detect.DEFAULTS["threshold"])
         self.sb_detect_thr.setValue(float(self._detect_thr.get(idx, default)))
         self._detect_last = idx
 
@@ -1660,7 +1674,8 @@ class MainWindow(QMainWindow):
             model = None
         if model:
             params["pc_model"] = model
-        params["pc_threshold" if params["method"] == "patchcore" else "threshold"] = self.sb_detect_thr.value()
+        params[{"patchcore": "pc_threshold", "layer_change": "lc_threshold"}.get(params["method"], "threshold")] = \
+            self.sb_detect_thr.value()
         params["layer_rule"] = self.cb_layer_rule.currentData()
         if self.chk_learned.isChecked() and params["method"] == "die_to_die":
             path = void_learn.model_path(params)
@@ -1682,8 +1697,11 @@ class MainWindow(QMainWindow):
         progress.setWindowModality(Qt.WindowModal)
         progress.show()
 
+        last = [0.0]
+
         def step(i, n, label):
-            if i % 20 == 0:
+            if i % 20 == 0 or time.monotonic() - last[0] > 0.25: # Slow steps (Layer change) refresh too
+                last[0] = time.monotonic()
                 progress.setValue(int(1000 * i / max(1, n)))
                 progress.setLabelText(label)
                 QApplication.processEvents()

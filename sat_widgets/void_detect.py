@@ -640,15 +640,11 @@ def _layer_change(read_layer, layer_numbers, skip, order, rects, size, p, progre
     searched = [layer not in skip for layer in layer_numbers]
     if len(cells) < 3 or not any(searched):
         return []
-    if p.get("register", True):
-        # The bbox may sit off the chip: one shift per chip (first searched layer) for every layer
-        z0 = searched.index(True)
-        _, shifts = _register({c: layers[z0][c] for c in cells})
-        for chips in layers.values():
-            for c in cells:
-                if shifts[c] != (0.0, 0.0):
-                    chips[c] = _translate(chips[c].astype(np.float32), *shifts[c]).astype(np.float16)
     X = np.stack([np.stack([layers[z][c] for c in cells]) for z in range(len(layer_numbers))])
+    if p.get("register", True):
+        # The bbox may sit off the chip: whole px (a sub-pixel shift blurs each chip differently,
+        # which the layer fit reads as change; its derivative terms take the sub-pixel rest)
+        X = vlc.align_chips(X)[0]
     n0, total = steps(), 2 * len(layer_numbers) * len(order)
     res = vlc.find(X, searched, p, p.get("layer_rule", "first"),
                    (lambda i, n, t: progress(n0 + (total - n0) * i // max(n, 1), total, t)) if progress else None)
@@ -676,11 +672,11 @@ def _layer_change(read_layer, layer_numbers, skip, order, rects, size, p, progre
         for z, layer in enumerate(layer_numbers):
             if not searched[z]:
                 continue
-            diag.layer_start(layer, {c: layers[z][c] for c in cells}, thr)
+            diag.layer_start(layer, layers[z], thr)
             for i, cell in enumerate(cells):
                 mask = res["place"][i] > thr
                 diag.chip(layer, cell, res["evidence"][z, i].astype(np.float32), None,
-                          layers[z][cell].astype(np.float32), mask, mask, comps.get((layer, cell), []))
+                          X[z, i].astype(np.float32), mask, mask, comps.get((layer, cell), []))
             diag.layer_end(layer)
     return found
 
