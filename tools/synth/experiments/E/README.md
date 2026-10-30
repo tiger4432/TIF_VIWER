@@ -2,7 +2,6 @@
 
 ```bash
 # from this directory, after generating data/ml_201..204 (see tools/synth/README.md)
-python -c "import numpy as np; from tools.synth.chips import load_chips"   # (chips are cached by the steps below)
 for s in 201 202 203 204; do python -c "import sys,numpy as np; sys.path.insert(0,'../../../..'); \
   from tools.synth.chips import load_chips; np.save('../../../../cache/X_$s.npy', load_chips('../../../../data','ml_$s',2))"; done
 python -c "import numpy as np, maps; [np.save(f'../../../../cache/R_{s}.npy', maps.wafer_changes(np.load(f'../../../../cache/X_{s}.npy'))) for s in (201,202,203,204)]"
