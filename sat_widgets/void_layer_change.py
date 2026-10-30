@@ -279,13 +279,15 @@ def find(X, searched, p, rule="first", progress=None):
     """
     X: (NL, n, h, w) chips of all layers (index = loaded layer), searched: [bool] per layer.
     Returns {"dets": [{"z", "i" (chip), "x", "y", "r" (working px), "score"}], "evidence": (NL, n, h, w),
-    "place": (n, h, w)}, or None when progress(...) returned False.
+    "scale": (NL, n, h, w) index into lc_scales of the best scale, "place": (n, h, w)}, or None when
+    progress(...) returned False.
     """
     p = dict(DEFAULTS, **p)
     nl, n, h, w = X.shape
     targets = [k for k in range(nl) if searched[k]]
     if not targets or n < 3:
-        return {"dets": [], "evidence": np.zeros(X.shape, np.float16), "place": np.zeros((n, h, w), np.float32)}
+        return {"dets": [], "evidence": np.zeros(X.shape, np.float16), "scale": np.zeros(X.shape, np.uint8),
+                "place": np.zeros((n, h, w), np.float32)}
     ctx = _Context(X, targets, p)
     rem = {k: np.zeros((n, h, w), np.float32) for k in targets}
     reg = bool(p["lc_register"]) and nl > 1
@@ -357,4 +359,4 @@ def find(X, searched, p, rule="first", progress=None):
             if float(win.max()) >= tlo else (y, x)
         dets.append({"z": first, "i": i, "x": xx + 0.5, "y": yy + 0.5,
                      "r": 1.6 * scales[SIG[first, i, yy, xx]], "score": score})
-    return {"dets": dets, "evidence": S, "place": A}
+    return {"dets": dets, "evidence": S, "scale": SIG, "place": A}
