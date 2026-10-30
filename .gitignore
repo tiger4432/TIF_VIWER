@@ -6,3 +6,4 @@ sample_*.tif
 .venv-build/
 .venv-dev/
 python.local
+/data/
