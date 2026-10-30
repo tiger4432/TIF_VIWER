@@ -36,6 +36,8 @@ Result on ml_204 (tuned on ml_201..203 only):
 - Linear domain better than log; derivatives + sub-pixel registration remove bump dipoles (registration small gain;
   integer-pixel registration made it worse: the jitter is continuous).
 - Explaining from **all other layers** (k-1, k+1, ...): best fit, but the void of deeper layers leaks into earlier
-  layers (layer assignment breaks); `src=all`.
+  layers, so the layer assignment breaks (`src=all`, training thr 10: ok 62, ly 88, fp 30, F1 0.33). It does
+  place voids with fewer false positives (fp 30 against 89), so a hybrid is the obvious next step:
+  find the place with `all`, then assign the first layer with `up`.
 - Aggregating evidence over layers: max -> F1 0.36, RMS -> 0.42; first layer by threshold-crossing -> CUSUM: 0.54.
 - Not done: per-chip parametric layout model, factor-1 processing, one-void-per-chip prior.
