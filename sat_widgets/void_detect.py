@@ -38,8 +38,10 @@ Parameters (config.json "void_detect", defaults in DEFAULTS):
                      pixel (sharper outlines, misses large faint voids)
     type_rules       void type from the layout position and shape (sat_widgets/void_classify.py);
                      products.json "type_rules" of the selected product win
-    method           "die_to_die" (default) or "patchcore" (CNN features, optional: needs
-                     onnxruntime and models/*.onnx, see docs/PATCHCORE.md; pc_* parameters)
+    method           "die_to_die" (default), "patchcore" (CNN features, optional: needs
+                     onnxruntime and models/*.onnx, see docs/PATCHCORE.md; pc_* parameters) or
+                     "layer_change" (all layers at once: each layer explained from the layers above
+                     it and the golden chips; lc_* parameters, see void_layer_change.py)
 """
 import math
 
@@ -55,7 +57,7 @@ DEFAULTS = {
     "max_area_frac": 0.2,
     "work_size": 256,
     "template_cells": 200,
-    "method": "die_to_die", # or "patchcore" (optional, sat_widgets/patchcore.py)
+    "method": "die_to_die", # or "patchcore" (optional, sat_widgets/patchcore.py), "layer_change"
     "layer_rule": "first",
     "smooth": 1.5, # Averaging of the deviation (working px) for large faint voids; 0 = per pixel
     "skip_layers": [0], # Absolute layer numbers not searched (top layer: surface echo noise)
@@ -390,7 +392,7 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
     # Learned filter (sat_widgets/void_learn.py): candidates scored by a model trained from hand
     # markings replace the threshold; "learn" collects the candidates for training instead
     model, collect = p.get("learned_model"), p.get("learn")
-    learned = (model is not None or collect is not None) and p["method"] != "patchcore"
+    learned = (model is not None or collect is not None) and p["method"] not in ("patchcore", "layer_change")
     if learned:
         from . import void_learn
         cand_thr = float(p.get("cand_threshold", model.cand_threshold if model is not None else 1.0))
@@ -408,8 +410,9 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
         if layer_diffs is None:
             return None
 
-    for z, layer in layer_z:
-        # 1. Aligned, normalized chips of this layer
+    def read_layer(z, layer):
+        """Aligned, normalized chips {cell: float16} of one layer; None when cancelled."""
+        nonlocal step
         chips = {}
         for cell in order:
             if progress is not None and not progress(step, n_steps, f"Layer {layer}: reading chips"):
@@ -428,6 +431,41 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
             quad = tuple(v for q in corners for v in (q[0] - rx0, q[1] - ry0))
             chips[cell] = np.clip(_normalize(_chip(region, quad, size, factor)), -6e4, 6e4).astype(np.float16)
         stack.release_cache()
+        return chips
+
+    lc = p["method"] == "layer_change"
+    if lc:
+        # All layers at once (sat_widgets/void_layer_change.py): each layer explained from the layers above
+        n_steps = 2 * len(layer_numbers) * len(order)
+
+        def accept(f):
+            """Skipped when marked already; void type from the rules."""
+            layer, gx, gy, rx, ry, cell, ext, c = f[0], f[1], f[2], f[3], f[4], f[7], f[8], f[9]
+            dup = overlaps(cell, gx, gy, rx, ry, layer)
+            if dup is not None:
+                c["status"], c["dup_layer"] = "dup", dup
+                return None
+            vtype = type_name
+            if classifier:
+                bw_, bh_ = ext[2] - ext[0], ext[3] - ext[1]
+                vtype = classifier.type_for({"center": (gx, gy), "extent": ext, "size": max(bw_, bh_),
+                                             "aspect": max(bw_, bh_) / max(min(bw_, bh_), 1e-6),
+                                             "fill": math.pi / 4, "polarity": None}, rects[cell], type_name)
+            c["type"] = vtype
+            taken.setdefault(cell, []).append((gx, gy, rx, ry, layer))
+            return f[:6] + (vtype,) + f[7:]
+
+        found = _layer_change(read_layer, layer_numbers, skip, order, rects, size, p, progress, diag,
+                              lambda: step, accept)
+        if found is None:
+            return None
+        per_layer = {layer: sum(1 for f in found if f[0] == layer) for _, layer in layer_z}
+
+    for z, layer in ([] if lc else layer_z):
+        # 1. Aligned, normalized chips of this layer
+        chips = read_layer(z, layer)
+        if chips is None:
+            return None
         if len(chips) < 3:
             continue
         threshold = float(p.get("pc_threshold", 10.0)) if p["method"] == "patchcore" else p["threshold"]
@@ -583,6 +621,68 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
     finally:
         vm.end_change()
     return {"added": len(found), "per_layer": per_layer, "types": types}
+
+
+def _layer_change(read_layer, layer_numbers, skip, order, rects, size, p, progress, diag, steps, accept):
+    """
+    Method "layer_change" (sat_widgets/void_layer_change.py): the chips of every loaded layer
+    (skipped layers too: they still explain the layers below them), then each void with its
+    first layer. Returns the found tuples that accept(f) kept (None = drop), None when cancelled.
+    """
+    from . import void_layer_change as vlc
+    layers = {}
+    for z, layer in enumerate(layer_numbers):
+        chips = read_layer(z, layer)
+        if chips is None:
+            return None
+        layers[z] = chips
+    cells = [c for c in order if all(c in chips for chips in layers.values())]
+    searched = [layer not in skip for layer in layer_numbers]
+    if len(cells) < 3 or not any(searched):
+        return []
+    if p.get("register", True):
+        # The bbox may sit off the chip: one shift per chip (first searched layer) for every layer
+        z0 = searched.index(True)
+        _, shifts = _register({c: layers[z0][c] for c in cells})
+        for chips in layers.values():
+            for c in cells:
+                if shifts[c] != (0.0, 0.0):
+                    chips[c] = _translate(chips[c].astype(np.float32), *shifts[c]).astype(np.float16)
+    X = np.stack([np.stack([layers[z][c] for c in cells]) for z in range(len(layer_numbers))])
+    n0, total = steps(), 2 * len(layer_numbers) * len(order)
+    res = vlc.find(X, searched, p, p.get("layer_rule", "first"),
+                   (lambda i, n, t: progress(n0 + (total - n0) * i // max(n, 1), total, t)) if progress else None)
+    if res is None:
+        return None
+    W, H = size
+    found, comps = [], {}
+    for d in res["dets"]:
+        cell, layer = cells[d["i"]], layer_numbers[d["z"]]
+        x0, y0, w, h = rects[cell]
+        sx, sy = w / W, h / H
+        gx, gy, rx, ry = x0 + d["x"] * sx, y0 + d["y"] * sy, d["r"] * sx, d["r"] * sy
+        extent = (gx - rx, gy - ry, gx + rx, gy + ry)
+        box = (max(0, int(d["y"] - d["r"])), min(H - 1, int(math.ceil(d["y"] + d["r"])) - 1),
+               max(0, int(d["x"] - d["r"])), min(W, int(math.ceil(d["x"] + d["r"]))))
+        c = {"box": box, "area": int(math.pi * d["r"] ** 2), "merged": 1, "score": d["score"],
+             "status": "kept", "extent": extent}
+        comps.setdefault((layer, cell), []).append(c)
+        f = accept((layer, gx, gy, rx, ry, d["score"], None, cell, extent, c))
+        if f is not None:
+            found.append(f)
+    if diag is not None:
+        # Per layer: its evidence map (dev) against the place threshold; the place map as the mask
+        thr = float(p.get("lc_threshold", vlc.DEFAULTS["lc_threshold"]))
+        for z, layer in enumerate(layer_numbers):
+            if not searched[z]:
+                continue
+            diag.layer_start(layer, {c: layers[z][c] for c in cells}, thr)
+            for i, cell in enumerate(cells):
+                mask = res["place"][i] > thr
+                diag.chip(layer, cell, res["evidence"][z, i].astype(np.float32), None,
+                          layers[z][cell].astype(np.float32), mask, mask, comps.get((layer, cell), []))
+            diag.layer_end(layer)
+    return found
 
 
 def _golden(chips, p):
