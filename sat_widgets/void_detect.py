@@ -546,7 +546,39 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
     rule = p.get("layer_rule", "first")
     prefer = {"first": lambda f: (f[0], -f[5]), "last": lambda f: (-f[0], -f[5])}.get(rule, lambda f: (-f[5], f[0]))
     chosen, by_cell = set(), {}
-    for f in sorted(found, key=prefer):
+    if rule == "run":
+        # A void stays on every deeper layer: spots of one place across layers are grouped, the void
+        # is marked where the run of layers reaching its deepest find starts (gaps up to run_gap
+        # layers); finds on fewer than min_layers layers are dropped unless they are on the last layer
+        gap_l, min_l = int(p.get("run_gap", 1)), int(p.get("min_layers", 1))
+        last = max((lr for _, lr in layer_z), default=0)
+        groups = []
+        for f in sorted(found, key=lambda f: (-f[0], -f[5])):
+            gx, gy, rx, ry, cell = f[1], f[2], f[3], f[4], f[7]
+            g = next((g for g in groups if g[0][7] == cell and any(
+                abs(gx - k[1]) < max(rx, k[3]) and abs(gy - k[2]) < max(ry, k[4]) for k in g)), None)
+            if g is None:
+                groups.append([f])
+            else:
+                g.append(f)
+        for g in groups:
+            layers = sorted({f[0] for f in g})
+            start = layers[-1]
+            for lr in reversed(layers[:-1]):
+                if start - lr > gap_l + 1:
+                    break
+                start = lr
+            n_run = sum(1 for lr in layers if lr >= start)
+            if n_run < min_l and start != last:
+                for f in g:
+                    f[9]["status"] = "dup"
+                continue
+            rep = max((f for f in g if f[0] == start), key=lambda f: f[5])
+            chosen.add(id(rep))
+            for f in g:
+                if f is not rep:
+                    f[9]["status"], f[9]["dup_layer"] = "dup", start
+    for f in (sorted(found, key=prefer) if rule != "run" else ()):
         layer, gx, gy, rx, ry, cell, c = f[0], f[1], f[2], f[3], f[4], f[7], f[9]
         hit = next((k for k in by_cell.get(cell, ()) if abs(gx - k[1]) < max(rx, k[3]) and abs(gy - k[2]) < max(ry, k[4])), None)
         if hit is not None:
@@ -645,12 +677,23 @@ def _learned_maps(items, dctx, model, p, diag=None, layer=None, layer_diffs=None
     from . import void_seg
     items = list(items)
     if model.mode == "seg":
-        for cell, _, _, m in items:
-            nb = None
-            if model.neighbors and layer_diffs is not None:
+        changes, cspreads = {}, None
+        if model.neighbors and layer_diffs is not None:
+            for cell, _, _, m in items:
+                if getattr(model, "stack_residual", 0):
+                    # Residual of this layer against the chip's other layers (all of them / those above)
+                    ls = sorted(lr for lr in layer_diffs if cell in layer_diffs[lr] and lr != layer)
+                    above = [lr for lr in ls if lr < layer]
+                    st = [layer_diffs[lr][cell] for lr in above] + [m] + [layer_diffs[lr][cell] for lr in ls if lr > layer]
+                    changes[cell] = void_seg.stack_residual(st, len(above))
+                    continue
                 nb = [(layer_diffs.get(layer + k) or {}).get(cell) for k in (-1, 1)]
-                nb = [None if o is None else o.astype(np.float32) for o in nb]
-            x = void_seg.inputs(m, dctx["golden"], dctx["spread"], nb)
+                changes[cell] = [None if o is None else void_seg.layer_change(m, o.astype(np.float32)) for o in nb]
+            if getattr(model, "change_norm", 0):
+                # Layer changes compared like chips: / their per-pixel chip-to-chip spread over the layer
+                cspreads = [void_seg.change_spread([c[k] for c in changes.values()]) for k in (0, 1)]
+        for cell, _, _, m in items:
+            x = void_seg.inputs(m, dctx["golden"], dctx["spread"], changes=changes.get(cell, []), change_spreads=cspreads)
             prob = model.predict(x)
             yield cell, prob * 10.0, np.sign(m - dctx["golden"]), m
         return

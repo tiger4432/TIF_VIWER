@@ -1,0 +1,24 @@
+{
+ "mode": "seg",
+ "inputs": "chip, golden, (chip - golden) / spread, layer change above / below; clip +-10, / 5",
+ "trained_at": "2026-10-30T02:16:31",
+ "samples": 3136,
+ "samples_with_voids": 552,
+ "neighbor_layers": 1,
+ "change_norm": 0,
+ "stack_residual": 1,
+ "channels": 5,
+ "base": 16,
+ "epochs": 30,
+ "label": "all",
+ "best_epoch": 29,
+ "validation": {
+  "void_recall": 0.2808988764044944,
+  "void_precision": 0.12355212355212356,
+  "void_f1": 0.17161857771103725,
+  "voids": 89,
+  "dets": 259
+ },
+ "train_seconds": 758,
+ "suggested_threshold": 5
+}

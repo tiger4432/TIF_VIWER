@@ -52,17 +52,76 @@ def layer_change(m, m_other):
     return _LayoutFit(o).apply(m) - o
 
 
-def inputs(m, golden, spread, neighbors=None):
+def stack_residual(stack, k):
+    """
+    What layer k of a chip has that its other layers do not explain: all layers of a scan show the
+    same structures of the chip, each with its own brightness / contrast / polarity per structure
+    (one layer is not a scaled copy of another, so layer_change leaves layout behind), and a void
+    appears on one layer and stays deeper with another shade. Layer k is fitted per chip (robust
+    least squares) from [1, each other layer, its square] -> residual against all other layers, and
+    against the layers above only (the first layer a void appears on is unexplained there; with
+    fewer than 3 layers above, all others). stack: [chip of each layer] (top first). Returns two
+    maps in units of the chip's robust residual sigma.
+    """
+    st = [np.asarray(a, np.float32) for a in stack]
+    y = st[k].ravel()
+    out = []
+    for others in ([j for j in range(len(st)) if j != k], list(range(k)) if k >= 3 else None):
+        if others is None:
+            out.append(out[0])
+            continue
+        if not others:
+            out.append(np.zeros_like(st[k]))
+            continue
+        cols = [np.ones_like(y)]
+        for j in others:
+            o = st[j].ravel()
+            o = (o - o.mean()) / (o.std() + 1e-6)
+            cols += [o, o * o]
+        A = np.stack(cols, 1)
+        sub = np.arange(0, y.size, 2)
+        keep = sub
+        for _ in range(3):
+            coef = np.linalg.lstsq(A[keep], y[keep], rcond=None)[0]
+            r = y - A @ coef
+            sig = float(np.median(np.abs(r[sub]))) * 1.4826 + 1e-6
+            keep = sub[np.abs(r[sub]) < 3 * sig]
+        out.append((r / sig).reshape(st[k].shape).astype(np.float32))
+    return out
+
+
+def change_spread(changes):
+    """
+    Per-pixel chip-to-chip spread of the layer changes of one layer and direction (None = no such
+    layer), like the die-to-die spread: models with "change_norm" get change / spread.
+    """
+    from .void_detect import _filt
+    from PIL import ImageFilter
+    st = [np.asarray(c, np.float32) for c in changes if c is not None]
+    if len(st) < 3:
+        return np.float32(1.0)
+    st = np.stack(st)
+    sp = np.median(np.abs(st - np.median(st, axis=0)), axis=0) * 1.4826
+    sp = _filt(sp, ImageFilter.MaxFilter(3))
+    return np.maximum(sp, 0.5 * float(np.median(sp)) + 1e-3).astype(np.float32)
+
+
+def inputs(m, golden, spread, neighbors=None, changes=None, change_spreads=None):
     """
     Model input (C, H, W) float32: the matched chip, the golden chip, the difference, and for
     multi-layer models (neighbors = [the same chip on the layer above, below], None = no such
-    layer) what changed against each neighbouring layer (layer_change). Each clipped to +-10, / 5.
+    layer) what changed against each neighbouring layer (layer_change; or given as changes),
+    optionally / change_spreads (change_norm models). Each clipped to +-10, / 5.
     """
     m = np.asarray(m, np.float32)
     g = np.asarray(golden, np.float32)
     chans = [m, g, diff(m, g, spread)]
-    for o in (neighbors or []):
-        chans.append(np.zeros_like(m) if o is None else layer_change(m, o))
+    if changes is None:
+        changes = [None if o is None else layer_change(m, o) for o in (neighbors or [])]
+    for k, c in enumerate(changes):
+        if c is not None and change_spreads is not None:
+            c = c / change_spreads[k]
+        chans.append(np.zeros_like(m) if c is None else c)
     return np.stack([np.clip(c, -10, 10) for c in chans]) / 5.0
 
 
@@ -209,6 +268,8 @@ class Model:
                 self.info = json.load(f)
         self.mode = self.info.get("mode", "recon" if "recon" in os.path.basename(path).lower() else "seg")
         self.neighbors = int(self.info.get("neighbor_layers", 0)) # 1: the layers above / below as extra channels
+        self.change_norm = int(self.info.get("change_norm", 0)) # 1: layer changes / their chip-to-chip spread
+        self.stack_residual = int(self.info.get("stack_residual", 0)) # 1: residual against the other layers (stack_residual)
 
     def predict(self, x):
         """seg: void probability (H, W); recon: the redrawn chip (H, W), for one input (3, H, W)."""
