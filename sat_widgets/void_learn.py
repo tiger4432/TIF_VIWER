@@ -35,6 +35,9 @@ NMS = 4 # Working px between candidate peaks
 TRAIN_DIR = os.path.join(os.path.expanduser("~"), "TIF_Viewer_train")
 DEFAULT_MODEL = os.path.join(TRAIN_DIR, "void_classifier.json")
 DATASET = os.path.join(TRAIN_DIR, "dataset.jsonl")
+# Layer change (sat_widgets/void_layer_change.py): its own candidates and features
+LC_MODEL = os.path.join(TRAIN_DIR, "lc_classifier.json")
+LC_DATASET = os.path.join(TRAIN_DIR, "lc_dataset.jsonl")
 
 FEATURES = ["peak", "mean", "log_area", "width", "height", "aspect", "fill", "polarity",
             "blobness", "edge_corr", "on_edge", "img_contrast", "res_contrast", "gold_contrast",
@@ -236,10 +239,10 @@ class Model:
         self.cand_threshold = float(data.get("cand_threshold", 1.0))
 
     @staticmethod
-    def load(path):
+    def load(path, features=None):
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if data.get("features") != FEATURES:
+        if data.get("features") != (features or FEATURES):
             raise ValueError("model made for other features: train again")
         return Model(data)
 
@@ -247,9 +250,16 @@ class Model:
         return score(self.stumps, X)
 
 
-def model_path(params):
+def model_path(params, method="die_to_die"):
+    """Model file of the method: config "classifier" (die-to-die) / "lc_classifier" (layer change)."""
+    if method == "layer_change":
+        return params.get("lc_classifier") or LC_MODEL
     path = params.get("classifier")
     return path if path else DEFAULT_MODEL
+
+
+def dataset_path(method="die_to_die"):
+    return LC_DATASET if method == "layer_change" else DATASET
 
 
 def add_to_dataset(source_key, rows, path=None):
@@ -269,28 +279,29 @@ def add_to_dataset(source_key, rows, path=None):
             f.write(json.dumps(dict(r, src=source_key)) + "\n")
 
 
-def load_dataset(path=None):
-    path = path or DATASET
+def load_dataset(path=None, features=None):
+    path, features = path or DATASET, features or FEATURES
     X, y, groups, sources = [], [], [], set()
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 r = json.loads(line)
-                if len(r["x"]) != len(FEATURES):
+                if len(r["x"]) != len(features):
                     continue # Rows of an older feature set
                 X.append(r["x"])
                 y.append(r["y"])
                 groups.append((r["src"], r["g"]))
                 sources.add(r["src"])
-    return np.asarray(X, np.float64).reshape(-1, len(FEATURES)), np.asarray(y), groups, sources
+    return np.asarray(X, np.float64).reshape(-1, len(features)), np.asarray(y), groups, sources
 
 
 MAX_NEGATIVES = 200000 # Training rows that are not voids (random subset beyond this)
 
 
-def train_model(cand_threshold, path, rounds=200, dataset=None):
+def train_model(cand_threshold, path, rounds=200, dataset=None, features=None):
     """Trains on the whole dataset, saves the model. Returns its summary dict."""
-    X, y, groups, sources = load_dataset(dataset)
+    features = features or FEATURES
+    X, y, groups, sources = load_dataset(dataset, features)
     neg = np.nonzero(y == 0)[0]
     if len(neg) > MAX_NEGATIVES:
         keep = np.sort(np.concatenate([np.nonzero(y > 0)[0],
@@ -302,8 +313,8 @@ def train_model(cand_threshold, path, rounds=200, dataset=None):
     stumps = train_stumps(X, y, rounds)
     used = {}
     for j, _, _, a in stumps:
-        used[FEATURES[j]] = used.get(FEATURES[j], 0.0) + a
-    data = {"version": 1, "features": FEATURES, "stumps": stumps, "cut": cut, "cand_threshold": cand_threshold,
+        used[features[j]] = used.get(features[j], 0.0) + a
+    data = {"version": 1, "features": features, "stumps": stumps, "cut": cut, "cand_threshold": cand_threshold,
             "trained_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "files": len(sources),
             "voids": int((y > 0).sum()), "others": int((y == 0).sum()),
             "cv_recall": rec, "cv_precision": prec,
@@ -314,13 +325,14 @@ def train_model(cand_threshold, path, rounds=200, dataset=None):
     return data
 
 
-def label_rows(collected, truths):
+def label_rows(collected, truths, any_layer=False):
     """
     Training rows from collected candidates [(layer, cell, [(Deskewed box, area, features)])] and
     hand markings
     [{"layer", "cell", "box" (Deskewed x0, y0, x1, y1)}]: a candidate whose center lies in a hand
     marking (or holds its center) on the same layer and cell is a void (1); over a hand marking on
-    another layer it is left out; otherwise 0. Returns (rows, markings covered by a candidate).
+    another layer it is left out (any_layer: a void too, for a filter that decides the place only);
+    otherwise 0. Returns (rows, markings covered by a candidate).
     """
     by_cell = {}
     for i, t in enumerate(truths):
@@ -337,7 +349,7 @@ def label_rows(collected, truths):
                 mx, my = 0.25 * (tb[2] - tb[0]) + 3, 0.25 * (tb[3] - tb[1]) + 3
                 tb = (tb[0] - mx, tb[1] - my, tb[2] + mx, tb[3] + my)
                 if (tb[0] <= cx <= tb[2] and tb[1] <= cy <= tb[3]) or (b[0] <= tx <= b[2] and b[1] <= ty <= b[3]):
-                    if t["layer"] == layer:
+                    if any_layer or t["layer"] == layer:
                         label = 1
                         covered.add(i)
                         break

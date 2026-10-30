@@ -58,7 +58,13 @@ DEFAULTS = {
     "lc_border": 10, # Working px at the chip border not searched
     "lc_register": False, # Layers of each chip moved onto its first layer (sub-pixel; a scan's layers are aligned)
     "lc_workers": 0, # Chips fitted in parallel (0 = CPU count, 1 without threadpoolctl)
+    "lc_cand_threshold": 8.0, # Learned filter: candidates down to this place score (Train)
+    "lc_learned_cut": None, # Learned filter: keep a candidate from this model score on (None = the model's cut, best F1)
 }
+
+# Learned filter (sat_widgets/void_learn.py, Train / Learned filter): features of each candidate
+FEATURES = ["place", "first_rel", "n_after", "e_first", "e_max", "tail_mean", "tail_min", "tail_frac", "e_before",
+            "pad", "scale", "border", "xn", "yn", "common", "z_pixel", "chip_noise", "rank_in_chip", "blob"]
 
 _GM = {}
 
@@ -291,6 +297,9 @@ def _single_blas():
 def find(X, searched, p, rule="first", progress=None):
     """
     X: (NL, n, h, w) chips of all layers (index = loaded layer), searched: [bool] per layer.
+    p["learned_model"] (void_learn.Model on FEATURES): candidates down to its cand_threshold, kept when
+    its score reaches its cut (det["learned"]); p["learn"] (training): every candidate down to
+    lc_cand_threshold, with det["features"].
     Returns {"dets": [{"z", "i" (chip), "x", "y", "r" (working px), "score"}], "evidence": (NL, n, h, w),
     "scale": (NL, n, h, w) index into lc_scales of the best scale, "place": (n, h, w)}, or None when
     progress(...) returned False.
@@ -358,8 +367,11 @@ def find(X, searched, p, rule="first", progress=None):
         del run
     kbest = np.array(targets)[S[targets].argmax(0)]
     SIGA = np.take_along_axis(SIG, kbest[None], 0)[0]
+    model, collect = p.get("learned_model"), bool(p.get("learn"))
+    if model is not None or collect: # Candidates for the learned filter: lower place scores too
+        thr = float(model.cand_threshold) if model is not None else float(p["lc_cand_threshold"])
     peaks = [(int(i), int(y), int(x), scales[SIGA[i, y, x]], float(A[i, y, x]))
-             for i, y, x in zip(*np.nonzero((A == _max_filter(A)) & (A > thr)))]
+             for i, y, x in zip(*np.nonzero((A == _max_filter(np.maximum(A, 0))) & (A > thr)))]
     peaks.sort(key=lambda d: -d[4])
     kept = []
     for d in peaks: # A weaker peak overlapping a stronger one (same chip) is the same spot
@@ -368,6 +380,7 @@ def find(X, searched, p, rule="first", progress=None):
 
     dets = []
     tg = np.array(targets)
+    feat = _Features(S, A, pad, tg, tlo) if (model is not None or collect) else None
     for i, y, x, s, score in kept:
         prof = S[:, i, y, x].astype(np.float32)
         if rule == "strongest":
@@ -387,4 +400,44 @@ def find(X, searched, p, rule="first", progress=None):
             if float(win.max()) >= tlo else (y, x)
         dets.append({"z": first, "i": i, "x": xx + 0.5, "y": yy + 0.5,
                      "r": 1.6 * scales[SIG[first, i, yy, xx]], "score": score})
+        if feat is not None:
+            dets[-1]["features"] = feat.row(i, y, x, first, float(SIG[first, i, yy, xx]))
+    if model is not None and dets:
+        sc = model.scores([d["features"] for d in dets])
+        for d, v in zip(dets, sc):
+            d["learned"] = float(v)
+        cut = float(p["lc_learned_cut"]) if p.get("lc_learned_cut") is not None else model.cut
+        dets = [d for d in dets if d["learned"] >= cut]
     return {"dets": dets, "evidence": S, "scale": SIG, "place": A}
+
+
+class _Features:
+    """FEATURES of a candidate (learned filter): how the evidence runs over the layers from its first
+    layer on, how it compares with the same place in the other chips (layout residue shows in many
+    chips), where it sits in the chip, whether it is a blob or a thin line."""
+
+    def __init__(self, S, A, pad, tg, tlo):
+        self.S, self.A, self.pad, self.tg, self.tlo = S, A, pad, tg, tlo
+        self.n, self.h, self.w = A.shape
+        self.med = np.median(A, axis=0)
+        self.mad = np.median(np.abs(A - self.med), axis=0) * 1.4826 + 1e-3
+        self.noise = np.percentile(A.reshape(self.n, -1), 99, axis=1)
+        self.rank, self.blur = {}, {}
+
+    def row(self, i, y, x, first, scale):
+        S, tg, tlo, h, w = self.S, self.tg, self.tlo, self.h, self.w
+        e = S[tg, i, y, x].astype(np.float32)
+        pv = float(self.pad[i, y, x]) if self.pad is not None else 0.0
+        fi = int(np.nonzero(tg == first)[0][0]) if first in tg else len(tg) - 1
+        after, before = e[fi:], e[:fi]
+        a = float(self.A[i, y, x])
+        common = float((self.A[:, max(0, y - 1):y + 2, max(0, x - 1):x + 2].max(axis=(1, 2)) > 0.5 * a).mean())
+        rank = self.rank.get(i, 0)
+        self.rank[i] = rank + 1
+        if (first, i) not in self.blur:
+            self.blur[(first, i)] = _gauss(S[first, i].astype(np.float32), 3.0)
+        blob = float(self.blur[(first, i)][y, x]) / max(float(S[first, i, y, x]), 1e-3)
+        return [a, fi / max(len(tg) - 1, 1), float(len(tg) - fi), float(e[fi]), float(e.max()), float(after.mean()),
+                float(after.min()), float((after > tlo).mean()), float(before.max()) if len(before) else 0.0,
+                pv, scale, float(min(y, x, h - 1 - y, w - 1 - x)), x / w, y / h, common,
+                (a - float(self.med[y, x])) / float(self.mad[y, x]), float(self.noise[i]), float(rank), blob]

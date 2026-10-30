@@ -651,21 +651,28 @@ def _layer_change(read_layer, layer_numbers, skip, order, rects, size, p, progre
     if res is None:
         return None
     W, H = size
-    found, comps = [], {}
+    found, comps, collected = [], {}, {}
     for d in res["dets"]:
         cell, layer = cells[d["i"]], layer_numbers[d["z"]]
         x0, y0, w, h = rects[cell]
         sx, sy = w / W, h / H
         gx, gy, rx, ry = x0 + d["x"] * sx, y0 + d["y"] * sy, d["r"] * sx, d["r"] * sy
         extent = (gx - rx, gy - ry, gx + rx, gy + ry)
+        if p.get("learn") is not None: # Training (Train): candidates with their features, nothing kept
+            collected.setdefault((layer, cell), []).append((extent, int(math.pi * d["r"] ** 2), d["features"]))
+            continue
         box = (max(0, int(d["y"] - d["r"])), min(H - 1, int(math.ceil(d["y"] + d["r"])) - 1),
                max(0, int(d["x"] - d["r"])), min(W, int(math.ceil(d["x"] + d["r"]))))
         c = {"box": box, "area": int(math.pi * d["r"] ** 2), "merged": 1, "score": d["score"],
              "status": "kept", "extent": extent}
+        if "learned" in d:
+            c["learned"] = d["learned"]
         comps.setdefault((layer, cell), []).append(c)
         f = accept((layer, gx, gy, rx, ry, d["score"], None, cell, extent, c))
         if f is not None:
             found.append(f)
+    for (layer, cell), cands in collected.items():
+        p["learn"](layer, cell, cands)
     if diag is not None:
         # Per layer: its evidence map (dev) against the place threshold; the place map as the mask
         thr = float(p.get("lc_threshold", vlc.DEFAULTS["lc_threshold"]))

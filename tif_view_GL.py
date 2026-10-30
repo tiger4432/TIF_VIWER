@@ -523,8 +523,8 @@ class MainWindow(QMainWindow):
         v_layout_void.addLayout(h_rule)
         h_learn = QHBoxLayout()
         self.chk_learned = QCheckBox("Learned filter")
-        self.chk_learned.setToolTip("Die-to-die: candidates scored by a model trained from hand markings (Train)\n"
-                                    "instead of the Thr threshold (sat_widgets/void_learn.py)")
+        self.chk_learned.setToolTip("Die-to-die / Layer change: candidates scored by a model trained from hand markings\n"
+                                    "(Train; one model per method) instead of the Thr threshold (sat_widgets/void_learn.py)")
         self.chk_learned.setEnabled(os.path.exists(void_learn.model_path(self._config().get("void_detect", {}))))
         btn_train = QPushButton("Train")
         btn_train.setToolTip("Add this file's hand markings to the training set and retrain the learned filter\n"
@@ -1522,6 +1522,10 @@ class MainWindow(QMainWindow):
             cfg.get("threshold", void_detect.DEFAULTS["threshold"])
         self.sb_detect_thr.setValue(float(self._detect_thr.get(idx, default)))
         self._detect_last = idx
+        # Learned filter: the model of this method (die-to-die and layer change have their own)
+        if hasattr(self, "chk_learned"):
+            self.chk_learned.setEnabled(method in ("die_to_die", "layer_change") and
+                                        os.path.exists(void_learn.model_path(cfg, method)))
 
     # -----------------------------------------------
     # Results API (plugins/results_api.py)
@@ -1678,10 +1682,11 @@ class MainWindow(QMainWindow):
         params[{"patchcore": "pc_threshold", "layer_change": "lc_threshold"}.get(params["method"], "threshold")] = \
             self.sb_detect_thr.value()
         params["layer_rule"] = self.cb_layer_rule.currentData()
-        if self.chk_learned.isChecked() and params["method"] == "die_to_die":
-            path = void_learn.model_path(params)
+        if self.chk_learned.isChecked() and self.chk_learned.isEnabled() and params["method"] in ("die_to_die", "layer_change"):
+            path = void_learn.model_path(params, params["method"])
             try:
-                params["learned_model"] = void_learn.Model.load(path)
+                params["learned_model"] = void_learn.Model.load(
+                    path, void_layer_change.FEATURES if params["method"] == "layer_change" else None)
             except Exception as e:
                 QMessageBox.warning(self, title, f"Learned filter not usable ({path}): {e}")
                 return None
@@ -1800,7 +1805,10 @@ class MainWindow(QMainWindow):
         params.pop("learned_model", None)
         if params.get("method") == "patchcore":
             params["method"] = "die_to_die" # The learned filter works on the die-to-die deviation
-        cand_thr = float(params.get("cand_threshold", 1.0))
+        method = params["method"]
+        lc = method == "layer_change" # Own candidates / features / model (sat_widgets/void_layer_change.py)
+        cand_thr = float(params.get("lc_cand_threshold", void_layer_change.DEFAULTS["lc_cand_threshold"]) if lc
+                         else params.get("cand_threshold", 1.0))
         collected = []
         params["learn"] = lambda layer, cell, cands: collected.append((layer, cell, cands))
         params["cand_threshold"] = cand_thr
@@ -1812,13 +1820,16 @@ class MainWindow(QMainWindow):
             progress.close()
         if result is None:
             return
-        rows, covered = void_learn.label_rows(collected, truths)
+        # Layer change: the filter decides the place only (the layer comes from the layer rule)
+        rows, covered = void_learn.label_rows(collected, truths, any_layer=lc)
         key = self.lbl_source.toolTip() or self.le_wafer_id.text() or "unnamed"
-        void_learn.add_to_dataset(key, rows)
-        path = void_learn.model_path(self._config().get("void_detect", {}))
+        dataset = void_learn.dataset_path(method)
+        void_learn.add_to_dataset(key, rows, dataset)
+        path = void_learn.model_path(self._config().get("void_detect", {}), method)
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            data = void_learn.train_model(cand_thr, path)
+            data = void_learn.train_model(cand_thr, path, rounds=300 if lc else 200, dataset=dataset,
+                                          features=void_layer_change.FEATURES if lc else None)
         except ValueError as e:
             QMessageBox.warning(self, "Train", f"Added {len(rows)} candidates of this file. Not trained yet: {e}.")
             return
@@ -1827,13 +1838,13 @@ class MainWindow(QMainWindow):
         self.chk_learned.setEnabled(True)
         self.chk_learned.setChecked(True)
         pct = lambda v: int(round(100 * v))
-        short = (f"L1 f{data['files']} v{data['voids']} n{data['others']} c{covered} h{len(truths)}\n"
+        short = (f"L{'C' if lc else '1'} f{data['files']} v{data['voids']} n{data['others']} c{covered} h{len(truths)}\n"
                  f"R{pct(data['cv_recall'])} P{pct(data['cv_precision'])} " + " ".join(data["top_features"][:3]))
         full = (f"This file: {len(truths)} hand markings, {covered} found among {len(rows)} candidates\n"
                 f"Training set: {data['files']} files, {data['voids']} voids, {data['others']} other candidates\n"
                 f"Cross-validated by chip: recall {pct(data['cv_recall'])} %, precision {pct(data['cv_precision'])} %\n"
                 f"Most used features: {', '.join(data['top_features'])}\n"
-                f"Model: {path}\nTraining set: {void_learn.DATASET}")
+                f"Model: {path}\nTraining set: {dataset}")
         print("Train:\n" + full)
         EvalDialog(self, full, os.path.dirname(path), None, len(truths), short).exec()
 
