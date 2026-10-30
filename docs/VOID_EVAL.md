@@ -69,6 +69,7 @@ Y25
 | `lo` | Layer change: 보이드 없는 레이어의 증거 수준 (`lc_tlo`, 첫 레이어 판정 기준) |
 | `lr` | Layer change: 칩마다 레이어끼리 위치 맞춤 (`lc_register`, 기본 꺼짐) |
 | `pr` | Layer change: 자리 점수를 예전 방식(레이어 평균, `lc_place: "rms"`)으로 계산 |
+| `gp` | Layer change: 마지막 레이어 아래 가상 레이어의 가우시안 σ (`lc_pad_sigma`, 0 = 없음) |
 | `pn` | PatchCore 위치별 정규화 사용 (`pc_position_norm`, 기본 꺼짐) |
 | `lm` | 학습 필터 사용 (Learned filter) |
 | `t` | 임계값 (Thr) |

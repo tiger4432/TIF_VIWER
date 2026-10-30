@@ -21,7 +21,12 @@ explanation leaves:
 5. Place ("lc_place"): "cusum" (default) = max_l sum_{k >= l} (e_k - lc_tlo) over the searched
    layers: the evidence from the layer where it starts to the last one (a void stays on every
    deeper layer; a void-free layer, e < lc_tlo, lowers it). A void that appears late counts like
-   one that appears early, a spike on one layer counts once. "rms" = root mean square of the
+   one that appears early, a spike on one layer counts once. Below the last searched layer a
+   virtual layer is added: the last layer's evidence blurred by lc_pad_sigma (scaled to the same top
+   level). Nothing is known below the last layer, but a void is a blob and keeps its evidence
+   blurred while thin residues at the chip edge / pad fade; so a void that first appears on the last
+   layer is not just a one-layer spike (synthetic wafers: 8 instead of 2 of 33 such voids found at
+   0 false detections). "rms" = root mean square of the
    evidence over the layers x sqrt(2) (late voids are averaged away: on the synthetic wafers
    twice the false detections for the same misses). Above lc_threshold, local maxima, weaker
    overlapping peaks dropped.
@@ -30,9 +35,9 @@ explanation leaves:
    "strongest" = largest evidence; "last" = deepest layer whose evidence reaches lc_tlo.
    The size is the best scale there (radius 1.6 x sigma).
 
-From tools/synth/experiments/C (branch exp/C-layer-change). Synthetic 8-layer wafers through the app,
-lc_threshold 20: training wafers ml_201..203 miss 30 % of the voids (any layer), 6.7 false
-detections per wafer; ml_204 miss 14 %, 4 false (die-to-die: 94 % and 443).
+From tools/synth/experiments/C (branch exp/C-layer-change). Synthetic 8-layer wafers, lc_threshold 26:
+training wafers ml_201..203 miss 32 % of the voids (any layer), 4.0 false detections per wafer;
+ml_204 miss 24 %, 2 false (die-to-die: 94 % and 443). Lower Thr: more found, more false (README).
 """
 import contextlib
 import math
@@ -42,8 +47,9 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 DEFAULTS = {
-    "lc_threshold": 20.0, # Place: evidence over the layers (see 5.; about 10 with lc_place "rms")
+    "lc_threshold": 26.0, # Place: evidence over the layers (see 5.; about 10 with lc_place "rms")
     "lc_place": "cusum", # "cusum" or "rms" (see 5.)
+    "lc_pad_sigma": 5.0, # Virtual layer below the last: its evidence blurred (working px; 0 = none)
     "lc_tlo": 3.0, # Evidence of a void-free layer (first layer: CUSUM level)
     "lc_scales": [2.0, 3.0, 4.5, 6.5], # Centre-surround sigmas (working px)
     "lc_sources": 7, # At most this many layers above as sources (nearest first)
@@ -335,10 +341,17 @@ def find(X, searched, p, rule="first", progress=None):
 
     # Place: evidence over the searched layers (see 5.)
     thr, tlo = float(p["lc_threshold"]), float(p["lc_tlo"])
+    pad = None
+    if float(p["lc_pad_sigma"]) > 0 and p["lc_place"] != "rms":
+        last = S[targets[-1]].astype(np.float32)
+        pad = _gauss(last, float(p["lc_pad_sigma"]))
+        pad *= float(np.percentile(last, 99.9)) / max(float(np.percentile(pad, 99.9)), 1e-6)
     if p["lc_place"] == "rms":
         A = np.sqrt((S[targets].astype(np.float32) ** 2).mean(0) * 2.0)
     else: # CUSUM from the deepest layer up: run = sum_{k >= l} (e_k - tlo), A = its maximum over l
         run = A = None
+        if pad is not None: # The virtual layer below the last never starts a void on its own
+            run = pad - tlo
         for k in reversed(targets):
             run = S[k].astype(np.float32) - tlo if run is None else run + (S[k].astype(np.float32) - tlo)
             A = run.copy() if A is None else np.maximum(A, run)
@@ -363,8 +376,9 @@ def find(X, searched, p, rule="first", progress=None):
             hit = [k for k in targets if prof[k] >= tlo]
             first = hit[-1] if hit else int(tg[prof[tg].argmax()])
         else: # CUSUM change point over the searched layers: the void stays on every deeper layer
-            tail = np.cumsum((prof[tg] - tlo)[::-1])[::-1]
-            first = int(tg[tail.argmax()])
+            e = prof[tg] if pad is None else np.append(prof[tg], pad[i, y, x])
+            tail = np.cumsum((e - tlo)[::-1])[::-1]
+            first = int(tg[min(int(tail.argmax()), len(tg) - 1)]) # Starts on the virtual layer: the last
         # Place and size on that layer (the void has another size on other layers)
         rad = max(2, int(round(1.5 * s)))
         y0, x0 = max(0, y - rad), max(0, x - rad)
