@@ -248,7 +248,35 @@ class VoidManager:
             p1 = to_paint(x0 + (bx + bw) * sx, y0 + (by + bh) * sy)
             painter.drawRect(QRectF(QPointF(*p0), QPointF(*p1)))
 
-    def paint_void(self, painter: QPainter, v, cx, cy, scale=1.0, style="normal", width=1.0, quadrant=None):
+    LAYER0_COLOR = (255, 0, 255) # Badge of voids already visible on layer 0 (see paint_layer0_badge)
+
+    def paint_layer0_badge(self, painter: QPainter, v, cx, cy, rx, ry, ghost=False, quadrant=None):
+        """
+        Small "0" badge at the top-right of a void flagged v["layer0"] (Layer change: already
+        visible on layer 0, bubble?). Fixed size on screen; translucent on ghosts.
+        """
+        sx, sy = quadrant or (1, -1)
+        if quadrant:
+            bx, by = cx + sx * rx * 0.85, cy + sy * ry * 0.85 # Outer corner of the drawn quadrant
+        else:
+            bx, by = cx + rx * 0.71, cy - ry * 0.71 # Top-right of the outline
+        size = 11.0
+        rect = QRectF(bx - size / 2, by - size / 2, size, size)
+        r, g, b = self.LAYER0_COLOR
+        a = 150 if ghost else 230
+        painter.save()
+        painter.setPen(QPen(QColor(255, 255, 255, a), 1.0))
+        painter.setBrush(QColor(r, g, b, a))
+        painter.drawRoundedRect(rect, 2.5, 2.5)
+        font = painter.font()
+        font.setPixelSize(9)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor(255, 255, 255, 140 if ghost else 255))
+        painter.drawText(rect, Qt.AlignCenter, "0")
+        painter.restore()
+
+    def paint_void(self, painter: QPainter, v, cx, cy, scale=1.0, style="normal", width=1.0, quadrant=None, badges=False):
         """
         Single drawing routine for voids (viewer and export).
         (cx, cy): center in the target's pixel space; scale: target pixels per image pixel.
@@ -256,6 +284,7 @@ class VoidManager:
                "active" (selected: red border, translucent type fill),
                "hover" (mouse over: translucent outline and fill).
         quadrant: see quadrant_of.
+        badges: review marks (viewer only): "0" on voids flagged as visible on layer 0.
         """
         t = self.type_of(v)
         r, g, b = t.get("color", (255, 255, 0))[:3] # Undeclared type: yellow
@@ -291,6 +320,8 @@ class VoidManager:
                 painter.drawRect(QRectF(QPointF(cx, cy), QPointF(cx + quadrant[0] * rx, cy + quadrant[1] * ry)).normalized())
             else:
                 painter.drawRect(QRectF(cx - rx, cy - ry, rx * 2, ry * 2))
+        if badges and v.get("layer0"):
+            self.paint_layer0_badge(painter, v, cx, cy, rx, ry, ghost=style == "ghost", quadrant=quadrant)
 
     # -----------------------------------------------
     # Type properties
@@ -552,6 +583,15 @@ class VoidManager:
         v["type"] = type_name
         if self.type_of(v).get("shape") == "curve" and "p" not in v:
             v["p"] = self.p_of(v)
+        return True
+
+    def toggle_layer0(self, v):
+        """Sets / clears the "already visible on layer 0" flag of a void (undoable). Returns the new state."""
+        self.checkpoint()
+        if v.get("layer0"):
+            v.pop("layer0", None)
+            return False
+        v["layer0"] = True
         return True
 
     def set_p(self, v, p):
@@ -897,6 +937,8 @@ class VoidManager:
                     "p": self.p_of(v) if self.shape_of(v) == "curve" else None,
                     "bbox_rel_x": gx - bbox[0] if bbox else None,
                     "bbox_rel_y": gy - bbox[1] if bbox else None,
+                    "layer0": bool(v.get("layer0")), # Layer change: already visible on layer 0 (bubble?)
+                    "auto_state": v.get("auto") or None, # "detected" / "estimated" until reviewed
                 })
                 rec = records[-1]
                 for key in ("center_x", "center_y", "radius_x", "radius_y", "bbox_rel_x", "bbox_rel_y"):
@@ -925,6 +967,8 @@ class VoidManager:
                             "scale": self.pixel_scale(grid_cfg)} if self.norm_pitch else None,
             "grid": {k: getattr(grid_cfg, k) for k in ("start_x", "start_y", "pitch_x", "pitch_y", "rows", "cols", "angle")},
             "types": self.types, # name -> {name, color, shape, ...}
+            "layer0_voids": sum(1 for vs in self.voids.values() for v in vs if v.get("layer0")),
+            "unreviewed_voids": sum(1 for vs in self.voids.values() for v in vs if v.get("auto") == "detected"),
         }
         meta.update(extra or {})
         return meta
@@ -1100,6 +1144,12 @@ class VoidManager:
             p = self._field(item, "p")
             if p is not None:
                 v_obj["p"] = float(p)
+            # Optional review fields (files without them: hand / reviewed markings)
+            if self._field(item, "layer0") in (True, 1, "1", "true", "True"):
+                v_obj["layer0"] = True
+            auto = self._field(item, "auto_state")
+            if isinstance(auto, str) and auto:
+                v_obj["auto"] = auto
 
             self.voids[layer].append(v_obj)
             count += 1

@@ -171,7 +171,13 @@ python tools/auto_run.py --once D:/SAT/raw/LOT1234_W07.tif
     pipeline.log              그 웨이퍼의 콘솔 출력
 ```
 
-자동 마킹은 점선(`auto: "detected"`, bbox는 `"estimated"`)으로 표시되므로 **Next Detected / Next Estimated**로 하나씩 확인하면 됩니다. 검토를 마친 표시(`review`)를 바꾸는 기능은 아직 없습니다.
+자동 마킹은 점선(`auto: "detected"`, bbox는 `"estimated"`)으로 표시되므로 **Next Detected / Next Estimated**로 하나씩 확인하면 됩니다. 이 상태는 voids.json의 `autoState`에 저장되어, 결과를 Load해도 점선(검토 전)으로 남습니다. 검토를 마친 표시(`review`)를 바꾸는 기능은 아직 없습니다.
+
+**레이어 0에서 이미 보이는 보이드(기포 의심)**: Layer change가 표시한 보이드(README "레이어 0에서 이미 보이는 보이드")는 voids.json에 `layer0: true`로 저장되고, 뷰어에서 자홍색 **"0" 배지**로 보입니다(**Next Layer-0**로 이동, B로 표시 해제). 개수:
+
+- `summary.json`의 `counts.layer0`: `{"voids": 전체 개수, "per_layer": {"레이어": 개수}, "per_type": {"타입": 개수}}` (bbox 제외). 보이드 단계(`steps`의 voids)에도 `"layer0": 개수`.
+- `meta.json`의 `layer0_voids`(표시된 보이드 수), `unreviewed_voids`(아직 검토 전인 검출 보이드 수). 뷰어의 Save JSON도 같은 값을 적습니다.
+- 검토 요청 본문(아래 `body`)에 한 줄: `레이어 0에서 보임(기포 의심) N개  (per layer: ...; per type: ...)` (N이 0이면 줄 없음).
 
 ## 7. 검토 요청 알림: `notify_review` (직접 바꿀 수 있는 곳)
 
@@ -184,7 +190,7 @@ def notify_review(title, body, recipients, ctx, settings) -> (ok, message)
 | 인자 | 내용 |
 |---|---|
 | `title` | 한 줄 제목. 정상: `[TIF Viewer] {제품} {wafer_id}: {n} voids, review`, 그 밖: `[TIF Viewer] {제품} {wafer_id} needs attention: {이유}` (또는 `error: ...`) |
-| `body` | 여러 줄 본문: Product, Lot, Wafer ID, File, Status(이유), 보이드 수(레이어별, 타입별), bbox 수 / 본딩 칸, QC 값, 결과 폴더 경로, 경고 |
+| `body` | 여러 줄 본문: Product, Lot, Wafer ID, File, Status(이유), 보이드 수(레이어별, 타입별), 레이어 0에서 보임(기포 의심) 개수(있을 때), bbox 수 / 본딩 칸, QC 값, 결과 폴더 경로, 경고 |
 | `recipients` | `config.json` `"results_api": {"notify": {"recipients": [...]}}` (없으면 `[]`) |
 | `ctx` | Results API의 ctx와 같은 키(`wafer_id`, `lot`, `product`, `source_file`, `grid`, `records`, `last_export_dir` = 결과 폴더 ...) + `summary`(summary.json 내용) + `review_queue`(review_queue.jsonl 경로) |
 | `settings` | `config.json`의 `"results_api"` 전체 (`settings["notify"]`가 위 설정) |

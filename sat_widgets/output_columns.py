@@ -19,6 +19,10 @@ bbox_rel_x / bbox_rel_y: void center relative to the top-left corner of the cell
 bbox (the "bbox" type marking on the topmost layer of that cell), in grid-aligned pixels.
 Empty when the cell has no bbox.
 *_um: the same values in um (pixels x Scale). Empty while the scale is not set.
+layer0: Detect Voids "Layer change" found the void already visible on layer 0 (bubble?), until
+the reviewer clears it (B). JSON true / false, CSV 1 / 0. Files without it read as false.
+auto_state: "detected" (detected void) / "estimated" (Detect BBOX) while not reviewed (edited)
+yet, else empty. Read back so the review can continue after loading.
 
 Pixel values (positions and sizes: PIXEL_KEYS) are written scaled as if the grid's x pitch were
 NORM_PITCH_X (value x 300 / pitch_x), so files of scans with another resolution compare
@@ -67,6 +71,8 @@ JSON_FIELDS = {
     "radius_y_um": "radiusYUm",
     "bbox_rel_x_um": "bboxRelXUm",
     "bbox_rel_y_um": "bboxRelYUm",
+    "layer0": "layer0",
+    "auto_state": "autoState",
 }
 
 # voids.csv
@@ -99,6 +105,8 @@ CSV_COLUMNS = {
     "radius_y_um": "RadiusY_um",
     "bbox_rel_x_um": "BBoxRelX_um",
     "bbox_rel_y_um": "BBoxRelY_um",
+    "layer0": "Layer0",
+    "auto_state": "AutoState",
 }
 
 

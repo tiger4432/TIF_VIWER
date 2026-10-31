@@ -480,6 +480,10 @@ class MainWindow(QMainWindow):
         btn_next_det = QPushButton("Next Detected")
         btn_next_det.setToolTip("Go to the next detected void that was not reviewed (edited) yet, layer by layer")
         btn_next_det.clicked.connect(self.next_detected_void)
+        btn_next_l0 = QPushButton("Next Layer-0")
+        btn_next_l0.setToolTip("Go to the next void flagged as already visible on layer 0 (badge \"0\", bubble?), layer by layer.\n"
+                               "B over a void sets / clears the flag (Layer change sets it, see README)")
+        btn_next_l0.clicked.connect(self.next_layer0_void)
         # Scorer: die-to-die (default) or the optional PatchCore (onnxruntime + models/*.onnx)
         self.cb_detect_method = QComboBox()
         self.cb_detect_method.addItem("Die-to-die", ("die_to_die", None))
@@ -498,6 +502,7 @@ class MainWindow(QMainWindow):
         h_detect.addWidget(self.cb_detect_method)
         h_detect.addWidget(self.sb_detect_thr)
         h_detect.addWidget(btn_next_det)
+        h_detect.addWidget(btn_next_l0)
         self.btn_eval = btn_eval = QPushButton("Evaluate")
         btn_eval.setToolTip("Run the detection without marking and compare it with the voids marked by hand on the loaded\n"
                             "layers: misses and false detections with their reasons, as a short code to type and send,\n"
@@ -574,6 +579,9 @@ class MainWindow(QMainWindow):
         # Q (handled in eventFilter, like the mode keys: works whatever widget has the focus)
         self.action_void_to_layer = QAction("Move Hovered Void To Current Layer", self)
         self.action_void_to_layer.triggered.connect(self.glw.move_hovered_void_to_current_layer)
+        # B (eventFilter too): set / clear the "visible on layer 0" flag of the hovered void
+        self.action_toggle_layer0 = QAction("Toggle Layer-0 Flag Of Hovered Void", self)
+        self.action_toggle_layer0.triggered.connect(self.toggle_layer0_flag)
 
 
         
@@ -1307,6 +1315,7 @@ class MainWindow(QMainWindow):
         # Application-wide, so the keys work whatever widget of this window has the focus.
         # W / E / R: the mode is active only while its key is held (last held key wins).
         # Digits: type number (gl_widget.type_number_key). Q: move the hovered void here.
+        # B: set / clear the layer-0 flag of the hovered void.
         et = ev.type()
         if et in (QEvent.KeyPress, QEvent.KeyRelease) and isinstance(obj, QWidget) and obj.window() is self:
             key = ev.key()
@@ -1327,6 +1336,10 @@ class MainWindow(QMainWindow):
             if et == QEvent.KeyPress and key == Qt.Key_Q and plain and not self._typing(obj):
                 if not ev.isAutoRepeat():
                     self.action_void_to_layer.trigger()
+                return True
+            if et == QEvent.KeyPress and key == Qt.Key_B and plain and not self._typing(obj):
+                if not ev.isAutoRepeat():
+                    self.action_toggle_layer0.trigger()
                 return True
         return super().eventFilter(obj, ev)
 
@@ -2203,6 +2216,9 @@ class MainWindow(QMainWindow):
         kinds = ", ".join(f"{t}: {n}" for t, n in result.get("types", {}).items())
         msg = (f"Detect Voids: {result['added']} new voids ({per}; {kinds}). "
                "Dashed until reviewed; 'Next Detected' walks through them.")
+        n0 = sum(1 for vs in self.void_manager.voids.values() for v in vs if v.get("layer0") and v.get("auto") == "detected")
+        if n0:
+            msg += f" {n0} already visible on layer 0 (badge \"0\", bubble?): 'Next Layer-0', B clears the flag."
         if not refs:
             msg += " No reference bboxes: chips were aligned on the grid cells."
         self.statusBar().showMessage(msg)
@@ -2210,14 +2226,27 @@ class MainWindow(QMainWindow):
 
     def next_detected_void(self):
         """Navigates through the detected voids not reviewed yet (layer, row, col order)."""
+        self._next_void(lambda v: v.get("auto") == "detected", "Detected void", "No detected voids left to review.")
+
+    def next_layer0_void(self):
+        """Navigates through the voids flagged as already visible on layer 0 (layer, row, col order)."""
+        self._next_void(lambda v: v.get("layer0"), "Layer-0 void", "No voids flagged as visible on layer 0.")
+
+    def toggle_layer0_flag(self):
+        state = self.glw.toggle_hovered_layer0()
+        if state is not None:
+            n = sum(1 for vs in self.void_manager.voids.values() for v in vs if v.get("layer0"))
+            self.statusBar().showMessage(f"Layer-0 flag {'set' if state else 'cleared'} ({n} flagged; Ctrl+Z undoes)")
+
+    def _next_void(self, pick, what, none_msg):
         items = []
         for layer, vs in self.void_manager.voids.items():
             for v in vs:
-                if v.get("auto") == "detected":
+                if pick(v):
                     r, c = self.glw.raw_to_cell(v["globalCX"], v["globalCY"])
                     items.append((layer, r, c))
         if not items:
-            self.statusBar().showMessage("No detected voids left to review.")
+            self.statusBar().showMessage(none_msg)
             return
         items = sorted(set(items))
         here = (self.glw.current_layer,) + tuple(self.glw.center_cell())
@@ -2227,7 +2256,7 @@ class MainWindow(QMainWindow):
         if z is not None and z != self.current_z:
             self.spin_layer.setValue(z)
         self.glw.fit_to_cell(c, r)
-        self.statusBar().showMessage(f"Detected void {items.index(nxt) + 1}/{len(items)}: layer {layer}, X{c:02d} Y{r:02d}")
+        self.statusBar().showMessage(f"{what} {items.index(nxt) + 1}/{len(items)}: layer {layer}, X{c:02d} Y{r:02d}")
 
     def update_void_ui(self):
         # Update label count (voids are keyed by absolute layer number)

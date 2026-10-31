@@ -1084,7 +1084,7 @@ class GLImageWidget(QOpenGLWidget):
                      style = "hover"
                  quadrant = self._free_quadrant if (v is self.active_void and self._free_quadrant) \
                      else vm.quadrant_of(v, dx, dy, refs, self.grid_cfg)
-                 vm.paint_void(painter, v, sx, sy, self.zoom, style=style, quadrant=quadrant)
+                 vm.paint_void(painter, v, sx, sy, self.zoom, style=style, quadrant=quadrant, badges=True)
 
              for layer_idx, v_list in vm.voids.items():
                  if layer_idx == self.current_layer:
@@ -1804,6 +1804,18 @@ class GLImageWidget(QOpenGLWidget):
              return
 
         super().keyPressEvent(e)
+
+    def toggle_hovered_layer0(self):
+        """B: sets / clears the "visible on layer 0" flag of the void under the mouse (any layer, undoable)."""
+        if not self.void_manager or not self.tiled_image or self.edit_locked:
+            return None
+        hv = self._live_hover()
+        if hv is None:
+            return None
+        state = self.void_manager.toggle_layer0(hv)
+        self.voids_changed.emit()
+        self.update()
+        return state
 
     def move_hovered_void_to_current_layer(self):
         """Q: moves the void of another layer under the mouse (ghost) to the current layer."""
