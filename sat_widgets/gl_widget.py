@@ -1242,6 +1242,8 @@ class GLImageWidget(QOpenGLWidget):
                             self.active_void = self.void_manager.add_void(self.current_layer, rx, ry, 1.0, 1.0, self.active_type)
                             self.active_void_action = 'sizing'
                             self._snap_hint = (gx, gy) # Snap types: corner nearest to the press point
+                        if self.active_void is not None and self.void_manager.is_bbox(self.active_void):
+                            self.active_void["hand"] = True # Placed by hand: Refine BBOX keeps it, aligns to it
 
                     self.voids_changed.emit()
                     self.update()
@@ -1256,6 +1258,8 @@ class GLImageWidget(QOpenGLWidget):
                         self.active_void = v
                         self.active_void_action = action # 'center' or 'edge'
                         v.pop("auto", None) # Reviewed by hand (no longer "estimated")
+                        if self.void_manager.is_bbox(v):
+                            v["hand"] = True # Refine BBOX keeps it and aligns the others to it
                         self._snap_hint = None # Snap types re-attach when the mouse is released
                         if action == 'center' and self.void_manager.is_bbox(v):
                             self._bbox_followers = self.void_manager.snapped_to(v, self.grid_cfg, self.coord_transform)
