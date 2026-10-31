@@ -26,6 +26,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import time
 
 import numpy as np
@@ -365,16 +366,36 @@ class Model:
         return score_trees(self.trees, X) if self.trees is not None else score(self.stumps, X)
 
 
-def model_path(params, method="die_to_die"):
-    """Model file of the method: config "classifier" (die-to-die) / "lc_classifier" (layer change)."""
+def _product_dir(name):
+    safe = re.sub(r"[^\w.-]+", "_", str(name)).strip("_") or "product"
+    return os.path.join(TRAIN_DIR, "products", safe)
+
+
+def model_path(params, method="die_to_die", product=None):
+    """
+    Model file of the method. Die-to-die: config "classifier", else DEFAULT_MODEL.
+    Layer change, per product (product = (name, its products.json entry) or None): the product's
+    "lc_classifier", else config "lc_classifier" ("{product}" = the product name, e.g. one shared
+    folder for all products), else TRAIN_DIR/products/<name>/lc_classifier.json; no product:
+    config "lc_classifier" or LC_MODEL.
+    """
     if method == "layer_change":
+        if product is not None:
+            name, decl = product
+            path = (decl or {}).get("lc_classifier") or params.get("lc_classifier")
+            if path:
+                return str(path).replace("{product}", str(name))
+            return os.path.join(_product_dir(name), "lc_classifier.json")
         return params.get("lc_classifier") or LC_MODEL
     path = params.get("classifier")
     return path if path else DEFAULT_MODEL
 
 
-def dataset_path(method="die_to_die"):
-    return LC_DATASET if method == "layer_change" else DATASET
+def dataset_path(method="die_to_die", product=None):
+    """Training set of the method (layer change: one per product, see model_path)."""
+    if method == "layer_change":
+        return os.path.join(_product_dir(product[0]), "lc_dataset.jsonl") if product is not None else LC_DATASET
+    return DATASET
 
 
 def add_to_dataset(source_key, rows, path=None):

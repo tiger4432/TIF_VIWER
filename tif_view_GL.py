@@ -748,6 +748,9 @@ class MainWindow(QMainWindow):
         if prod is None:
             return
         self.current_product = prod
+        self.current_product_name = name
+        if hasattr(self, "chk_learned"):
+            self._update_learned_state() # Layer change: one learned model per product
         
         # Grid: only declared keys
         grid = prod.get("grid", {})
@@ -1522,10 +1525,21 @@ class MainWindow(QMainWindow):
             cfg.get("threshold", void_detect.DEFAULTS["threshold"])
         self.sb_detect_thr.setValue(float(self._detect_thr.get(idx, default)))
         self._detect_last = idx
-        # Learned filter: the model of this method (die-to-die and layer change have their own)
         if hasattr(self, "chk_learned"):
-            self.chk_learned.setEnabled(method in ("die_to_die", "layer_change") and
-                                        os.path.exists(void_learn.model_path(cfg, method)))
+            self._update_learned_state()
+
+    def _product_key(self):
+        """(name, products.json entry) of the selected product, or None."""
+        name = getattr(self, "current_product_name", None)
+        return (name, getattr(self, "current_product", None) or {}) if name else None
+
+    def _update_learned_state(self):
+        """Learned filter: the model of this method (die-to-die and layer change have their own; layer
+        change one per product, sat_widgets/void_learn.model_path)."""
+        method = self.cb_detect_method.currentData()[0]
+        cfg = self._config().get("void_detect", {})
+        self.chk_learned.setEnabled(method in ("die_to_die", "layer_change") and
+                                    os.path.exists(void_learn.model_path(cfg, method, self._product_key())))
 
     # -----------------------------------------------
     # Results API (plugins/results_api.py)
@@ -1683,7 +1697,7 @@ class MainWindow(QMainWindow):
             self.sb_detect_thr.value()
         params["layer_rule"] = self.cb_layer_rule.currentData()
         if self.chk_learned.isChecked() and self.chk_learned.isEnabled() and params["method"] in ("die_to_die", "layer_change"):
-            path = void_learn.model_path(params, params["method"])
+            path = void_learn.model_path(params, params["method"], self._product_key())
             try:
                 params["learned_model"] = void_learn.Model.load(
                     path, void_layer_change.FEATURES if params["method"] == "layer_change" else None)
@@ -1823,9 +1837,10 @@ class MainWindow(QMainWindow):
         # Layer change: the filter decides the place only (the layer comes from the layer rule)
         rows, covered = void_learn.label_rows(collected, truths, any_layer=lc)
         key = self.lbl_source.toolTip() or self.le_wafer_id.text() or "unnamed"
-        dataset = void_learn.dataset_path(method)
+        product = self._product_key() if lc else None # Layer change: one model per product
+        dataset = void_learn.dataset_path(method, product)
         void_learn.add_to_dataset(key, rows, dataset)
-        path = void_learn.model_path(self._config().get("void_detect", {}), method)
+        path = void_learn.model_path(self._config().get("void_detect", {}), method, product)
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             # Layer change: cut for a false-detection budget per wafer (config lc_fp_per_wafer, default 1)
@@ -1850,7 +1865,7 @@ class MainWindow(QMainWindow):
                 f"precision {pct(data['cv_precision'])} %, {data.get('cv_false_per_file', 0):.1f} false per file "
                 f"(cut: {data.get('cut_rule', 'best F1')})\n"
                 f"Most used features: {', '.join(data['top_features'])}\n"
-                f"Model: {path}\nTraining set: {dataset}")
+                + (f"Product: {product[0]}\n" if product else "") + f"Model: {path}\nTraining set: {dataset}")
         print("Train:\n" + full)
         EvalDialog(self, full, os.path.dirname(path), None, len(truths), short).exec()
 
