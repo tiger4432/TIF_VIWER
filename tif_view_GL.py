@@ -31,7 +31,7 @@ from sat_widgets.exporter import ExportManager
 from sat_widgets.patch_viewer import PatchViewer
 from sat_widgets.roi_inspector import ROIInspector
 from sat_widgets.angle_preview import AnglePreview
-from sat_widgets.auto_bbox import place_bboxes
+from sat_widgets.auto_bbox import place_bboxes, refine_bboxes, detect_layout, fit_grid
 from sat_widgets import void_detect
 from sat_widgets import void_layer_change
 from sat_widgets import void_eval
@@ -241,6 +241,7 @@ class MainWindow(QMainWindow):
         form.addRow("Cols:", self.sb_cols)
         
         self.sb_angle = QDoubleSpinBox(); self.sb_angle.setRange(-180, 180); self.sb_angle.setValue(0.0)
+        self.sb_angle.setDecimals(3) # Fit Grid gives the angle to 0.001 deg
         self.sb_angle.setSingleStep(0.1)
         form.addRow("Angle:", self.sb_angle)
 
@@ -606,14 +607,26 @@ class MainWindow(QMainWindow):
         # Reference bboxes (topmost layer) and review of the estimated ones
         h_auto = QHBoxLayout()
         btn_auto_bbox = QPushButton("Detect BBOX")
-        btn_auto_bbox.setToolTip("Detect the package edges of every (bonded) cell on the topmost layer and draw the bbox (declared size, detected center)")
+        btn_auto_bbox.setToolTip("Place the bbox of every (bonded) cell (declared size): aligned on the chip layout of the\n"
+                                 "loaded layers, no package edge needed (config auto_bbox.method \"edge\": the package edges)")
         btn_auto_bbox.clicked.connect(self.auto_bbox)
+        btn_refine_bbox = QPushButton("Refine BBOX")
+        btn_refine_bbox.setToolTip("Align the bboxes on the layout again. Bboxes placed or moved by hand stay\n"
+                                   "and set the absolute place for the others")
+        btn_refine_bbox.clicked.connect(self.refine_bbox)
+        btn_fit_grid = QPushButton("Fit Grid")
+        btn_fit_grid.setToolTip("Fit the grid origin, pitch and angle to the bbox centers (asks before applying)")
+        btn_fit_grid.clicked.connect(self.fit_grid_to_bboxes)
         btn_next_est = QPushButton("Next Estimated")
         btn_next_est.setToolTip("Go to the next bbox that was estimated because detection failed (drawn dashed)")
         btn_next_est.clicked.connect(self.next_estimated_bbox)
         h_auto.addWidget(btn_auto_bbox)
-        h_auto.addWidget(btn_next_est)
+        h_auto.addWidget(btn_refine_bbox)
         form_calib.addRow(h_auto)
+        h_auto2 = QHBoxLayout()
+        h_auto2.addWidget(btn_fit_grid)
+        h_auto2.addWidget(btn_next_est)
+        form_calib.addRow(h_auto2)
 
         # Panel order: ... Bonding Map, Auto Calibration, Coordinates, Void Marking, Extraction
         dock_layout.insertWidget(dock_layout.indexOf(gb_map) + 1, gb_calib)
@@ -1441,27 +1454,145 @@ class MainWindow(QMainWindow):
 
         top_layer = self.abs_layer(0)
         vm = self.void_manager
+        params = dict(self._config().get("auto_bbox") or {})
+        layout = params.get("method", "layout") == "layout"
+        zs = list(range(len(self.full_data)))
+        if layout:
+            progress.setMaximum(max(1, len(cells) * min(len(zs), int(params.get("refine_layers", 4)))))
         vm.begin_change() # One undo step with the corner voids following the new bboxes
         try:
-            result = place_bboxes(self.full_data, 0, top_layer, cfg, self.glw.coord_transform, vm,
-                                  tid, size, cells, self._config().get("auto_bbox"), step)
+            if layout: # From the cell centres, aligned on the layout (blurred / noisy package edges)
+                result = detect_layout(self.full_data, zs, top_layer, cfg, self.glw.coord_transform, vm, tid, size,
+                                       cells, params, step)
+            else:
+                result = place_bboxes(self.full_data, 0, top_layer, cfg, self.glw.coord_transform, vm,
+                                      tid, size, cells, params, step)
+                if result is not None and params.get("layout_refine", True) and result["detected"] >= 3:
+                    progress.setValue(0)
+                    progress.setMaximum(max(1, len(cells) * min(len(zs), int(params.get("refine_layers", 4)))))
+                    ref = refine_bboxes(self.full_data, zs, top_layer, cfg, self.glw.coord_transform, vm, tid, size,
+                                        cells, params, step)
+                    if ref is not None:
+                        result["layout"] = ref
             if result is not None:
                 vm.resnap(cfg, self.glw.coord_transform)
         finally:
             vm.end_change()
             progress.close()
         if result is None:
+            if layout:
+                QMessageBox.warning(self, "Detect BBOX", "Not enough chips to align (at least 3 bonded cells).")
             return
         self.glw.update()
         self.update_void_ui()
+        if layout:
+            self._report_layout_bbox("Detect BBOX", result, len(cells))
+            return
         msg = (f"Detect BBOX on layer {top_layer}: {result['detected']} detected, "
                f"{len(result['estimated'])} estimated (dashed, check with 'Next Estimated'), "
                f"{len(result['failed'])} failed")
+        if "layout" in result:
+            msg += f"; aligned on the layout: moved {result['layout']['moved_px']:.1f} px (median)"
         self.statusBar().showMessage(msg)
         print(msg)
         if result["failed"] and not result["detected"]:
             QMessageBox.warning(self, "Detect BBOX", "No box edge could be detected. Check the grid origin/pitch "
                                 "and the bbox size, or adjust auto_bbox in config.json.")
+
+    def _report_layout_bbox(self, title, result, n_cells):
+        est = len(result["estimated"])
+        msg = (f"{title}: {result['refined']} aligned on the layout, {est} estimated (dashed, 'Next Estimated'), "
+               f"{result['hand']} kept (by hand); place from {result['absolute']}; match {result['ncc']:.2f}; "
+               f"moved {result['moved_px']:.1f} px (median)")
+        self.statusBar().showMessage(msg)
+        print(msg)
+        if n_cells and est > 0.3 * n_cells:
+            QMessageBox.warning(self, title, f"{est} of {n_cells} bonded cells do not match the chip layout.\n"
+                                "Check the grid origin (a shift by a cell puts the bonding map on other chips), "
+                                "the pitch and the bbox size.")
+
+    def _bbox_setup(self, title):
+        if self.full_data is None or self.glw.tiled_image is None:
+            return None
+        tid = self._bbox_type_name()
+        if tid is None:
+            QMessageBox.warning(self, title, "No void type named 'bbox' is declared in config.json.")
+            return None
+        t = self.void_manager.types[tid]
+        size = (t["def_w"], t["def_h"]) if t.get("def_w", 0) > 0 and t.get("def_h", 0) > 0 else None
+        cfg = self.glw.grid_cfg
+        bmap = self.glw.bonding_map
+        cells = [(r, c) for r in range(cfg.rows) for c in range(cfg.cols) if bmap is None or bmap.get_key(r, c)]
+        return tid, size, cells
+
+    def refine_bbox(self):
+        """Aligns the bboxes on the layout again; hand-placed ones stay and set the place (auto_bbox.py)."""
+        setup = self._bbox_setup("Refine BBOX")
+        if setup is None:
+            return
+        tid, size, cells = setup
+        cfg, vm = self.glw.grid_cfg, self.void_manager
+        params = dict(self._config().get("auto_bbox") or {})
+        zs = list(range(len(self.full_data)))
+        progress = QProgressDialog("Aligning bboxes on the layout...", "Cancel", 0,
+                                   max(1, len(cells) * min(len(zs), int(params.get("refine_layers", 4)))), self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+
+        def step(i):
+            if i % 10 == 0:
+                progress.setValue(i)
+                QApplication.processEvents()
+            return not progress.wasCanceled()
+
+        vm.begin_change()
+        try:
+            result = refine_bboxes(self.full_data, zs, self.abs_layer(0), cfg, self.glw.coord_transform, vm, tid, size,
+                                   cells, params, step)
+            if result is not None:
+                vm.resnap(cfg, self.glw.coord_transform)
+        finally:
+            vm.end_change()
+            progress.close()
+        if result is None:
+            if not progress.wasCanceled():
+                QMessageBox.warning(self, "Refine BBOX", "Draw or detect the bboxes first (at least 3).")
+            return
+        self.glw.update()
+        self.update_void_ui()
+        self._report_layout_bbox("Refine BBOX", result, len(cells))
+
+    def fit_grid_to_bboxes(self):
+        """Grid origin / pitch / angle fitted to the bbox centers (auto_bbox.fit_grid), applied when confirmed.
+        The bboxes keep their place in the cells (their median offset from the cell centres)."""
+        if self.full_data is None:
+            return
+        cfg, ct, vm = self.glw.grid_cfg, self.glw.coord_transform, self.void_manager
+        f = fit_grid(vm, cfg, ct, self.full_data.width, self.full_data.height)
+        if f is None:
+            QMessageBox.warning(self, "Fit Grid", "At least 4 bboxes over 2 rows and 2 columns are needed (Detect BBOX first).")
+            return
+        to_deskew = ct.raw_to_deskew if ct else (lambda x, y: (x, y))
+        offs = []
+        for vs in vm.voids.values():
+            for v in vs:
+                if vm.is_bbox(v) and v.get("auto") != "estimated":
+                    gx, gy = to_deskew(v["globalCX"], v["globalCY"])
+                    k = cfg.cell_at(gx, gy)
+                    if k is not None:
+                        offs.append((gx - cfg.start_x - (k[1] + 0.5) * cfg.pitch_x, gy - cfg.start_y - (k[0] + 0.5) * cfg.pitch_y))
+        off = np.median(offs, axis=0) if offs else (0.0, 0.0)
+        new = {"Origin X": f["start_x"] - off[0], "Origin Y": f["start_y"] - off[1], "Pitch X": f["pitch_x"],
+               "Pitch Y": f["pitch_y"], "Angle": f["angle"]}
+        old = {"Origin X": cfg.start_x, "Origin Y": cfg.start_y, "Pitch X": cfg.pitch_x, "Pitch Y": cfg.pitch_y, "Angle": cfg.angle}
+        rows = "\n".join(f"{k}: {old[k]:.3f} -> {new[k]:.3f}" for k in new)
+        if QMessageBox.question(self, "Fit Grid", f"Grid fitted to {f['n']} bboxes (residual {f['rms']:.2f} px):\n\n{rows}\n\n"
+                                "Apply? (products.json is not changed)", QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+        for sb, k in ((self.sb_grid_x, "Origin X"), (self.sb_grid_y, "Origin Y"), (self.sb_pitch_x, "Pitch X"),
+                      (self.sb_pitch_y, "Pitch Y"), (self.sb_angle, "Angle")):
+            sb.setValue(new[k])
+        self.statusBar().showMessage(f"Fit Grid applied ({f['n']} bboxes, residual {f['rms']:.2f} px)")
 
     def next_estimated_bbox(self):
         """Navigates through the bboxes estimated by Detect BBOX (row-major order)."""

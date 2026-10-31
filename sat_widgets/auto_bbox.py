@@ -29,11 +29,17 @@ Parameters (config.json "auto_bbox", defaults in DEFAULTS):
     size_tolerance   accepted |detected - declared| / declared
     min_edge_ratio   edge gradient / median |gradient| of the profile
     outlier_tol      accepted deviation from the median offset (lattice), in pitches
-    layout_refine    Detect BBOX also aligns the bboxes on the layout (refine_bboxes)
+    method           Detect BBOX: "layout" (default; detect_layout: from the cell centres, aligned on
+                     the layout, no edge needed) or "edge" (package edges, then layout_refine)
+    layout_refine    "edge": also align the bboxes on the layout afterwards (refine_bboxes)
+    coarse_margin    "layout": search range of the first, coarse pass, in bbox sizes
     refine_margin    search range around the bbox, in bbox sizes
     refine_px        longest side of the working chip image
     refine_layers    loaded layers used (spread over the loaded range)
     refine_min_ncc   a match below this correlation is estimated from the lattice
+    refine_inner     the outer band of the chip (this fraction of its size) is left out of the match:
+                     noisy package edges (one side sticking out, the chip looking larger) do not
+                     pull it; the golden chip's box still sets the absolute place
 """
 import math
 
@@ -45,11 +51,14 @@ DEFAULTS = {
     "size_tolerance": 0.3,
     "min_edge_ratio": 4.0,
     "outlier_tol": 0.05,
+    "method": "layout",
     "layout_refine": True,
+    "coarse_margin": 0.25,
     "refine_margin": 0.08,
     "refine_px": 320,
     "refine_layers": 4,
     "refine_min_ncc": 0.3,
+    "refine_inner": 0.1,
 }
 
 
@@ -314,6 +323,7 @@ def refine_bboxes(stack, zs, layer_number, grid_cfg, coord_transform, void_manag
     order = sorted(centers)
     n = len(order)
     G = np.zeros((n, Hw, Ww), np.float32)
+    I = np.zeros((n, Hw, Ww), np.float32) # Intensity (each layer robust-normalised): the golden chip's package box
     ok = np.zeros(n, bool)
     step = 0
     for z in use:
@@ -329,17 +339,22 @@ def refine_bboxes(stack, zs, layer_number, grid_cfg, coord_transform, void_manag
                 continue
             g = _gradmag(a)
             G[i] += g / (float(np.abs(g).mean()) + 1e-9)
+            med_a = float(np.median(a))
+            I[i] += (a - med_a) / (float(np.median(np.abs(a - med_a))) + 1e-6)
             ok[i] = True
         stack.release_cache()
 
-    # Align on the golden chip, rebuilt from the aligned chips
+    # Align on the golden chip, rebuilt from the aligned chips; only its inner part (refine_inner)
+    bi, bj = int(round(p["refine_inner"] * hb)), int(round(p["refine_inner"] * wb))
+    inner = np.zeros((hb, wb), bool)
+    inner[bi:hb - bi, bj:wb - bj] = True
     s = np.zeros((n, 2))
     ncc = np.zeros(n)
     F = np.fft.rfft2(G)
     for _ in range(3):
         crops = np.stack([_translate(G[i], mw + s[i, 0], mw + s[i, 1])[:hb, :wb] for i in range(n)])
         T = np.median(crops[ok], axis=0)
-        T = T - T.mean()
+        T = np.where(inner, T - T[inner].mean(), 0.0)
         T /= float(np.sqrt((T ** 2).sum())) + 1e-9
         Tp = np.zeros((Hw, Ww), np.float32)
         Tp[:hb, :wb] = T
@@ -352,15 +367,25 @@ def refine_bboxes(stack, zs, layer_number, grid_cfg, coord_transform, void_manag
             s[i] = (sx - mw, sy - mw)
     crops = np.stack([_translate(G[i], mw + s[i, 0], mw + s[i, 1])[:hb, :wb] for i in range(n)])
     for i in range(n):
-        c = crops[i] - crops[i].mean()
+        c = np.where(inner, crops[i] - crops[i][inner].mean(), 0.0)
         ncc[i] = float((T * c).sum()) / (float(np.sqrt((c ** 2).sum())) + 1e-9) if ok[i] else 0.0
     # Poor matches and chips off the lattice: estimated from the lattice of the others
     med, mad = float(np.median(ncc[ok])), float(np.median(np.abs(ncc[ok] - np.median(ncc[ok])))) * 1.4826
     good = ok & (ncc >= p["refine_min_ncc"]) & (ncc >= med - 4 * mad)
+    absolute = None
     if good.any():
-        # The golden chip's frame drifts while it is rebuilt: the chips keep their mean place (the
-        # alignment fixes them relative to each other; hand-placed bboxes, below, set the absolute place)
+        # The alignment fixes the chips relative to each other; the absolute place: hand-placed
+        # bboxes (below), else the package box of the golden chip (the noise of single chips' edges
+        # averages out), else the chips keep their mean place
         s -= s[good].mean(axis=0)
+        gold = np.median(np.stack([_translate(I[i], s[i, 0], s[i, 1]) for i in np.nonzero(good)[0]]), axis=0)
+        box = detect_box(gold, p, (wb, hb))
+        if box is not None and box[4] >= p["min_edge_ratio"]:
+            absolute = (box[0] - Ww / 2.0, box[1] - Hw / 2.0) # Package centre vs the bbox centre (working px)
+            if max(abs(absolute[0]), abs(absolute[1])) <= mw:
+                s += np.array(absolute)
+            else:
+                absolute = None
     new = {k: (centers[k][0] + s[i, 0] * factor, centers[k][1] + s[i, 1] * factor) for i, k in enumerate(order)}
     gi = np.nonzero(good)[0]
     pitch = max(grid_cfg.pitch_x, grid_cfg.pitch_y)
@@ -397,7 +422,9 @@ def refine_bboxes(stack, zs, layer_number, grid_cfg, coord_transform, void_manag
         vm.end_change()
     moved = np.hypot(s[good, 0], s[good, 1]) * factor
     return {"refined": int(good.sum()), "estimated": est, "hand": len(hand),
-            "moved_px": float(np.median(moved)) if len(moved) else 0.0, "ncc": med}
+            "moved_px": float(np.median(moved)) if len(moved) else 0.0, "ncc": med,
+            "absolute": "hand" if anchor else ("golden chip box" if absolute is not None else "mean place"),
+            "ncc_by_cell": {k: float(ncc[i]) for i, k in enumerate(order)}}
 
 
 def fit_grid(void_manager, grid_cfg, coord_transform, img_w, img_h):
@@ -433,3 +460,54 @@ def fit_grid(void_manager, grid_cfg, coord_transform, img_w, img_h):
     res = np.hypot(ds[:, 0] - sx - (cr[:, 1] + 0.5) * pitch_x, ds[:, 1] - sy - (cr[:, 0] + 0.5) * pitch_y)
     return {"start_x": sx, "start_y": sy, "pitch_x": pitch_x, "pitch_y": pitch_y, "angle": angle,
             "rms": float(np.sqrt((res ** 2).mean())), "n": int(keep.sum())}
+
+
+def detect_layout(stack, zs, layer_number, grid_cfg, coord_transform, void_manager, bbox_type, size, cells,
+                  params=None, progress=None):
+    """
+    Detect BBOX without package edges (blurred / noisy edges): every bbox of `cells` placed at its
+    cell (the existing bboxes' median offset in the cell, else centred), then aligned on the layout
+    twice: coarse (coarse_margin, low resolution: the declared origin / angle may be a little off;
+    chips beyond reach are taken from the lattice of the others, which follows the angle) and fine.
+    Every existing bbox is replaced (hand ones too). One undo step. Returns refine_bboxes' result.
+    """
+    p = dict(DEFAULTS)
+    p.update(params or {})
+    to_raw = coord_transform.deskew_to_raw if coord_transform else (lambda x, y: (x, y))
+    to_deskew = coord_transform.raw_to_deskew if coord_transform else (lambda x, y: (x, y))
+    vm = void_manager
+    cell_c = lambda r, c: (grid_cfg.start_x + (c + 0.5) * grid_cfg.pitch_x, grid_cfg.start_y + (r + 0.5) * grid_cfg.pitch_y)
+    offs, sizes = [], []
+    for vs in vm.voids.values():
+        for v in vs:
+            if vm.is_bbox(v):
+                gx, gy = to_deskew(v["globalCX"], v["globalCY"])
+                k = grid_cfg.cell_at(gx, gy)
+                if k is not None:
+                    offs.append((gx - cell_c(*k)[0], gy - cell_c(*k)[1]))
+                    sizes.append((2 * v["radiusX"], 2 * v["radiusY"]))
+    off = np.median(offs, axis=0) if offs else (0.0, 0.0)
+    if size is None:
+        size = tuple(np.median(sizes, axis=0)) if sizes else (0.8 * grid_cfg.pitch_x, 0.8 * grid_cfg.pitch_y)
+    n = max(1, len(cells))
+    vm.begin_change()
+    try:
+        for layer, vs in list(vm.voids.items()):
+            for v in [v for v in vs if vm.is_bbox(v)]:
+                vm.remove_void(layer, v)
+        for k in cells:
+            cx, cy = cell_c(*k)
+            v = vm.add_void(layer_number, *to_raw(cx + off[0], cy + off[1]), size[0] / 2.0, size[1] / 2.0, bbox_type)
+            v["placed"] = "layout"
+        # Coarse: the whole chip (its package edges fix which period of a repeating layout it is);
+        # fine: the inner part only, within less than half a period (noisy edges do not pull)
+        coarse = dict(p, refine_margin=p["coarse_margin"], refine_px=max(96, p["refine_px"] * 2 // 3), refine_inner=0.0)
+        layers = min(len(list(zs)), int(p["refine_layers"]))
+        res = refine_bboxes(stack, zs, layer_number, grid_cfg, coord_transform, vm, bbox_type, size, cells, coarse,
+                            (lambda i: progress(i // 2)) if progress else None)
+        if res is not None:
+            res = refine_bboxes(stack, zs, layer_number, grid_cfg, coord_transform, vm, bbox_type, size, cells, p,
+                                (lambda i: progress((n * layers + i) // 2)) if progress else None)
+    finally:
+        vm.end_change()
+    return res
