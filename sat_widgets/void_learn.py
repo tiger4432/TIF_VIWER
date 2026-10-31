@@ -11,7 +11,8 @@ threshold on the deviation cannot separate them. Instead:
    line (layout edges leaking into the difference), whether the difference follows the golden
    chip's edges, the contrast of the region against its ring in the chip and in the difference,
    the chip-to-chip spread there, distance to the chip border.
-3. A boosted set of decision stumps (AdaBoost, numpy only) scores each candidate; candidates above
+3. A boosted set of decision stumps (AdaBoost, numpy only) scores each candidate (Layer change:
+   gradient-boosted trees, train_trees, which also combine features); candidates above
    the model's cut are voids.
 
 Training ("Train" in Void Marking): the candidates of the open file are labelled from the hand
@@ -200,6 +201,99 @@ def score(stumps, X):
     return s
 
 
+def train_trees(X, y, rounds=400, depth=4, rate=0.03, bins=64, min_leaf=10, l2=1.0, rows=0.8, cols=0.8, seed=0):
+    """
+    Gradient-boosted decision trees (logistic loss, numpy only), like LightGBM: histogram splits on
+    feature quantiles, trees grown level by level to depth, each round on a sample of the rows and
+    of the features. Unlike the stumps they combine features (e.g. near the chip edge AND on one
+    layer only). Returns {"base", "trees": [[[feature, threshold, left, right, value], ...]]}; a
+    row goes left when x <= threshold; value is the leaf's logit step (feature -1 = leaf).
+    """
+    X = np.asarray(X, np.float64)
+    y = np.asarray(y, np.float64)
+    n, d = X.shape
+    rng = np.random.default_rng(seed)
+    edges, idx = [], np.empty((d, n), np.int32)
+    for j in range(d):
+        e = np.unique(np.quantile(X[:, j], np.linspace(0.01, 0.99, bins)))
+        edges.append(e)
+        idx[j] = np.searchsorted(e, X[:, j], side="left") # Bin k: e[k-1] < x <= e[k]
+    p0 = min(max(y.mean(), 1e-6), 1 - 1e-6)
+    base = math.log(p0 / (1 - p0))
+    F = np.full(n, base)
+    trees = []
+    for _ in range(rounds):
+        prob = 1.0 / (1.0 + np.exp(-F))
+        g, h = prob - y, np.maximum(prob * (1 - prob), 1e-6)
+        use = np.nonzero(rng.random(n) < rows)[0]
+        feats = rng.choice(d, max(1, int(round(cols * d))), replace=False)
+        nodes = [[-1, 0.0, -1, -1, 0.0]]
+        level = [(0, use)]
+        for _lv in range(depth + 1):
+            nxt = []
+            for node, r in level:
+                G, H = g[r].sum(), h[r].sum()
+                nodes[node][4] = float(-G / (H + l2) * rate)
+                if _lv == depth or len(r) < 2 * min_leaf:
+                    continue
+                best = None
+                for j in feats:
+                    nb = len(edges[j]) + 1
+                    b = idx[j, r]
+                    gl = np.cumsum(np.bincount(b, g[r], nb))[:-1]
+                    hl = np.cumsum(np.bincount(b, h[r], nb))[:-1]
+                    cl = np.cumsum(np.bincount(b, None, nb))[:-1]
+                    ok = (cl >= min_leaf) & (len(r) - cl >= min_leaf)
+                    if not ok.any():
+                        continue
+                    gain = gl ** 2 / (hl + l2) + (G - gl) ** 2 / (H - hl + l2) - G ** 2 / (H + l2)
+                    gain[~ok] = -np.inf
+                    k = int(np.argmax(gain))
+                    if gain[k] > 1e-9 and (best is None or gain[k] > best[0]):
+                        best = (float(gain[k]), int(j), k)
+                if best is None:
+                    continue
+                _, j, k = best
+                left = r[idx[j, r] <= k]
+                right = r[idx[j, r] > k]
+                nodes[node][0], nodes[node][1] = j, float(edges[j][k])
+                nodes[node][2], nodes[node][3] = len(nodes), len(nodes) + 1
+                nodes += [[-1, 0.0, -1, -1, 0.0], [-1, 0.0, -1, -1, 0.0]]
+                nxt += [(nodes[node][2], left), (nodes[node][3], right)]
+            level = nxt
+            if not level:
+                break
+        trees.append(nodes)
+        F += _tree_values(nodes, X)
+    return {"base": base, "trees": trees}
+
+
+def _tree_values(nodes, X):
+    at = np.zeros(len(X), np.int32)
+    feat = np.array([nd[0] for nd in nodes])
+    thr = np.array([nd[1] for nd in nodes])
+    kids = np.array([[nd[2], nd[3]] for nd in nodes])
+    val = np.array([nd[4] for nd in nodes])
+    for _ in range(len(nodes)):
+        f = feat[at]
+        inner = f >= 0
+        if not inner.any():
+            break
+        rows = np.nonzero(inner)[0]
+        go_right = X[rows, f[inner]] > thr[at[inner]]
+        at[rows] = kids[at[inner], go_right.astype(int)]
+    return val[at]
+
+
+def score_trees(model, X):
+    """Logit of each row (cut in the same units)."""
+    X = np.atleast_2d(np.asarray(X, np.float64))
+    s = np.full(len(X), float(model["base"]))
+    for nodes in model["trees"]:
+        s += _tree_values(nodes, X)
+    return s
+
+
 def _best_cut(s, y):
     """Cut on the score with the best F1."""
     best = (0.0, 0.0)
@@ -214,8 +308,8 @@ def _best_cut(s, y):
     return best[1]
 
 
-def cross_validate(X, y, groups, folds=5, rounds=200):
-    """Out-of-fold scores (folds by group, e.g. chip) -> (cut, recall, precision)."""
+def cross_validate(X, y, groups, folds=5, rounds=200, trees=False):
+    """Out-of-fold scores (folds by group, e.g. chip) -> (cut, recall, precision). trees: train_trees."""
     X, y = np.asarray(X), np.asarray(y)
     fold = np.array([int(hashlib.md5(str(g).encode()).hexdigest(), 16) % folds for g in groups])
     oof = np.zeros(len(y))
@@ -223,7 +317,8 @@ def cross_validate(X, y, groups, folds=5, rounds=200):
         tr, te = fold != k, fold == k
         if te.sum() == 0 or (y[tr] > 0).sum() == 0:
             continue
-        oof[te] = score(train_stumps(X[tr], y[tr], rounds), X[te])
+        oof[te] = score_trees(train_trees(X[tr], y[tr], rounds), X[te]) if trees else \
+            score(train_stumps(X[tr], y[tr], rounds), X[te])
     cut = _best_cut(oof, y)
     pred = oof >= cut
     tp = float((pred & (y > 0)).sum())
@@ -234,7 +329,8 @@ def cross_validate(X, y, groups, folds=5, rounds=200):
 class Model:
     def __init__(self, data):
         self.data = data
-        self.stumps = [tuple(s) for s in data["stumps"]]
+        self.stumps = [tuple(s) for s in data.get("stumps", [])]
+        self.trees = data.get("trees") # Gradient-boosted trees (train_trees) instead of stumps
         self.cut = float(data["cut"])
         self.cand_threshold = float(data.get("cand_threshold", 1.0))
 
@@ -247,7 +343,7 @@ class Model:
         return Model(data)
 
     def scores(self, X):
-        return score(self.stumps, X)
+        return score_trees(self.trees, X) if self.trees is not None else score(self.stumps, X)
 
 
 def model_path(params, method="die_to_die"):
@@ -298,8 +394,9 @@ def load_dataset(path=None, features=None):
 MAX_NEGATIVES = 200000 # Training rows that are not voids (random subset beyond this)
 
 
-def train_model(cand_threshold, path, rounds=200, dataset=None, features=None):
-    """Trains on the whole dataset, saves the model. Returns its summary dict."""
+def train_model(cand_threshold, path, rounds=200, dataset=None, features=None, trees=False):
+    """Trains on the whole dataset (trees: gradient-boosted trees, else stumps), saves the model.
+    Returns its summary dict."""
     features = features or FEATURES
     X, y, groups, sources = load_dataset(dataset, features)
     neg = np.nonzero(y == 0)[0]
@@ -309,12 +406,19 @@ def train_model(cand_threshold, path, rounds=200, dataset=None, features=None):
         X, y, groups = X[keep], y[keep], [groups[i] for i in keep]
     if (y > 0).sum() < 3 or (y == 0).sum() < 3:
         raise ValueError("not enough training data (at least 3 voids and 3 non-voids)")
-    cut, rec, prec = cross_validate(X, y, groups, rounds=rounds)
-    stumps = train_stumps(X, y, rounds)
+    cut, rec, prec = cross_validate(X, y, groups, rounds=rounds, trees=trees)
     used = {}
-    for j, _, _, a in stumps:
-        used[features[j]] = used.get(features[j], 0.0) + a
-    data = {"version": 1, "features": features, "stumps": stumps, "cut": cut, "cand_threshold": cand_threshold,
+    if trees:
+        model = {"trees": train_trees(X, y, rounds)}
+        for nodes in model["trees"]["trees"]: # Splits per feature as its weight
+            for nd in nodes:
+                if nd[0] >= 0:
+                    used[features[nd[0]]] = used.get(features[nd[0]], 0.0) + 1.0
+    else:
+        model = {"stumps": train_stumps(X, y, rounds)}
+        for j, _, _, a in model["stumps"]:
+            used[features[j]] = used.get(features[j], 0.0) + a
+    data = {"version": 1, "features": features, **model, "cut": cut, "cand_threshold": cand_threshold,
             "trained_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "files": len(sources),
             "voids": int((y > 0).sum()), "others": int((y == 0).sum()),
             "cv_recall": rec, "cv_precision": prec,

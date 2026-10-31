@@ -1828,8 +1828,8 @@ class MainWindow(QMainWindow):
         path = void_learn.model_path(self._config().get("void_detect", {}), method)
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            data = void_learn.train_model(cand_thr, path, rounds=300 if lc else 200, dataset=dataset,
-                                          features=void_layer_change.FEATURES if lc else None)
+            data = void_learn.train_model(cand_thr, path, rounds=400 if lc else 200, dataset=dataset,
+                                          features=void_layer_change.FEATURES if lc else None, trees=lc)
         except ValueError as e:
             QMessageBox.warning(self, "Train", f"Added {len(rows)} candidates of this file. Not trained yet: {e}.")
             return
