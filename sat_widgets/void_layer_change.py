@@ -296,7 +296,13 @@ def _robust_fit(y, X, iters=4, clip=3.0, sub=2):
 
 
 class _Context:
-    """Per wafer: goldens, region masks, the chip-independent columns per target layer."""
+    """
+    Per wafer: goldens, region masks and the columns of the layer fit, kept as blocks: bias, region
+    masks, one block per golden layer (chip-independent) and one per source layer of a chip. A target
+    layer's normal matrix X'X is assembled from block products: the chip-independent ones are formed
+    once per wafer, the ones with a source layer once per chip (neighbouring targets share most of
+    their sources and goldens), instead of a full X'X per target.
+    """
 
     def __init__(self, X, targets, p):
         nl, n, h, w = X.shape
@@ -305,32 +311,99 @@ class _Context:
         self.gold = gold
         self.tents = _tents(h, w)
         regions = _regions(gold, int(p["lc_regions"])) if int(p["lc_regions"]) > 1 else []
-        gfeats = [[g - g.mean(), _gauss(g, 1.5) - g] for g in gold]
         self.regions = regions[1:]
-        self.base, self.sources = {}, {}
+        self.sub = int(p.get("lc_fit_sub", 2)) # Least squares on every sub-th pixel (see _block_fit)
+        gfeats = [[g - g.mean(), _gauss(g, 1.5) - g] for g in gold]
+        fixed = {("bias",): _bias(h, w)}
+        if self.regions:
+            fixed[("regions",)] = list(self.regions)
+        for j in range(nl):
+            fixed[("gold", j)] = [f * t for f in gfeats[j] for t in self.tents] + [gfeats[j][0] * m for m in self.regions]
+        names = list(fixed)
+        cols = [np.stack([c.ravel() for c in fixed[k]], 1) for k in names]
+        edges = np.cumsum([0] + [c.shape[1] for c in cols])
+        span = {k: np.arange(edges[i], edges[i + 1]) for i, k in enumerate(names)}
+        # All chip-independent columns side by side (full rows / every sub-th row) and their products
+        self.Ff = np.concatenate(cols, 1).astype(np.float64)
+        self.Fs = self.Ff[::self.sub]
+        self.FF = self.Fs.T @ self.Fs
+        self.fidx, self.sources = {}, {}
         for k in targets:
             golds = sorted(range(nl), key=lambda j: (abs(j - k), j))[:int(p["lc_goldens"])]
-            cols = _bias(h, w) + [f * t for j in golds for f in gfeats[j] for t in self.tents]
-            for m in self.regions:
-                cols += [m] + [gfeats[j][0] * m for j in golds]
-            self.base[k] = np.stack([c.ravel() for c in cols], 1).astype(np.float64)
             self.sources[k] = list(range(k - 1, -1, -1))[:int(p["lc_sources"])]
+            self.fidx[k] = np.concatenate([span[("bias",)]] + ([span[("regions",)]] if self.regions else []) +
+                                          [span[("gold", j)] for j in golds])
 
     def remainders(self, chip):
         """(NL, h, w) chip -> {target layer: remainder}."""
         h, w = self.shape
-        blocks = {} # Columns of a source layer (each layer is a source of up to lc_sources targets)
+        Sf, Ss, cross, ss = {}, {}, {}, {}
+
+        def source(j):
+            if j not in Sf:
+                f = _feats(chip[j])
+                c = [a * t for a in f for t in self.tents] + [f[0] * m for m in self.regions] + [f[1] * m for m in self.regions]
+                Sf[j] = np.stack([x.ravel() for x in c], 1).astype(np.float64)
+                Ss[j] = Sf[j][::self.sub]
+                cross[j] = Ss[j].T @ self.Fs # Source block x every chip-independent column
+            return Sf[j]
+
+        def SS(i, j):
+            a, b = min(i, j), max(i, j)
+            if (a, b) not in ss:
+                ss[(a, b)] = Ss[a].T @ Ss[b]
+            return ss[(a, b)] if i <= j else ss[(a, b)].T
+
         out = {}
-        for k, base in self.base.items():
-            for j in self.sources[k]:
-                if j not in blocks:
-                    f = _feats(chip[j])
-                    cols = [a * t for a in f for t in self.tents] + [f[0] * m for m in self.regions] + \
-                        [f[1] * m for m in self.regions]
-                    blocks[j] = np.stack([c.ravel() for c in cols], 1).astype(np.float64)
-            X = np.concatenate([base] + [blocks[j] for j in self.sources[k]], 1)
-            out[k] = _robust_fit(chip[k].ravel().astype(np.float64), X).reshape(h, w).astype(np.float32)
+        for k, idx in self.fidx.items():
+            srcs = self.sources[k]
+            for j in srcs:
+                source(j)
+            G = self.FF[np.ix_(idx, idx)]
+            if srcs:
+                SF = np.concatenate([cross[j][:, idx] for j in srcs])
+                G = np.block([[G, SF.T], [SF, np.block([[SS(i, j) for j in srcs] for i in srcs])]])
+            y = chip[k].ravel().astype(np.float64)
+            out[k] = _block_fit(y, self.sub, self.Ff, self.Fs, idx, [Sf[j] for j in srcs], [Ss[j] for j in srcs],
+                                G).reshape(h, w).astype(np.float32)
         return out
+
+
+def _block_fit(y, step, Ff, Fs, idx, src_full, src_sub, G, iters=4, clip=3.0):
+    """
+    _robust_fit with the columns as the chip-independent ones (all of them Ff / Fs, this target's
+    idx) and the source blocks, X'X = G assembled from cached block products: the same remainder
+    without building X (the chip-independent part is multiplied with a zero-padded coefficient).
+    """
+    ys = y[::step]
+    g = np.concatenate([(Fs.T @ ys)[idx]] + [B.T @ ys for B in src_sub])
+    unit = 1.0 / (np.sqrt(np.diag(G) / len(ys)) + 1e-12)
+    scale = unit[:, None] * unit[None, :]
+    nf = len(idx)
+    edges = np.cumsum([nf] + [B.shape[1] for B in src_sub])
+    cf = np.zeros(Fs.shape[1])
+
+    def fitted(Fx, blocks, coef):
+        cf[idx] = coef[:nf]
+        v = Fx @ cf
+        for i, B in enumerate(blocks):
+            v += B @ coef[edges[i]:edges[i + 1]]
+        return v
+
+    out = None
+    for _ in range(iters):
+        if out is None or not out.any():
+            A, r = G, g
+        else:
+            Xo = np.concatenate([Fs[out][:, idx]] + [B[out] for B in src_sub], 1)
+            A, r = G - Xo.T @ Xo, g - Xo.T @ ys[out]
+        As = A * scale
+        As += np.eye(As.shape[0]) * (1e-4 * np.trace(As) / As.shape[0])
+        coef = unit * np.linalg.solve(As, r * unit)
+        res = ys - fitted(Fs, src_sub, coef)
+        mad = float(np.median(np.abs(res))) * 1.4826 + 1e-9
+        out = np.abs(res) >= clip * mad
+    return y - fitted(Ff, src_full, coef)
 
 
 def _normalise(R):
