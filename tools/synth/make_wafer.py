@@ -1,6 +1,7 @@
 """Multi-layer synthetic SAT wafer for method comparisons.
 
-    python tools/synth/make_wafer.py OUTDIR NAME          (env SEED, NL; deterministic per SEED)
+    python tools/synth/make_wafer.py OUTDIR NAME          (env SEED, NL, VOID_R; deterministic per SEED)
+VOID_R="lo,hi": void radius range in chip px (default 6,25; e.g. 3,8 for small voids).
     -> OUTDIR/NAME.tif (8-bit pages = layers) and OUTDIR/NAME_truth.json
 
 Grid: origin 100, pitch 300 px, 14 x 14 chips, angle 0.4 deg; chip (bbox) 280 px centred in the cell.
@@ -22,6 +23,7 @@ rng = np.random.default_rng(int(os.environ.get("SEED", 31)))
 P, B, ORG, ANG = 300, 280, 100, 0.4
 R = C = 14
 NL = int(os.environ.get("NL", 8))
+R_LO, R_HI = (float(v) for v in os.environ.get("VOID_R", "6,25").split(","))
 SIZE = ORG * 2 + P * R
 m = (P - B) / 2
 yy, xx = np.mgrid[0:B, 0:B].astype(np.float32)
@@ -69,7 +71,7 @@ for r in range(R):
         if rng.random() < 0.3:
             l0 = int(rng.integers(0, NL))
             truth[(r, c)] = (float(rng.uniform(35, B - 35)), float(rng.uniform(35, B - 35)),
-                             float(rng.uniform(6, 25)), float(rng.uniform(6, 25)), l0, NL - 1,
+                             float(rng.uniform(R_LO, R_HI)), float(rng.uniform(R_LO, R_HI)), l0, NL - 1,
                              float(rng.uniform(0.06, 0.14)))
 ct = CoordinateTransform(ANG, SIZE, SIZE)
 json.dump({f"{r},{c}": t for (r, c), t in truth.items()}, open(os.path.join(W, name + "_truth.json"), "w"))

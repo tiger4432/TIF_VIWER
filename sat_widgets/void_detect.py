@@ -196,6 +196,15 @@ def _chip(frame_region, quad, size, factor):
     return np.asarray(img.transform(size, Image.QUAD, quad, resample=Image.BILINEAR), dtype=np.float32)
 
 
+def _chip_fine(frame_region, quad, size, factor):
+    """Like _chip, but warped at full resolution (bicubic) and then box-reduced: the blur of the
+    resampling hardly depends on where the cut falls between pixels (chips cut at different
+    sub-pixel places otherwise differ in sharpness at the layout edges)."""
+    img = Image.fromarray(frame_region.astype(np.float32))
+    full = img.transform((size[0] * factor, size[1] * factor), Image.QUAD, quad, resample=Image.BICUBIC)
+    return np.asarray(full.reduce(factor) if factor > 1 else full, dtype=np.float32)
+
+
 def _normalize(a):
     sub = a[::3, ::3] # Robust statistics from a subsample (speed)
     med = float(np.median(sub))
@@ -410,8 +419,8 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
         if layer_diffs is None:
             return None
 
-    def read_layer(z, layer):
-        """Aligned, normalized chips {cell: float16} of one layer; None when cancelled."""
+    def read_layer(z, layer, at=None):
+        """Aligned, normalized chips {cell: float16} of one layer (at: other rects); None when cancelled."""
         nonlocal step
         chips = {}
         for cell in order:
@@ -419,7 +428,7 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
                 stack.release_cache()
                 return None
             step += 1
-            x0, y0, w, h = rects[cell]
+            x0, y0, w, h = (at or rects)[cell]
             corners = [to_raw(x0, y0), to_raw(x0, y0 + h), to_raw(x0 + w, y0 + h), to_raw(x0 + w, y0)] # PIL QUAD order
             xs = [q[0] for q in corners]
             ys = [q[1] for q in corners]
@@ -429,14 +438,15 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
                 continue
             region = to_gray(stack.read_region(z, rx0, ry0, rx1 - rx0, ry1 - ry0))
             quad = tuple(v for q in corners for v in (q[0] - rx0, q[1] - ry0))
-            chips[cell] = np.clip(_normalize(_chip(region, quad, size, factor)), -6e4, 6e4).astype(np.float16)
+            cut = _chip_fine if p.get("fine_cut", p["method"] == "layer_change") else _chip
+            chips[cell] = np.clip(_normalize(cut(region, quad, size, factor)), -6e4, 6e4).astype(np.float16)
         stack.release_cache()
         return chips
 
     lc = p["method"] == "layer_change"
     if lc:
         # All layers at once (sat_widgets/void_layer_change.py): each layer explained from the layers above
-        n_steps = 2 * len(layer_numbers) * len(order)
+        n_steps = 3 * len(layer_numbers) * len(order)
 
         def accept(f):
             """Skipped when marked already; void type from the rules."""
@@ -641,11 +651,26 @@ def _layer_change(read_layer, layer_numbers, skip, order, rects, size, p, progre
     if len(cells) < 3 or not any(searched):
         return []
     X = np.stack([np.stack([layers[z][c] for c in cells]) for z in range(len(layer_numbers))])
+    rects = dict(rects)
     if p.get("register", True):
-        # The bbox may sit off the chip: whole px (a sub-pixel shift blurs each chip differently,
-        # which the layer fit reads as change; its derivative terms take the sub-pixel rest)
-        X = vlc.align_chips(X)[0]
-    n0, total = steps(), 2 * len(layer_numbers) * len(order)
+        # The bbox may sit off the chip by a fraction of a pixel to a few px, chip by chip: that blurs
+        # the golden chip and the chip-to-chip spread at the layout edges (false detections there).
+        # Each chip's offset is measured (sub-pixel) and the chips are cut again at the corrected
+        # place: real image at the edges, unlike shifting the cut image (synthetic wafer, bboxes
+        # scattered 0.7 px: 16 false detections as cut, 9 shifted, 2 cut again = as exact bboxes)
+        shifts = vlc.align_chips(X, apply=False)[1]
+        W, H = size
+        for c, (sx, sy) in zip(cells, shifts):
+            x0, y0, w, h = rects[c]
+            rects[c] = (x0 - sx * w / W, y0 - sy * h / H, w, h) # The content sat at -s: the window moves by -s
+        layers = {}
+        for z, layer in enumerate(layer_numbers):
+            chips = read_layer(z, layer, rects)
+            if chips is None:
+                return None
+            layers[z] = chips
+        X = np.stack([np.stack([layers[z][c] for c in cells]) for z in range(len(layer_numbers))])
+    n0, total = steps(), 3 * len(layer_numbers) * len(order)
     res = vlc.find(X, searched, p, p.get("layer_rule", "first"),
                    (lambda i, n, t: progress(n0 + (total - n0) * i // max(n, 1), total, t)) if progress else None)
     if res is None:

@@ -139,26 +139,44 @@ def register_layers(chip, maxs=2, b=6):
     return np.stack(out)
 
 
-def _whole(cc, y, x):
+def _whole(cc, y, x, subpixel=False):
     """Whole-px (dx, dy) of the circular correlation peak at (y, x); a 1 px peak whose sub-pixel
-    (parabola) position is under 0.75 px stays 0 (a near-tie between 0 and 1 px)."""
+    (parabola) position is under 0.75 px stays 0 (a near-tie between 0 and 1 px). subpixel: the
+    parabola position itself."""
     h, w = cc.shape
     out = []
     for lo, mid, hi, d in ((cc[y, (x - 1) % w], cc[y, x], cc[y, (x + 1) % w], x if x <= w // 2 else x - w),
                            (cc[(y - 1) % h, x], cc[y, x], cc[(y + 1) % h, x], y if y <= h // 2 else y - h)):
         den = lo - 2 * mid + hi
         f = d + (float(np.clip(0.5 * (lo - hi) / den, -0.5, 0.5)) if den < 0 else 0.0)
-        out.append(0 if abs(d) == 1 and abs(f) < 0.75 else d)
+        out.append(f if subpixel else (0 if abs(d) == 1 and abs(f) < 0.75 else d))
     return out
 
 
-def align_chips(X, max_frac=0.06):
+def _refine_peak(P, sy, sx):
+    """Correlation peak near the whole-px shift (sx, sy) to 0.01 px: the correlation evaluated on a
+    sub-pixel grid straight from its Fourier coefficients P (upsampled DFT, matrix products)."""
+    h, w = P.shape
+    fy, fx = np.fft.fftfreq(h)[None, :], np.fft.fftfreq(w)[None, :]
+    for span, step in ((0.6, 0.05), (0.06, 0.005)):
+        oy = sy + np.arange(-span, span + step / 2, step)
+        ox = sx + np.arange(-span, span + step / 2, step)
+        cc = np.real(np.exp(2j * np.pi * oy[:, None] * fy) @ P @ np.exp(2j * np.pi * ox[:, None] * fx).T)
+        a, b = np.unravel_index(int(np.argmax(cc)), cc.shape)
+        sy, sx = float(oy[a]), float(ox[b])
+    return sx, sy
+
+
+def align_chips(X, max_frac=0.06, subpixel=True, apply=True):
     """
-    (NL, n, h, w) chips -> each chip moved (whole px, every layer alike) onto the median chip, and
-    the shifts [(dx, dy)]. The bbox may sit a few px off the chip. Matched on the gradient magnitude
-    summed over the layers: the layout's contrast and polarity differ from chip to chip, which
-    misleads a match on the intensities. The search is limited to max_frac of the chip, so a
-    periodic layout cannot pull a chip a whole period off.
+    (NL, n, h, w) chips -> each chip moved (every layer alike) onto the median chip, and the shifts
+    [(dx, dy)]. The bbox may sit off the chip. Matched on the gradient magnitude summed over the
+    layers: the layout's contrast and polarity differ from chip to chip, which misleads a match on
+    the intensities. The search is limited to max_frac of the chip, so a periodic layout cannot pull
+    a chip a whole period off. subpixel: moved by the sub-pixel offset with a Fourier phase shift
+    (no blur; bboxes placed within a pixel otherwise blur the golden chip and the chip-to-chip
+    spread at the layout edges: synthetic wafer, 0.7 px bbox scatter, 2 -> 16 false detections),
+    else by whole pixels (a near-tie between 0 and 1 px stays). apply=False: the shifts only.
     """
     from .void_detect import _translate
     nl, n, h, w = X.shape
@@ -171,6 +189,7 @@ def align_chips(X, max_frac=0.06):
     G = (G - G.mean(axis=(1, 2), keepdims=True)) * win
     F = np.fft.rfft2(G)
     ref = np.fft.rfft2(np.median(G, axis=0))
+    ref_full = np.fft.fft2(np.median(G, axis=0)) if subpixel else None
     m = max(1, int(max_frac * max(h, w)))
     dy = np.r_[0:m + 1, -m:0]
     out, shifts = X.copy(), []
@@ -179,7 +198,14 @@ def align_chips(X, max_frac=0.06):
         win_cc = cc[np.ix_(dy % h, dy % w)]
         a, b = np.unravel_index(int(np.argmax(win_cc)), win_cc.shape)
         sx, sy = _whole(cc, int(dy[a]) % h, int(dy[b]) % w) # Rolling the chip by (sx, sy) matches
-        if sx or sy:
+        if subpixel:
+            sx, sy = _refine_peak(ref_full * np.conj(np.fft.fft2(G[i])), float(dy[a]), float(dy[b]))
+        if not apply:
+            pass
+        elif subpixel and (abs(sx) > 0.05 or abs(sy) > 0.05):
+            for k in range(nl):
+                out[k, i] = _shift(X[k, i], sx, sy)
+        elif not subpixel and (sx or sy):
             for k in range(nl):
                 out[k, i] = _translate(X[k, i], -sx, -sy)
         shifts.append((sx, sy))
