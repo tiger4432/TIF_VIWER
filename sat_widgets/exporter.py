@@ -439,4 +439,4 @@ class ExportManager(QObject):
             writer = csv.writer(f)
             writer.writerow([name for _, name in columns])
             for rec in records:
-                writer.writerow([rec[key] for key, _ in columns])
+                writer.writerow([int(rec[key]) if isinstance(rec[key], bool) else rec[key] for key, _ in columns])

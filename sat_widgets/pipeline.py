@@ -543,6 +543,7 @@ class WaferRun:
         info = {"method": params["method"], "type": type_name, "added": res["added"],
                 "per_layer": {str(k): v for k, v in res["per_layer"].items()},
                 "per_type": dict(res.get("types", {})),
+                "layer0": sum(1 for vs in self.vm.voids.values() for v in vs if v.get("layer0")),
                 "threshold": self.threshold(params),
                 "skip_layers": params.get("skip_layers"), "layer_rule": params.get("layer_rule")}
         per_chip = res["added"] / max(1, len(self.cells))
@@ -566,6 +567,7 @@ class WaferRun:
 
     def counts(self):
         per_layer, per_type = {}, {}
+        l0_layer, l0_type = {}, {} # Voids already visible on layer 0 (Layer change flag: bubble?)
         n_bbox = 0
         for layer, vs in self.vm.voids.items() if self.vm is not None else ():
             for v in vs:
@@ -574,8 +576,13 @@ class WaferRun:
                     continue
                 per_layer[str(layer)] = per_layer.get(str(layer), 0) + 1
                 per_type[v.get("type", "")] = per_type.get(v.get("type", ""), 0) + 1
+                if v.get("layer0"):
+                    l0_layer[str(layer)] = l0_layer.get(str(layer), 0) + 1
+                    l0_type[v.get("type", "")] = l0_type.get(v.get("type", ""), 0) + 1
         per_layer = dict(sorted(per_layer.items(), key=lambda kv: int(kv[0])))
+        l0_layer = dict(sorted(l0_layer.items(), key=lambda kv: int(kv[0])))
         return {"bboxes": n_bbox, "voids": sum(per_layer.values()), "per_layer": per_layer, "per_type": per_type,
+                "layer0": {"voids": sum(l0_layer.values()), "per_layer": l0_layer, "per_type": l0_type},
                 "bonded_cells": len(self.cells)}
 
     def save(self):
@@ -622,10 +629,13 @@ class WaferRun:
         else:
             title = f"[TIF Viewer] {who} {s['status'].replace('_', ' ')}: {s['reason']}"
         fmt = lambda d: ", ".join(f"{k}: {v}" for k, v in (d or {}).items()) or "-"
+        l0 = c.get("layer0") or {}
         qc = ", ".join(f"{k}: {v:.3g}" if isinstance(v, float) else f"{k}: {v}" for k, v in s["qc"].items()) or "-"
         lines = [f"Product: {self.product_name or '-'}", f"Lot: {self.lot or '-'}", f"Wafer ID: {self.wafer_id or '-'}",
                  f"File: {self.path}", f"Status: {s['status']}" + (f" ({s['reason']})" if s["reason"] else ""),
                  f"Voids: {c.get('voids', 0)}  (per layer: {fmt(c.get('per_layer'))}; per type: {fmt(c.get('per_type'))})",
+                 *([f"레이어 0에서 보임(기포 의심) {l0['voids']}개  (per layer: {fmt(l0.get('per_layer'))}; "
+                    f"per type: {fmt(l0.get('per_type'))})"] if l0.get("voids") else []),
                  f"BBoxes: {c.get('bboxes', 0)} of {c.get('bonded_cells', 0)} bonded cells",
                  f"QC: {qc}", f"Results: {s.get('output_dir', '-')}"]
         if s["warnings"]:
