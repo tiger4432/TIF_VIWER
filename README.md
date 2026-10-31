@@ -352,6 +352,8 @@ Void Marking 패널의 **Detect Voids**는 대략적인 보이드를 자동으�
 
 - **타입 자동 구분:** layout 위치와 모양으로 타입을 정하는 규칙을 선언할 수 있습니다(아래). 규칙이 없거나 맞는 규칙이 없으면 Void Marking에서 선택한 타입(bbox 제외)으로 마킹합니다.
 - 찾은 보이드는 점선으로 그려지고, **Next Detected**로 레이어·칸 순서대로 돌아볼 수 있습니다. 수정(E)하면 실선이 됩니다. 전체 실행은 Ctrl+Z 한 번으로 되돌립니다.
+- **백그라운드 실행:** 검출은 뒤에서 돌고, 그동안 이동·확대·레이어 변경은 그대로 됩니다. 찾은 보이드는 레이어 하나가 끝날 때마다 화면에 바로 늘어납니다(Die-to-die·PatchCore·U-Net, Mark on layer가 First일 때. Strongest·Last와 Layer change는 모든 레이어를 본 뒤에 정해지므로 끝날 때 한꺼번에). 진행률과 **Cancel**은 아래 상태 표시줄에 있습니다. Cancel하면 그때까지 찾은 보이드는 남고 Ctrl+Z 한 번으로 지워집니다. 실행 중에는 마킹 편집(그리기·수정·지우기, Clear, JSON 불러오기, Ctrl+Z, Detect BBOX 등)과 두 번째 실행이 막힙니다. 다른 파일을 열면 실행은 멈춥니다.
+- **칸 상태 표시:** 실행 중과 끝난 뒤(다음 실행이나 파일 변경 전까지) 검사하는 칸마다 오른쪽 위에 작은 원이 그려집니다. 빈 원 = 대기, 채워지는 원 = 진행 중(처리한 레이어 비율), 초록 원에 체크 = 그 칸 완료. 그리드가 보일 때만, 칸이 화면에서 충분히 클 때만 그립니다. Void Marking 패널의 **Cell status**로 끌 수 있습니다.
 - 민감도는 Thr 칸(기본 6, 낮을수록 민감)으로 조절합니다. 나머지 값은 `config.json`의 `"void_detect"`로 바꿀 수 있습니다: `threshold`, `smooth`, `skip_layers`, `min_size_px`(가장 작은 보이드 지름), `max_area_frac`, `work_size`, `template_cells`, `layer_rule`.
 - 기준 bbox를 먼저 그리면(Detect BBOX) 칩 정렬이 정확해집니다.
 - **Skip layers**: 검출하지 않을 레이어(절대 번호, 쉼표로 구분). 기본은 `0`(맨 위 레이어는 표면 반사로 잡음이 많음). 기본값은 `config.json`의 `"void_detect": {"skip_layers": [0]}` 또는 `"ui_defaults": {"skip_layers": [0, 1]}`.

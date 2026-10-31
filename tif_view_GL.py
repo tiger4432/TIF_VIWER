@@ -8,6 +8,7 @@ from collections import OrderedDict
 from datetime import datetime
 import json
 import re
+import copy
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -17,7 +18,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QPushButton, QDoubleSpinBox, QPlainTextEdit,
     QFileDialog, QProgressDialog, QCheckBox, QRadioButton,
     QButtonGroup, QComboBox, QDialog, QScrollArea, QMessageBox, QLineEdit,
-    QTextEdit, QAbstractSpinBox, QSizePolicy
+    QTextEdit, QAbstractSpinBox, QSizePolicy, QProgressBar
 )
 from PySide6.QtGui import QSurfaceFormat, QAction, QImage, QPainter, QKeySequence
 from PySide6.QtCore import Qt, QTimer, QEvent, QPointF
@@ -33,6 +34,7 @@ from sat_widgets.roi_inspector import ROIInspector
 from sat_widgets.angle_preview import AnglePreview
 from sat_widgets.auto_bbox import place_bboxes, refine_bboxes, detect_layout, fit_grid
 from sat_widgets import void_detect
+from sat_widgets.detect_job import DetectJob, read_only_copy
 from sat_widgets import void_layer_change
 from sat_widgets import void_eval
 from sat_widgets import void_learn
@@ -463,10 +465,12 @@ class MainWindow(QMainWindow):
 
         # Rough automatic detection (die-to-die comparison), marked with the selected type
         h_detect = QHBoxLayout()
-        btn_detect = QPushButton("Detect Voids")
+        self.btn_detect = btn_detect = QPushButton("Detect Voids")
         btn_detect.setToolTip("Compare every chip with the median chip of its layer (layout-independent), from the top\n"
                               "layer down; each void is marked once, on the layer where it first appears, with the\n"
-                              "selected type. Brighter and darker spots both count. Results are dashed until edited.")
+                              "selected type. Brighter and darker spots both count. Results are dashed until edited.\n"
+                              "Runs in the background: the voids appear as they are found; viewing works meanwhile,\n"
+                              "editing the markings waits until it ends (Cancel in the status bar keeps what was found).")
         btn_detect.clicked.connect(self.detect_voids)
         self.sb_detect_thr = QDoubleSpinBox(); self.sb_detect_thr.setRange(2.0, 50.0); self.sb_detect_thr.setSingleStep(0.5)
         self.sb_detect_thr.setValue(float(self._config().get("void_detect", {}).get("threshold", void_detect.DEFAULTS["threshold"])))
@@ -493,7 +497,7 @@ class MainWindow(QMainWindow):
         h_detect.addWidget(self.cb_detect_method)
         h_detect.addWidget(self.sb_detect_thr)
         h_detect.addWidget(btn_next_det)
-        btn_eval = QPushButton("Evaluate")
+        self.btn_eval = btn_eval = QPushButton("Evaluate")
         btn_eval.setToolTip("Run the detection without marking and compare it with the voids marked by hand on the loaded\n"
                             "layers: misses and false detections with their reasons, as a short code to type and send,\n"
                             "plus a report folder with chip images (see docs/VOID_EVAL.md).")
@@ -527,7 +531,7 @@ class MainWindow(QMainWindow):
         self.chk_learned.setToolTip("Die-to-die / Layer change: candidates scored by a model trained from hand markings\n"
                                     "(Train; one model per method) instead of the Thr threshold (sat_widgets/void_learn.py)")
         self.chk_learned.setEnabled(os.path.exists(void_learn.model_path(self._config().get("void_detect", {}))))
-        btn_train = QPushButton("Train")
+        self.btn_train = btn_train = QPushButton("Train")
         btn_train.setToolTip("Add this file's hand markings to the training set and retrain the learned filter\n"
                              "(one entry per file; training the same file again replaces it)")
         btn_train.clicked.connect(self.train_detector)
@@ -537,9 +541,17 @@ class MainWindow(QMainWindow):
         btn_seg.setToolTip("Build and review the U-Net training data from marked files (docs/SEGMENTATION.md)")
         btn_seg.clicked.connect(self.open_seg_data)
         h_learn.addWidget(btn_seg)
+        self.chk_detect_state = QCheckBox("Cell status")
+        self.chk_detect_state.setChecked(True)
+        self.chk_detect_state.setToolTip("Detect Voids progress per cell: a circle at the top-right corner of each inspected cell\n"
+                                         "(empty: pending, filling: in progress, check: done); shown with the grid")
+        self.chk_detect_state.toggled.connect(self._toggle_detect_state)
+        h_learn.addWidget(self.chk_detect_state)
         h_learn.addStretch(1)
         v_layout_void.addLayout(h_learn)
         self._init_detect_method()
+        self._detect_job = None # Detect Voids running in the background (sat_widgets/detect_job.py)
+        self._detect_added = 0
         
         dock_layout.addWidget(self.gb_void)
         
@@ -829,6 +841,8 @@ class MainWindow(QMainWindow):
         self.glw.update()
 
     def undo_void_change(self):
+        if self._detect_busy():
+            return
         if self.void_manager.undo():
             self.glw.active_void = None
             self.glw.refresh_hover() # Undo restores copies of the voids
@@ -1317,7 +1331,7 @@ class MainWindow(QMainWindow):
             self._apply_held_mode()
 
     def _apply_held_mode(self):
-        tool = self._held_modes[-1] if self._held_modes else None
+        tool = self._held_modes[-1] if self._held_modes and not self.glw.edit_locked else None
         rb = {None: self.rb_view, "DRAW": self.rb_draw, "EDIT": self.rb_edit, "ERASE": self.rb_erase}[tool]
         rb.setChecked(True)
         self.glw.set_void_tool(tool)
@@ -1327,6 +1341,8 @@ class MainWindow(QMainWindow):
         self._apply_held_mode()
         
     def load_voids(self):
+        if self._detect_busy():
+            return
         path, _ = QFileDialog.getOpenFileName(self, "Load Voids JSON", "", "JSON (*.json)")
         if path:
             self.void_manager.load_from_file(path, self.glw.grid_cfg, self.glw.coord_transform, self.layer_offset)
@@ -1375,6 +1391,8 @@ class MainWindow(QMainWindow):
             self.cb_void_type.setCurrentIndex(idx)
         
     def open_type_manager(self):
+        if self._detect_busy():
+            return
         dlg = VoidTypeDialog(self.void_manager, self)
         dlg.exec()
         self.populate_void_types()
@@ -1395,6 +1413,8 @@ class MainWindow(QMainWindow):
                 "layers": [self.abs_layer(z) for z in range(len(self.full_data))] if self.full_data is not None else []}
             
     def clear_voids(self):
+        if self._detect_busy():
+            return
         # Clear CURRENT LAYER Only
         self.void_manager.clear_layer(self.glw.current_layer)
         self.update_void_ui()
@@ -1403,12 +1423,16 @@ class MainWindow(QMainWindow):
         self.glw.update()
         
     def clear_chip_voids(self):
+        if self._detect_busy():
+            return
         self.glw.clear_current_chip_voids()
         self.update_void_ui()
         self.glw.setFocus()
 
     def clear_all_voids(self):
         """Removes every marking on all layers (bboxes too) after a confirmation. One undo step."""
+        if self._detect_busy():
+            return
         n = sum(len(vs) for vs in self.void_manager.voids.values())
         if n == 0:
             return
@@ -1430,6 +1454,8 @@ class MainWindow(QMainWindow):
 
     def auto_bbox(self):
         """Detects and draws the reference bbox of every (bonded) cell on the topmost layer."""
+        if self._detect_busy():
+            return
         if self.full_data is None or self.glw.tiled_image is None:
             return
         tid = self._bbox_type_name()
@@ -1527,6 +1553,8 @@ class MainWindow(QMainWindow):
 
     def refine_bbox(self):
         """Aligns the bboxes on the layout again; hand-placed ones stay and set the place (auto_bbox.py)."""
+        if self._detect_busy():
+            return
         setup = self._bbox_setup("Refine BBOX")
         if setup is None:
             return
@@ -1565,6 +1593,8 @@ class MainWindow(QMainWindow):
     def fit_grid_to_bboxes(self):
         """Grid origin / pitch / angle fitted to the bbox centers (auto_bbox.fit_grid), applied when confirmed.
         The bboxes keep their place in the cells (their median offset from the cell centres)."""
+        if self._detect_busy():
+            return
         if self.full_data is None:
             return
         cfg, ct, vm = self.glw.grid_cfg, self.glw.coord_transform, self.void_manager
@@ -1756,6 +1786,8 @@ class MainWindow(QMainWindow):
         (QMessageBox.information if ok else QMessageBox.warning)(self, "Results API", message)
 
     def load_results_from_api(self):
+        if self._detect_busy():
+            return
         if self.full_data is None or self.glw.tiled_image is None:
             QMessageBox.information(self, "Results API", "Open an image or a project first.")
             return
@@ -1860,19 +1892,135 @@ class MainWindow(QMainWindow):
         return progress, step
 
     def detect_voids(self):
-        """Rough automatic void detection on all loaded layers (see sat_widgets/void_detect.py)."""
+        """
+        Rough automatic void detection on all loaded layers (see sat_widgets/void_detect.py), in the
+        background (sat_widgets/detect_job.py): the voids appear as they are found and the view stays
+        usable; editing the markings waits until the run ends. The whole run is one undo step.
+        """
+        if self._detect_busy():
+            return
         setup = self._detect_setup("Detect Voids")
         if setup is None:
             return
         type_name, cells, refs, params, layers = setup
-        vm, cfg = self.void_manager, self.glw.grid_cfg
-        progress, step = self._detect_progress("Detecting voids...")
-        result = void_detect.detect_voids(self.full_data, cfg, self.glw.coord_transform, refs, cells,
-                                          layers, vm, type_name, params, step)
-        progress.close()
-        if result is None:
+        vm = self.void_manager
+        # The grid as it is now, for the worker and the placement (the grid may be moved meanwhile)
+        cfg, ct = copy.deepcopy(self.glw.grid_cfg), copy.deepcopy(self.glw.coord_transform)
+        rects = void_detect.chip_rects(cfg, refs, cells)
+        job = DetectJob(self.full_data.reopen, (cfg, ct, refs, cells, layers, read_only_copy(vm), type_name, params), self)
+        job.found.connect(lambda batch: self._detect_found(job, batch, rects, cfg, ct))
+        job.cells.connect(lambda cs, frac: self._detect_cells(job, cs, frac))
+        job.progress.connect(lambda i, n, text: self._detect_step(job, i, n, text))
+        job.finished.connect(lambda result, error: self._detect_finished(job, result, error, refs))
+        self._detect_job, self._detect_added = job, 0
+        vm.begin_change() # One undo step for the whole run (Ctrl+Z waits until it ends)
+        self._lock_editing(True)
+        self.glw.detect_cells = {c: 0.0 for c in cells}
+        self._detect_widgets(True)
+        self.statusBar().showMessage("Detect Voids: running in the background...")
+        job.start()
+
+    def _detect_busy(self):
+        """True (with a note in the status bar) while Detect Voids runs: the markings are not editable."""
+        if self._detect_job is None:
+            return False
+        self.statusBar().showMessage("Detect Voids is running: markings can be edited when it ends "
+                                     "(Cancel in the status bar keeps what was found).", 5000)
+        return True
+
+    def _lock_editing(self, on):
+        self.glw.edit_locked = on
+        if on:
+            self.glw.active_void = None
+        self._apply_held_mode()
+        for w in (self.btn_detect, self.btn_eval, self.btn_train, self.btn_load_voids, self.btn_clear_voids,
+                  self.btn_clear_chip, self.btn_clear_all, self.btn_edit_types):
+            w.setEnabled(not on)
+
+    def _detect_widgets(self, show):
+        """Progress bar and Cancel button in the status bar (created on first use)."""
+        if not hasattr(self, "detect_bar"):
+            self.detect_label = QLabel()
+            self.detect_bar = QProgressBar()
+            self.detect_bar.setRange(0, 1000)
+            self.detect_bar.setMaximumWidth(220)
+            self.detect_cancel = QPushButton("Cancel")
+            self.detect_cancel.setToolTip("Stops Detect Voids; the voids found so far stay (Ctrl+Z removes them)")
+            self.detect_cancel.clicked.connect(self.cancel_detect)
+            for w in (self.detect_label, self.detect_bar, self.detect_cancel):
+                self.statusBar().addPermanentWidget(w)
+        self.detect_label.setText("Detect Voids")
+        self.detect_bar.setValue(0)
+        self.detect_cancel.setEnabled(True)
+        for w in (self.detect_label, self.detect_bar, self.detect_cancel):
+            w.setVisible(show)
+
+    def _detect_step(self, job, i, n, text):
+        if job is self._detect_job:
+            self.detect_bar.setValue(int(1000 * i / max(1, n)))
+            self.detect_label.setText(f"{text}  ({self._detect_added} voids)")
+
+    def _detect_found(self, job, batch, rects, cfg, ct):
+        """Places voids found by the worker (GUI thread, inside the run's undo step)."""
+        if job is not self._detect_job:
             return
+        void_detect.place_found(self.void_manager, batch, rects, cfg, ct)
+        self._detect_added += len(batch)
+        self.glw.refresh_hover()
+        self.update_void_ui()
+        self.glw.update()
+
+    def _detect_cells(self, job, cells, frac):
+        state = self.glw.detect_cells
+        if job is not self._detect_job or state is None:
+            return
+        for c in cells:
+            if c in state:
+                state[c] = max(state[c], frac)
+        self.glw.update()
+
+    def cancel_detect(self):
+        """Stops Detect Voids; the voids placed so far stay (one undo step)."""
+        if self._detect_job is not None:
+            self._detect_job.cancel()
+            self.detect_cancel.setEnabled(False)
+            self.detect_label.setText("Cancelling...")
+
+    def _end_detect(self):
+        self._detect_job = None
+        self.void_manager.end_change()
+        self._lock_editing(False)
+        self._detect_widgets(False)
+
+    def _abort_detect(self):
+        """Stops a running Detect Voids without waiting (file closed); its results are dropped."""
+        if self._detect_job is not None:
+            self._detect_job.cancel() # The worker reads with its own reader: it may finish later
+            self._end_detect()
+        self.glw.detect_cells = None
+
+    def _detect_finished(self, job, result, error, refs):
+        if job is not self._detect_job:
+            return
+        self._end_detect()
+        if error:
+            print(error)
+            QMessageBox.warning(self, "Detect Voids", f"Detect Voids failed ({self._detect_added} voids kept):\n"
+                                + error.strip().splitlines()[-1])
+        if result is None:
+            if not error:
+                msg = f"Detect Voids cancelled: {self._detect_added} voids kept (Ctrl+Z removes them)."
+                self.statusBar().showMessage(msg)
+                print(msg)
+            self.glw.update()
+            return
+        self.glw.detect_cells = dict.fromkeys(self.glw.detect_cells or (), 1.0)
         self._detect_done(result, refs)
+        self.glw.update()
+
+    def _toggle_detect_state(self, on):
+        self.glw.show_detect_state = on
+        self.glw.update()
 
     def _hand_truths(self, layers, refs):
         """Hand markings (not bboxes, not unreviewed detections) on the loaded layers, as drawn boxes."""
@@ -1937,6 +2085,8 @@ class MainWindow(QMainWindow):
         Learned filter (sat_widgets/void_learn.py): adds the candidates of this file, labelled by its
         hand markings, to the training set and retrains the model on all of it.
         """
+        if self._detect_busy():
+            return
         setup = self._detect_setup("Train")
         if setup is None:
             return
@@ -2005,6 +2155,8 @@ class MainWindow(QMainWindow):
         Detection without marking, compared with the hand markings (sat_widgets/void_eval.py):
         shows the short code and writes the report folder.
         """
+        if self._detect_busy():
+            return
         setup = self._detect_setup("Evaluate")
         if setup is None:
             return
@@ -2105,6 +2257,7 @@ class MainWindow(QMainWindow):
 
     def _close_data(self):
         """Releases the current stack, its GPU textures and per-layer data."""
+        self._abort_detect()
         self._stop_layer_loader()
         self._clear_gpu_cache()
         if self.full_data is not None:

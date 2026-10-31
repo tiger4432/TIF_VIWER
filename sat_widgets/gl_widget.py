@@ -198,6 +198,9 @@ class GLImageWidget(QOpenGLWidget):
         self.active_void = None
         self.active_void_action = None
         self._void_txn = False # Inside a VoidManager change (mouse press .. release)
+        self.edit_locked = False # Detect Voids running in the background: viewing only
+        self.detect_cells = None # {(row, col): share done 0..1} of the last Detect Voids run
+        self.show_detect_state = True # Its circles at the top-right of each cell
         self._snap_hint = None # Snap types: press point while drawing (bbox corner nearest to it)
         self._snap_drag_point = None # Snap types: last mouse point while drawing (size on release)
         self._free_quadrant = None # Center-anchored snap type being drawn: quadrant press -> mouse
@@ -1094,6 +1097,7 @@ class GLImageWidget(QOpenGLWidget):
                  paint(v, "active" if v is active else "normal")
 
 
+             self._draw_detect_state(painter)
              # Center cell info (top-left, yellow)
              self._draw_center_info(painter)
              painter.end()
@@ -1105,6 +1109,49 @@ class GLImageWidget(QOpenGLWidget):
         else:
             img_cx, img_cy = 500, 500
         return self.grid_cfg.cell_at(img_cx - self.pan_x, img_cy - self.pan_y)
+
+    DETECT_R = 6 # Radius (screen px) of the per-cell detection circle
+
+    def _draw_detect_state(self, painter):
+        """
+        Detect Voids progress per cell: a circle at the top-right corner of each inspected cell,
+        empty = pending, pie = share done, filled with a check = done. Constant screen size; not
+        drawn when the cells are small on screen or the grid is hidden.
+        """
+        cells, cfg = self.detect_cells, self.grid_cfg
+        r = self.DETECT_R
+        if not cells or not self.show_detect_state or not cfg.visible or \
+                min(cfg.pitch_x, cfg.pitch_y) * self.zoom < 8 * r:
+            return
+        vw, vh = self.width(), self.height()
+        dark, green = QColor(0, 0, 0, 170), QColor(60, 220, 90)
+        painter.save()
+        for (row, col), frac in cells.items():
+            x0, y0 = cfg.cell_origin(row, col)
+            sx, sy = self.deskew_to_screen(x0 + cfg.pitch_x, y0)
+            cx, cy = sx - r - 4, sy + r + 4
+            if cx < -r or cy < -r or cx > vw + r or cy > vh + r:
+                continue
+            box = QRectF(cx - r, cy - r, 2 * r, 2 * r)
+            painter.setPen(QPen(dark, 3))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(box)
+            if frac >= 1.0:
+                painter.setPen(QPen(green, 1.5))
+                painter.setBrush(green)
+                painter.drawEllipse(box)
+                painter.setPen(QPen(QColor(0, 0, 0), 1.6))
+                painter.drawPolyline([QPointF(cx - 0.55 * r, cy), QPointF(cx - 0.15 * r, cy + 0.45 * r),
+                                      QPointF(cx + 0.55 * r, cy - 0.45 * r)])
+                continue
+            if frac > 0:
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(green)
+                painter.drawPie(box, 90 * 16, -int(360 * 16 * frac))
+            painter.setPen(QPen(QColor(235, 235, 235), 1.5))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(box)
+        painter.restore()
 
     def _draw_center_info(self, painter):
         r, c = self.center_cell()
@@ -1583,6 +1630,8 @@ class GLImageWidget(QOpenGLWidget):
     
     def set_void_tool(self, tool_name):
         """Activates a marking tool ("DRAW" / "EDIT" / "ERASE"), or None for view mode."""
+        if self.edit_locked:
+            tool_name = None
         if self.active_void_action or getattr(self, '_void_txn', False):
             self._pending_tool = tool_name # Applied when the drag ends
             return
@@ -1608,7 +1657,7 @@ class GLImageWidget(QOpenGLWidget):
         if not 1 <= number <= len(names):
             return
         name = names[number - 1]
-        hv = self._live_hover()
+        hv = None if self.edit_locked else self._live_hover()
         if hv is not None:
             # The digits of one number are one undo step
             if self.void_manager.set_void_type(hv, name, coalesce_key=("type", id(hv), self._number_started)):
@@ -1758,7 +1807,7 @@ class GLImageWidget(QOpenGLWidget):
 
     def move_hovered_void_to_current_layer(self):
         """Q: moves the void of another layer under the mouse (ghost) to the current layer."""
-        if not self.void_manager or not self.tiled_image:
+        if not self.void_manager or not self.tiled_image or self.edit_locked:
             return False
         hv = self._live_hover()
         if hv is not None:
@@ -1786,7 +1835,7 @@ class GLImageWidget(QOpenGLWidget):
         """
         Clears voids in the chip currently at the center of the view.
         """
-        if not self.void_manager: return
+        if not self.void_manager or self.edit_locked: return
         
         # 1. Get View Center in Global Coords
         # 1. Get View Center in Global Coords
