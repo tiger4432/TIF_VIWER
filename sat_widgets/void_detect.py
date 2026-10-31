@@ -342,27 +342,24 @@ def _open(mask):
 
 
 def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, void_manager, type_name,
-                 params=None, progress=None, diag=None, apply=True):
+                 params=None, progress=None, diag=None, apply=True, on_found=None, on_cells=None):
     """
     Detects voids on all loaded layers (index z -> absolute layer_numbers[z]) and adds them to
     void_manager with type_name. cells: [(row, col)] to inspect. refs: reference bboxes.
     progress(i, n, text) -> False cancels. Returns {"added": n, "per_layer": {layer: n}} or None.
     diag: collector of every stage (sat_widgets/void_eval.py). apply=False: nothing is added and
     existing markings are ignored (evaluation against them); the result has "found".
+    Background runs (the GUI thread places the voids): on_found(finds) receives the kept finds
+    instead of placing them (place_found places them), per layer as soon as they are final (layer_rule
+    "first", layers from the top), else at the end; on_cells(cells, frac): share of the work done on
+    these cells (1.0 = done). void_manager is then only read (a copy taken on the GUI thread).
     """
     p = dict(DEFAULTS)
     p.update(params or {})
     to_raw = coord_transform.deskew_to_raw if coord_transform else (lambda x, y: (x, y))
     to_deskew = coord_transform.raw_to_deskew if coord_transform else (lambda x, y: (x, y))
 
-    # Chip rectangles (Deskewed): reference bbox, else the cell. One working size for all chips.
-    rects = {}
-    for (r, c) in cells:
-        if (r, c) in refs:
-            rects[(r, c)] = refs[(r, c)]
-        else:
-            x0, y0 = grid_cfg.cell_origin(r, c)
-            rects[(r, c)] = (x0, y0, grid_cfg.pitch_x, grid_cfg.pitch_y)
+    rects = chip_rects(grid_cfg, refs, cells)
     if not rects:
         return {"added": 0, "per_layer": {}}
     bw = float(np.median([v[2] for v in rects.values()]))
@@ -466,12 +463,18 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
             return f[:6] + (vtype,) + f[7:]
 
         found = _layer_change(read_layer, layer_numbers, skip, order, rects, size, p, progress, diag,
-                              lambda: step, accept)
+                              lambda: step, accept, on_cells)
         if found is None:
             return None
         per_layer = {layer: sum(1 for f in found if f[0] == layer) for _, layer in layer_z}
 
-    for z, layer in ([] if lc else layer_z):
+    # Finds handed over per layer (on_found): final once their layer is done when the first layer wins
+    # and the layers come from the top (a deeper layer cannot take a spot over)
+    rule = p.get("layer_rule", "first")
+    early = on_found is not None and apply and rule == "first" and \
+        [layer for _, layer in layer_z] == sorted(layer for _, layer in layer_z)
+    sent, settled = set(), {}
+    for li, (z, layer) in enumerate([] if lc else layer_z):
         # 1. Aligned, normalized chips of this layer
         chips = read_layer(z, layer)
         if chips is None:
@@ -588,52 +591,92 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
         per_layer[layer] = count
         if diag is not None:
             diag.layer_end(layer)
+        if early:
+            batch = _settle([f for f in found if f[0] == layer], rule, settled)
+            sent.update(id(f) for f in batch)
+            if batch:
+                on_found(batch)
+        if on_cells is not None:
+            on_cells(order, (li + 1) / len(layer_z))
 
     # 4. A spot found on several layers is one void, marked on the layer chosen by layer_rule:
     #    "first" (where it first appears from the top), "last", or "strongest" (largest deviation)
-    rule = p.get("layer_rule", "first")
+    found = _settle(found, rule, {})
+    per_layer = {layer: sum(1 for f in found if f[0] == layer) for layer in per_layer}
+    if on_cells is not None:
+        on_cells(order, 1.0)
+
+    if not apply:
+        return {"added": 0, "per_layer": per_layer, "found": found}
+    if on_found is not None:
+        rest = [f for f in found if id(f) not in sent]
+        if rest:
+            on_found(rest)
+        for f in found:
+            types[f[6]] = types.get(f[6], 0) + 1
+        return {"added": len(found), "per_layer": per_layer, "types": types}
+
+    # 4. One undo step for the whole run
+    vm = void_manager
+    vm.begin_change()
+    try:
+        types = place_found(vm, found, rects, grid_cfg, coord_transform)
+    finally:
+        vm.end_change()
+    return {"added": len(found), "per_layer": per_layer, "types": types}
+
+
+def chip_rects(grid_cfg, refs, cells):
+    """Chip rectangles (Deskewed): reference bbox, else the cell. One working size for all chips."""
+    rects = {}
+    for (r, c) in cells:
+        if (r, c) in refs:
+            rects[(r, c)] = refs[(r, c)]
+        else:
+            x0, y0 = grid_cfg.cell_origin(r, c)
+            rects[(r, c)] = (x0, y0, grid_cfg.pitch_x, grid_cfg.pitch_y)
+    return rects
+
+
+def _settle(found, rule, by_cell):
+    """Finds kept by layer_rule (a spot on several layers is one void); by_cell: kept so far, updated."""
     prefer = {"first": lambda f: (f[0], -f[5]), "last": lambda f: (-f[0], -f[5])}.get(rule, lambda f: (-f[5], f[0]))
-    chosen, by_cell = set(), {}
+    chosen = set()
     for f in sorted(found, key=prefer):
-        layer, gx, gy, rx, ry, cell, c = f[0], f[1], f[2], f[3], f[4], f[7], f[9]
+        gx, gy, rx, ry, cell, c = f[1], f[2], f[3], f[4], f[7], f[9]
         hit = next((k for k in by_cell.get(cell, ()) if abs(gx - k[1]) < max(rx, k[3]) and abs(gy - k[2]) < max(ry, k[4])), None)
         if hit is not None:
             c["status"], c["dup_layer"] = "dup", hit[0]
             continue
         by_cell.setdefault(cell, []).append(f)
         chosen.add(id(f))
-    found = [f for f in found if id(f) in chosen]
-    per_layer = {layer: sum(1 for f in found if f[0] == layer) for layer in per_layer}
-
-    if not apply:
-        return {"added": 0, "per_layer": per_layer, "found": found}
-
-    # 4. One undo step for the whole run
-    vm = void_manager
-    vm.begin_change()
-    try:
-        for layer, gx, gy, rx, ry, score, vtype, cell, extent, _ in found:
-            # Placed like a hand marking (same function as a click). Corner-anchored types attach
-            # to the bbox corner nearest the blob, sized to its far extent corner (like drawing
-            # it from the corner).
-            far = None
-            if vm.snap_anchor({"type": vtype}) is not None:
-                bx, by, bw, bh = rects[cell]
-                kx, ky = min(((bx, by), (bx + bw, by), (bx + bw, by + bh), (bx, by + bh)),
-                             key=lambda k: math.hypot(k[0] - gx, k[1] - gy))
-                far = max(((extent[0], extent[1]), (extent[2], extent[1]), (extent[2], extent[3]), (extent[0], extent[3])),
-                          key=lambda q: math.hypot(q[0] - kx, q[1] - ky))
-            v = vm.place_void(layer, *to_raw(gx, gy), rx, ry, vtype, grid_cfg, coord_transform,
-                              hint=(gx, gy), drag_point=far)
-            v["auto"] = "detected" # Only the dashed outline until reviewed (any edit clears it)
-            v["score"] = round(float(score), 1)
-            types[vtype] = types.get(vtype, 0) + 1
-    finally:
-        vm.end_change()
-    return {"added": len(found), "per_layer": per_layer, "types": types}
+    return [f for f in found if id(f) in chosen]
 
 
-def _layer_change(read_layer, layer_numbers, skip, order, rects, size, p, progress, diag, steps, accept):
+def place_found(vm, found, rects, grid_cfg, coord_transform):
+    """Places finds of detect_voids in vm (inside the caller's begin_change / end_change). Returns {type: n}."""
+    to_raw = coord_transform.deskew_to_raw if coord_transform else (lambda x, y: (x, y))
+    types = {}
+    for layer, gx, gy, rx, ry, score, vtype, cell, extent, _ in found:
+        # Placed like a hand marking (same function as a click). Corner-anchored types attach
+        # to the bbox corner nearest the blob, sized to its far extent corner (like drawing
+        # it from the corner).
+        far = None
+        if vm.snap_anchor({"type": vtype}) is not None:
+            bx, by, bw, bh = rects[cell]
+            kx, ky = min(((bx, by), (bx + bw, by), (bx + bw, by + bh), (bx, by + bh)),
+                         key=lambda k: math.hypot(k[0] - gx, k[1] - gy))
+            far = max(((extent[0], extent[1]), (extent[2], extent[1]), (extent[2], extent[3]), (extent[0], extent[3])),
+                      key=lambda q: math.hypot(q[0] - kx, q[1] - ky))
+        v = vm.place_void(layer, *to_raw(gx, gy), rx, ry, vtype, grid_cfg, coord_transform,
+                          hint=(gx, gy), drag_point=far)
+        v["auto"] = "detected" # Only the dashed outline until reviewed (any edit clears it)
+        v["score"] = round(float(score), 1)
+        types[vtype] = types.get(vtype, 0) + 1
+    return types
+
+
+def _layer_change(read_layer, layer_numbers, skip, order, rects, size, p, progress, diag, steps, accept, on_cells=None):
     """
     Method "layer_change" (sat_widgets/void_layer_change.py): the chips of every loaded layer
     (skipped layers too: they still explain the layers below them), then each void with its
@@ -646,6 +689,8 @@ def _layer_change(read_layer, layer_numbers, skip, order, rects, size, p, progre
         if chips is None:
             return None
         layers[z] = chips
+        if on_cells is not None:
+            on_cells(order, 0.5 * (z + 1) / len(layer_numbers))
     cells = [c for c in order if all(c in chips for chips in layers.values())]
     searched = [layer not in skip for layer in layer_numbers]
     if len(cells) < 3 or not any(searched):
@@ -656,8 +701,8 @@ def _layer_change(read_layer, layer_numbers, skip, order, rects, size, p, progre
         # The bbox may sit off the chip by a fraction of a pixel to a few px, chip by chip: that blurs
         # the golden chip and the chip-to-chip spread at the layout edges (false detections there).
         # Each chip's offset is measured (sub-pixel) and the chips are cut again at the corrected
-        # place: real image at the edges, unlike shifting the cut image (synthetic wafer, bboxes
-        # scattered 0.7 px: 16 false detections as cut, 9 shifted, 2 cut again = as exact bboxes)
+        # place: real image at the edges, unlike shifting the cut image (with fine_cut; synthetic wafer,
+        # bboxes scattered 0.7 px: 16 false detections -> 4 at the same misses)
         shifts = vlc.align_chips(X, apply=False)[1]
         W, H = size
         for c, (sx, sy) in zip(cells, shifts):
@@ -671,8 +716,13 @@ def _layer_change(read_layer, layer_numbers, skip, order, rects, size, p, progre
             layers[z] = chips
         X = np.stack([np.stack([layers[z][c] for c in cells]) for z in range(len(layer_numbers))])
     n0, total = steps(), 3 * len(layer_numbers) * len(order)
+
+    def chip_done(i, n, t):
+        if on_cells is not None:
+            on_cells([cells[i]], 0.9)
+        return progress is None or progress(n0 + (total - n0) * i // max(n, 1), total, t)
     res = vlc.find(X, searched, p, p.get("layer_rule", "first"),
-                   (lambda i, n, t: progress(n0 + (total - n0) * i // max(n, 1), total, t)) if progress else None)
+                   chip_done if (progress or on_cells) else None)
     if res is None:
         return None
     W, H = size
