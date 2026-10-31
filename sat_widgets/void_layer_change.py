@@ -59,6 +59,9 @@ DEFAULTS = {
     "lc_register": False, # Layers of each chip moved onto its first layer (sub-pixel; a scan's layers are aligned)
     "lc_workers": 0, # Chips fitted in parallel (0 = CPU count, 1 without threadpoolctl)
     "lc_cand_threshold": 8.0, # Learned filter: candidates down to this place score (Train)
+    "lc_layer0_check": "flag", # Voids already visible on layer 0 (bubbles?): "flag" / "reject" / "off" (see presence)
+    "lc_layer0_z": 1.0, # Presence on layer 0 from this |z| on (core remainder / ring noise)
+    "lc_layer0_type": None, # "flag": also this void type for them (when declared)
     "lc_learned_cut": None, # Learned filter: keep a candidate from this model score on (None = the model's cut, best F1)
 }
 
@@ -212,6 +215,29 @@ def align_chips(X, max_frac=0.06, subpixel=True, apply=True):
     return out, shifts
 
 
+def presence(X, gold, k, i, cy, cx, r):
+    """
+    Is the spot visible on layer k of chip i, independently of the layers above? The chip's patch
+    around (cx, cy) (working px) is fitted from the golden chips of all layers (+ a plane) on a ring
+    around the spot (radius 1.5 r .. max(3 r, 12)), leaving the core (radius r) out; returns the core's
+    mean remainder in units of the ring's remainder spread (signed). The local fit follows the chip's
+    own layout contrast, so a spot on layer 0 (which has no layer above) is judged like any other.
+    """
+    L, n, h, w = X.shape
+    W = int(max(3 * r, 12))
+    y0, y1, x0, x1 = max(0, int(cy) - W), min(h, int(cy) + W + 1), max(0, int(cx) - W), min(w, int(cx) + W + 1)
+    yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float32)
+    d = np.hypot(yy - cy, xx - cx).ravel()
+    core, ring = d <= r, (d >= 1.5 * r) & (d <= W)
+    if core.sum() < 3 or ring.sum() < 20:
+        return 0.0
+    A = np.stack([gold[j, y0:y1, x0:x1].ravel() for j in range(L)] + [np.ones(d.size), (xx - cx).ravel(), (yy - cy).ravel()], 1)
+    y = X[k, i, y0:y1, x0:x1].astype(np.float64).ravel()
+    coef, *_ = np.linalg.lstsq(A[ring], y[ring], rcond=None)
+    res = y - A @ coef
+    return float(res[core].mean()) / (float(np.std(res[ring])) + 1e-6)
+
+
 def _tents(h, w):
     """2 x 2 bilinear weights over the chip (they sum to 1)."""
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
@@ -270,6 +296,7 @@ class _Context:
         nl, n, h, w = X.shape
         self.p, self.shape = p, (h, w)
         gold = np.stack([np.median(X[k].astype(np.float32), axis=0) for k in range(nl)])
+        self.gold = gold
         self.tents = _tents(h, w)
         regions = _regions(gold, int(p["lc_regions"])) if int(p["lc_regions"]) > 1 else []
         gfeats = [[g - g.mean(), _gauss(g, 1.5) - g] for g in gold]
@@ -428,6 +455,11 @@ def find(X, searched, p, rule="first", progress=None):
                      "r": 1.6 * scales[SIG[first, i, yy, xx]], "score": score})
         if feat is not None:
             dets[-1]["features"] = feat.row(i, y, x, first, float(SIG[first, i, yy, xx]))
+    l0 = p.get("lc_layer0_index") # Index of the scan's layer 0 among the loaded layers (set by void_detect)
+    if l0 is not None and p["lc_layer0_check"] != "off" and dets and not searched[l0]:
+        # Already visible on layer 0 (not searched there: noisy, bubbles): see presence
+        for d in dets:
+            d["layer0_z"] = presence(X, ctx.gold, l0, d["i"], d["y"], d["x"], max(2.0, 0.8 * d["r"]))
     if model is not None and dets:
         sc = model.scores([d["features"] for d in dets])
         for d, v in zip(dets, sc):

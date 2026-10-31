@@ -657,7 +657,7 @@ def place_found(vm, found, rects, grid_cfg, coord_transform):
     """Places finds of detect_voids in vm (inside the caller's begin_change / end_change). Returns {type: n}."""
     to_raw = coord_transform.deskew_to_raw if coord_transform else (lambda x, y: (x, y))
     types = {}
-    for layer, gx, gy, rx, ry, score, vtype, cell, extent, _ in found:
+    for layer, gx, gy, rx, ry, score, vtype, cell, extent, c in found:
         # Placed like a hand marking (same function as a click). Corner-anchored types attach
         # to the bbox corner nearest the blob, sized to its far extent corner (like drawing
         # it from the corner).
@@ -672,6 +672,8 @@ def place_found(vm, found, rects, grid_cfg, coord_transform):
                           hint=(gx, gy), drag_point=far)
         v["auto"] = "detected" # Only the dashed outline until reviewed (any edit clears it)
         v["score"] = round(float(score), 1)
+        if c.get("layer0"):
+            v["layer0"] = True # Already visible on layer 0 (bubble?): see void_layer_change.presence
         types[vtype] = types.get(vtype, 0) + 1
     return types
 
@@ -721,6 +723,7 @@ def _layer_change(read_layer, layer_numbers, skip, order, rects, size, p, progre
         if on_cells is not None:
             on_cells([cells[i]], 0.9)
         return progress is None or progress(n0 + (total - n0) * i // max(n, 1), total, t)
+    p = dict(p, lc_layer0_index=layer_numbers.index(0) if 0 in layer_numbers else None)
     res = vlc.find(X, searched, p, p.get("layer_rule", "first"),
                    chip_done if (progress or on_cells) else None)
     if res is None:
@@ -742,9 +745,21 @@ def _layer_change(read_layer, layer_numbers, skip, order, rects, size, p, progre
              "status": "kept", "extent": extent}
         if "learned" in d:
             c["learned"] = d["learned"]
+        z0 = d.get("layer0_z")
+        if z0 is not None:
+            c["layer0_z"] = z0
+            if abs(z0) >= float(p.get("lc_layer0_z", vlc.DEFAULTS["lc_layer0_z"])):
+                if p.get("lc_layer0_check", vlc.DEFAULTS["lc_layer0_check"]) == "reject":
+                    c["status"] = "layer0" # Already visible on layer 0: not marked
+                    comps.setdefault((layer, cell), []).append(c)
+                    continue
+                c["layer0"] = True # Marked, flagged for the review
         comps.setdefault((layer, cell), []).append(c)
         f = accept((layer, gx, gy, rx, ry, d["score"], None, cell, extent, c))
         if f is not None:
+            t0 = p.get("lc_layer0_type")
+            if c.get("layer0") and t0:
+                f = f[:6] + (t0,) + f[7:] # Its own type for the review (e.g. "Bubble?")
             found.append(f)
     for (layer, cell), cands in collected.items():
         p["learn"](layer, cell, cands)
