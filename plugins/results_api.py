@@ -23,6 +23,10 @@ The functions below are called by the program:
     parse_wafer_id(file_name, settings) -> str          GUI thread   optional: wafer ID from the opened
                                                                      file name (else config.json
                                                                      "wafer_id": {"pattern": ...})
+    product_for(wafer_id, file_name, settings) -> str   unattended   optional: product of a measured wafer
+    notify(summary, settings)                           unattended   optional: review request (mail, ...)
+                                                                     (tools/auto_run.py, docs/AUTO_RUN.md;
+                                                                     settings = config.json "auto_run")
 
 ctx (read only) describes the current state:
     app_version, timestamp (ISO 8601), user, host
@@ -142,6 +146,28 @@ def fetch_bonding_map(ctx, settings):
 #     # e.g. "LOT1234_W07_SAT.tif" -> "LOT1234-07"
 #     lot, wafer = file_name.split("_")[:2]
 #     return f"{lot}-{wafer[1:]}"
+
+
+# Optional, unattended pipeline (tools/auto_run.py, docs/AUTO_RUN.md): product of a measured wafer
+# (overrides config.json "auto_run": {"products": [{"pattern", "product"}]} and products.json "default").
+# settings: config.json "auto_run".
+# def product_for(wafer_id, file_name, settings):
+#     # e.g. from the lot prefix, or ask the MES: GET http://mes/api/wafer/{wafer_id} -> {"product": ...}
+#     return {"LOTA": "WF_A", "LOTB": "WF_B"}.get(wafer_id[:4])
+
+
+# Optional, unattended pipeline: tells a reviewer that a wafer is done (mail, messenger, ...).
+# summary: summary.json content (status "ok" / "needs_attention" / "error", reason, wafer_id, product,
+# output_dir, counts, qc, steps). Without this function only review_queue.jsonl and the console report it.
+# def notify(summary, settings):
+#     cfg = settings.get("notify") or {}            # e.g. "auto_run": {"notify": {"webhook": "http://..."}}
+#     text = f"[{summary['status']}] {summary['wafer_id']} ({summary['product']}): " \
+#            f"{summary['counts']['voids']} voids, review in {summary['output_dir']}"
+#     if summary["reason"]:
+#         text += f"\n{summary['reason']}"
+#     data = json.dumps({"text": text}).encode("utf-8")
+#     req = urllib.request.Request(cfg["webhook"], data=data, headers={"Content-Type": "application/json"})
+#     urllib.request.urlopen(req, timeout=10).close()
 
 
 def to_voids(data, ctx):

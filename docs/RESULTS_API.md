@@ -73,7 +73,11 @@ def fetch(ctx, settings) -> object      # 응답(파싱된 JSON 등), to_voids�
 def to_voids(data, ctx) -> dict | list  # voids.json 형식
 def fetch_bonding_map(ctx, settings) -> str | list | dict   # ctx["wafer_id"]의 본딩맵
 def parse_wafer_id(file_name, settings) -> str              # 선택: 파일 이름 -> Wafer ID
+def product_for(wafer_id, file_name, settings) -> str       # 선택, 자동 실행: 제품 이름
+def notify(summary, settings) -> None                       # 선택, 자동 실행: 검토 요청 알림
 ```
+
+`product_for`, `notify`는 자동 실행(`tools/auto_run.py`)에서만 부르고 `settings`로 `config.json`의 `"auto_run"`을 받습니다. [AUTO_RUN.md](AUTO_RUN.md)를 보세요.
 
 `fetch_bonding_map`이 돌려줄 수 있는 형식:
 
