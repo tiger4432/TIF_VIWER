@@ -2019,6 +2019,7 @@ class MainWindow(QMainWindow):
         self.glw.detect_cells = None
 
     def _detect_finished(self, job, result, error, refs):
+        job.deleteLater() # Also for an aborted run (file closed): frees the job and its slots' captured data
         if job is not self._detect_job:
             return
         self._end_detect()

@@ -70,4 +70,5 @@ class DetectJob(QObject):
         finally:
             if reader is not None:
                 reader.close()
+            self._args = None # The void snapshot etc. are not needed any more
         self.finished.emit(None if self._cancel.is_set() else result, error)
