@@ -77,11 +77,38 @@ def build_context(mw, settings):
     }
 
 
+def _cells_to_rows(cells, origin=0):
+    """
+    Coordinate list -> rows: [{"row", "col", "value"}] (or "y" / "x" for row / col) or
+    [[row, col, value]], grid cell numbers from `origin` (0: top-left cell is row 0, col 0).
+    Cells not listed are empty (not bonded).
+    """
+    pts = []
+    for c in cells:
+        if isinstance(c, dict):
+            r, k = c.get("row", c.get("y")), c.get("col", c.get("x"))
+            v = c.get("value", c.get("key", "1"))
+        else:
+            r, k, v = (list(c) + ["1"])[:3]
+        if r is None or k is None:
+            raise ValueError(f"bonding map cell without row / col: {c}")
+        pts.append((int(r) - origin, int(k) - origin, "" if v is None else str(v)))
+    if not pts:
+        raise ValueError("empty bonding map cell list")
+    if min(p[0] for p in pts) < 0 or min(p[1] for p in pts) < 0:
+        raise ValueError(f"bonding map cell before the origin {origin}")
+    rows = [[""] * (max(p[1] for p in pts) + 1) for _ in range(max(p[0] for p in pts) + 1)]
+    for r, k, v in pts:
+        rows[r][k] = v
+    return rows
+
+
 def normalize_bonding_map(result):
     """
     fetch_bonding_map() result -> (map text as pasted from Excel, reject values or None).
-    Accepted: text (tab / comma separated rows), a list of rows, or a dict with "text" or "rows"
-    and optionally "reject_values" (list or comma separated text).
+    Accepted: text (tab / comma separated rows), a list of rows, or a dict with "text", "rows" or
+    "cells" (coordinate list, see _cells_to_rows; "origin": 0 or 1) and optionally
+    "reject_values" (list or comma separated text).
     """
     reject = None
     if isinstance(result, dict):
@@ -90,7 +117,13 @@ def normalize_bonding_map(result):
             reject = [v.strip() for v in reject.split(",") if v.strip()]
         elif reject is not None:
             reject = [str(v) for v in reject]
-        result = result.get("text", result.get("rows"))
+        if result.get("cells") is not None:
+            rows = _cells_to_rows(result["cells"], int(result.get("origin", 0)))
+            # Row / column numbers as headers, so numeric values are never taken for a header
+            head = "\t".join(["0"] + [str(i) for i in range(len(rows[0]))]) # Numeric corner: both headers detected
+            return head + "\n" + "\n".join("\t".join([str(i)] + r) for i, r in enumerate(rows)), reject
+        else:
+            result = result.get("text", result.get("rows"))
     if isinstance(result, (list, tuple)):
         result = "\n".join("\t".join("" if v is None else str(v) for v in row) for row in result)
     if not isinstance(result, str) or not result.strip():

@@ -546,7 +546,8 @@ class BondingMap:
         reject = {str(v).strip() for v in reject_values if str(v).strip()}
         self.source_text = text # Saved with exports (bonding_map.txt)
         self.reject_values = sorted(reject)
-        lines = text.strip().split('\n')
+        # Only line breaks at the ends: a leading tab is an empty first cell (empty wafer corners)
+        lines = [ln for ln in text.replace('\r\n', '\n').strip('\n').split('\n')]
         if not lines: return
 
         raw_grid = []
