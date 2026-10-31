@@ -58,7 +58,7 @@ DEFAULTS = {
     "lc_border": 10, # Working px at the chip border not searched
     "lc_register": False, # Layers of each chip moved onto its first layer (sub-pixel; a scan's layers are aligned)
     "lc_workers": 0, # Chips fitted in parallel (0 = CPU count, 1 without threadpoolctl)
-    "lc_cand_threshold": 8.0, # Learned filter: candidates down to this place score (Train)
+    "lc_cand_threshold": 5.0, # Learned filter: candidates down to this place score (Train; synthetic: 8 -> 5 missed 12.7 -> 11.0 % at 1 false per wafer)
     "lc_layer0_check": "flag", # Voids already visible on layer 0 (bubbles?): "flag" / "reject" / "off" (see presence)
     "lc_layer0_z": 1.0, # Presence on layer 0 from this |z| on (core remainder / ring noise)
     "lc_layer0_type": None, # "flag": also this void type for them (when declared)
