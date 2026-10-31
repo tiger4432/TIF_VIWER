@@ -1828,8 +1828,11 @@ class MainWindow(QMainWindow):
         path = void_learn.model_path(self._config().get("void_detect", {}), method)
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
+            # Layer change: cut for a false-detection budget per wafer (config lc_fp_per_wafer, default 1)
+            fp_target = float(self._config().get("void_detect", {}).get("lc_fp_per_wafer", 1.0)) if lc else None
             data = void_learn.train_model(cand_thr, path, rounds=400 if lc else 200, dataset=dataset,
-                                          features=void_layer_change.FEATURES if lc else None, trees=lc)
+                                          features=void_layer_change.FEATURES if lc else None, trees=lc,
+                                          fp_per_file=fp_target)
         except ValueError as e:
             QMessageBox.warning(self, "Train", f"Added {len(rows)} candidates of this file. Not trained yet: {e}.")
             return
@@ -1839,10 +1842,13 @@ class MainWindow(QMainWindow):
         self.chk_learned.setChecked(True)
         pct = lambda v: int(round(100 * v))
         short = (f"L{'C' if lc else '1'} f{data['files']} v{data['voids']} n{data['others']} c{covered} h{len(truths)}\n"
-                 f"R{pct(data['cv_recall'])} P{pct(data['cv_precision'])} " + " ".join(data["top_features"][:3]))
+                 f"R{pct(data['cv_recall'])} P{pct(data['cv_precision'])} F{data.get('cv_false_per_file', 0):.1f} "
+                 + " ".join(data["top_features"][:3]))
         full = (f"This file: {len(truths)} hand markings, {covered} found among {len(rows)} candidates\n"
                 f"Training set: {data['files']} files, {data['voids']} voids, {data['others']} other candidates\n"
-                f"Cross-validated by chip: recall {pct(data['cv_recall'])} %, precision {pct(data['cv_precision'])} %\n"
+                f"Cross-validated ({'by file' if lc and data['files'] >= 3 else 'by chip'}): recall {pct(data['cv_recall'])} %, "
+                f"precision {pct(data['cv_precision'])} %, {data.get('cv_false_per_file', 0):.1f} false per file "
+                f"(cut: {data.get('cut_rule', 'best F1')})\n"
                 f"Most used features: {', '.join(data['top_features'])}\n"
                 f"Model: {path}\nTraining set: {dataset}")
         print("Train:\n" + full)

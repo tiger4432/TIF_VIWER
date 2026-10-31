@@ -308,10 +308,23 @@ def _best_cut(s, y):
     return best[1]
 
 
-def cross_validate(X, y, groups, folds=5, rounds=200, trees=False):
-    """Out-of-fold scores (folds by group, e.g. chip) -> (cut, recall, precision). trees: train_trees."""
+def cross_validate(X, y, groups, folds=5, rounds=200, trees=False, fp_per_file=None):
+    """
+    Out-of-fold scores -> (cut, recall, precision, false per file). trees: train_trees.
+    groups: (source file, chip). Folds by chip; with fp_per_file and 3+ files by file (each file
+    scored by a model that never saw it, like a new wafer). Cut: best F1, or with fp_per_file the
+    lowest cut that leaves at most fp_per_file false candidates per file.
+    """
     X, y = np.asarray(X), np.asarray(y)
-    fold = np.array([int(hashlib.md5(str(g).encode()).hexdigest(), 16) % folds for g in groups])
+    srcs = sorted({g[0] for g in groups})
+    by_file = fp_per_file is not None and len(srcs) >= 3
+    if by_file:
+        folds = min(len(srcs), 10)
+        keys = [g[0] for g in groups]
+        fold = np.array([srcs.index(k) % folds if len(srcs) <= 10 else
+                         int(hashlib.md5(str(k).encode()).hexdigest(), 16) % folds for k in keys])
+    else:
+        fold = np.array([int(hashlib.md5(str(g).encode()).hexdigest(), 16) % folds for g in groups])
     oof = np.zeros(len(y))
     for k in range(folds):
         tr, te = fold != k, fold == k
@@ -319,10 +332,16 @@ def cross_validate(X, y, groups, folds=5, rounds=200, trees=False):
             continue
         oof[te] = score_trees(train_trees(X[tr], y[tr], rounds), X[te]) if trees else \
             score(train_stumps(X[tr], y[tr], rounds), X[te])
-    cut = _best_cut(oof, y)
+    if fp_per_file is None:
+        cut = _best_cut(oof, y)
+    else:
+        neg = np.sort(oof[y == 0])[::-1]
+        allowed = int(math.floor(fp_per_file * max(len(srcs), 1)))
+        cut = float(neg[allowed]) + 1e-9 if allowed < len(neg) else float(oof.min()) # Above the (allowed + 1)-th
     pred = oof >= cut
     tp = float((pred & (y > 0)).sum())
-    return cut, tp / max((y > 0).sum(), 1), tp / max(pred.sum(), 1)
+    fp = float((pred & (y == 0)).sum())
+    return cut, tp / max((y > 0).sum(), 1), tp / max(pred.sum(), 1), fp / max(len(srcs), 1)
 
 
 # ----- model / dataset files -----
@@ -394,8 +413,9 @@ def load_dataset(path=None, features=None):
 MAX_NEGATIVES = 200000 # Training rows that are not voids (random subset beyond this)
 
 
-def train_model(cand_threshold, path, rounds=200, dataset=None, features=None, trees=False):
-    """Trains on the whole dataset (trees: gradient-boosted trees, else stumps), saves the model.
+def train_model(cand_threshold, path, rounds=200, dataset=None, features=None, trees=False, fp_per_file=None):
+    """Trains on the whole dataset (trees: gradient-boosted trees, else stumps), saves the model;
+    its cut: best F1, or at most fp_per_file false detections per file (cross_validate).
     Returns its summary dict."""
     features = features or FEATURES
     X, y, groups, sources = load_dataset(dataset, features)
@@ -406,7 +426,7 @@ def train_model(cand_threshold, path, rounds=200, dataset=None, features=None, t
         X, y, groups = X[keep], y[keep], [groups[i] for i in keep]
     if (y > 0).sum() < 3 or (y == 0).sum() < 3:
         raise ValueError("not enough training data (at least 3 voids and 3 non-voids)")
-    cut, rec, prec = cross_validate(X, y, groups, rounds=rounds, trees=trees)
+    cut, rec, prec, fp_file = cross_validate(X, y, groups, rounds=rounds, trees=trees, fp_per_file=fp_per_file)
     used = {}
     if trees:
         model = {"trees": train_trees(X, y, rounds)}
@@ -421,7 +441,8 @@ def train_model(cand_threshold, path, rounds=200, dataset=None, features=None, t
     data = {"version": 1, "features": features, **model, "cut": cut, "cand_threshold": cand_threshold,
             "trained_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "files": len(sources),
             "voids": int((y > 0).sum()), "others": int((y == 0).sum()),
-            "cv_recall": rec, "cv_precision": prec,
+            "cv_recall": rec, "cv_precision": prec, "cv_false_per_file": fp_file,
+            "cut_rule": "best F1" if fp_per_file is None else f"<= {fp_per_file:g} false per file",
             "top_features": [k for k, _ in sorted(used.items(), key=lambda kv: -kv[1])[:5]]}
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
