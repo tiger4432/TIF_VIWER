@@ -44,6 +44,8 @@ Parameters (config.json "void_detect", defaults in DEFAULTS):
                      it and the golden chips; lc_* parameters, see void_layer_change.py)
 """
 import math
+import os
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 from PIL import Image, ImageFilter
@@ -416,29 +418,35 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
         if layer_diffs is None:
             return None
 
+    # Chips are cut on a few threads (the resampling releases the GIL; the reads stay in order)
+    cut = _chip_fine if p.get("fine_cut", p["method"] == "layer_change") else _chip
+
+    def cut_chip(region, quad):
+        return np.clip(_normalize(cut(region, quad, size, factor)), -6e4, 6e4).astype(np.float16)
+
     def read_layer(z, layer, at=None):
         """Aligned, normalized chips {cell: float16} of one layer (at: other rects); None when cancelled."""
         nonlocal step
         chips = {}
-        for cell in order:
-            if progress is not None and not progress(step, n_steps, f"Layer {layer}: reading chips"):
-                stack.release_cache()
-                return None
-            step += 1
-            x0, y0, w, h = (at or rects)[cell]
-            corners = [to_raw(x0, y0), to_raw(x0, y0 + h), to_raw(x0 + w, y0 + h), to_raw(x0 + w, y0)] # PIL QUAD order
-            xs = [q[0] for q in corners]
-            ys = [q[1] for q in corners]
-            rx0, ry0 = max(0, int(math.floor(min(xs)))), max(0, int(math.floor(min(ys))))
-            rx1, ry1 = min(stack.width, int(math.ceil(max(xs)))), min(stack.height, int(math.ceil(max(ys))))
-            if rx1 - rx0 < 4 or ry1 - ry0 < 4:
-                continue
-            region = to_gray(stack.read_region(z, rx0, ry0, rx1 - rx0, ry1 - ry0))
-            quad = tuple(v for q in corners for v in (q[0] - rx0, q[1] - ry0))
-            cut = _chip_fine if p.get("fine_cut", p["method"] == "layer_change") else _chip
-            chips[cell] = np.clip(_normalize(cut(region, quad, size, factor)), -6e4, 6e4).astype(np.float16)
-        stack.release_cache()
-        return chips
+        with ThreadPoolExecutor(max_workers=max(1, min(8, os.cpu_count() or 1))) as pool:
+            for cell in order:
+                if progress is not None and not progress(step, n_steps, f"Layer {layer}: reading chips"):
+                    stack.release_cache()
+                    return None
+                step += 1
+                x0, y0, w, h = (at or rects)[cell]
+                corners = [to_raw(x0, y0), to_raw(x0, y0 + h), to_raw(x0 + w, y0 + h), to_raw(x0 + w, y0)] # PIL QUAD order
+                xs = [q[0] for q in corners]
+                ys = [q[1] for q in corners]
+                rx0, ry0 = max(0, int(math.floor(min(xs)))), max(0, int(math.floor(min(ys))))
+                rx1, ry1 = min(stack.width, int(math.ceil(max(xs)))), min(stack.height, int(math.ceil(max(ys))))
+                if rx1 - rx0 < 4 or ry1 - ry0 < 4:
+                    continue
+                region = to_gray(stack.read_region(z, rx0, ry0, rx1 - rx0, ry1 - ry0))
+                quad = tuple(v for q in corners for v in (q[0] - rx0, q[1] - ry0))
+                chips[cell] = pool.submit(cut_chip, region, quad)
+            stack.release_cache()
+            return {cell: f.result() for cell, f in chips.items()}
 
     lc = p["method"] == "layer_change"
     if lc:
