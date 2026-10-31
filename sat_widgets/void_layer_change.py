@@ -272,20 +272,26 @@ def _feats(L):
 def _robust_fit(y, X, iters=4, clip=3.0, sub=2):
     """
     Remainder y - X coef; coef by least squares on every sub-th pixel, outliers (> clip MADs) refitted
-    out. Columns scaled to unit size first, so the small ridge does not depend on the intensity scale.
+    out. Columns scaled to unit size, so the small ridge does not depend on the intensity scale.
+    X'X is formed once; each refit only takes the outliers' share off it (a few % of the pixels).
     """
-    idx = np.arange(0, y.size, sub)
-    unit = 1.0 / (np.sqrt((X[idx] ** 2).mean(0)) + 1e-12)
-    X = X * unit
-    keep = idx
+    Xs, ys = X[::sub], y[::sub]
+    G, g = Xs.T @ Xs, Xs.T @ ys
+    unit = 1.0 / (np.sqrt(np.diag(G) / len(ys)) + 1e-12)
+    scale = unit[:, None] * unit[None, :]
+    out = None
     for _ in range(iters):
-        Xk = X[keep]
-        A = Xk.T @ Xk
-        A += np.eye(A.shape[0]) * (1e-4 * np.trace(A) / A.shape[0])
-        coef = np.linalg.solve(A, Xk.T @ y[keep])
-        res = y[idx] - X[idx] @ coef
+        if out is None or not out.any():
+            A, r = G, g
+        else:
+            Xo = Xs[out]
+            A, r = G - Xo.T @ Xo, g - Xo.T @ ys[out]
+        As = A * scale
+        As += np.eye(As.shape[0]) * (1e-4 * np.trace(As) / As.shape[0])
+        coef = unit * np.linalg.solve(As, r * unit)
+        res = ys - Xs @ coef
         mad = float(np.median(np.abs(res))) * 1.4826 + 1e-9
-        keep = idx[np.abs(res) < clip * mad]
+        out = np.abs(res) >= clip * mad
     return y - X @ coef
 
 
@@ -313,16 +319,16 @@ class _Context:
     def remainders(self, chip):
         """(NL, h, w) chip -> {target layer: remainder}."""
         h, w = self.shape
-        feats = {}
+        blocks = {} # Columns of a source layer (each layer is a source of up to lc_sources targets)
         out = {}
         for k, base in self.base.items():
-            cols = []
             for j in self.sources[k]:
-                if j not in feats:
-                    feats[j] = _feats(chip[j])
-                cols += [f * t for f in feats[j] for t in self.tents]
-                cols += [feats[j][0] * m for m in self.regions] + [feats[j][1] * m for m in self.regions]
-            X = np.concatenate([base, np.stack([c.ravel() for c in cols], 1)], 1) if cols else base
+                if j not in blocks:
+                    f = _feats(chip[j])
+                    cols = [a * t for a in f for t in self.tents] + [f[0] * m for m in self.regions] + \
+                        [f[1] * m for m in self.regions]
+                    blocks[j] = np.stack([c.ravel() for c in cols], 1).astype(np.float64)
+            X = np.concatenate([base] + [blocks[j] for j in self.sources[k]], 1)
             out[k] = _robust_fit(chip[k].ravel().astype(np.float64), X).reshape(h, w).astype(np.float32)
         return out
 
