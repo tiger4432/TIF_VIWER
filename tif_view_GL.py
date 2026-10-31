@@ -40,6 +40,7 @@ from sat_widgets import void_eval
 from sat_widgets import void_learn
 from sat_widgets import void_seg, seg_data
 from sat_widgets import results_api
+from sat_widgets.auto_run import AutoRunController
 from sat_widgets.products import load_products, GRID_KEYS
 from sat_widgets.app_paths import declaration_path, sync_declarations, default_update_manifest
 from sat_widgets.version import APP_VERSION
@@ -643,6 +644,9 @@ class MainWindow(QMainWindow):
         # Panel order: ... Bonding Map, Auto Calibration, Coordinates, Void Marking, Extraction
         dock_layout.insertWidget(dock_layout.indexOf(gb_map) + 1, gb_calib)
         dock_layout.addWidget(gb_extract)
+        # Auto Run: watched measured files -> automatic marking (sat_widgets/auto_run.py)
+        self.auto_run = AutoRunController(self)
+        dock_layout.addWidget(self.auto_run.panel)
         dock_layout.addStretch()
         
 
@@ -1206,6 +1210,8 @@ class MainWindow(QMainWindow):
             plugin = results_api.load_plugin(settings)
             if callable(getattr(plugin, "parse_wafer_id", None)):
                 wid = plugin.parse_wafer_id(file_name, settings)
+                if isinstance(wid, dict): # {"wafer_id", "lot"}
+                    wid = wid.get("wafer_id")
                 if wid:
                     return str(wid)
         except Exception as e:
@@ -2317,11 +2323,13 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Auto-Level failed: {e}")
 
-    def open_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Open", "", "TIFF (*.tif *.tiff)")
+    def open_file(self, path=None, confirm=True):
+        """Open TIF (dialog), or `path` (Auto Run: confirm=False, no question about unsaved markings)."""
+        if not isinstance(path, str): # Menu action: `checked`
+            path, _ = QFileDialog.getOpenFileName(self, "Open", "", "TIFF (*.tif *.tiff)")
         if not path:
             return
-        if not self._confirm_discard_voids():
+        if confirm and not self._confirm_discard_voids():
             return
 
         # Get Load Limits (inclusive range of absolute layer numbers)
