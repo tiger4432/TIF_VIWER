@@ -1,16 +1,19 @@
 """
-Unattended pipeline of one measured wafer (no window): what an operator does in the viewer, step
-by step, each step with a QC gate. tools/auto_run.py runs it on new files (watch folder).
+Automatic run of one measured wafer: what an operator does in the viewer, step by step, each step
+with a QC gate. The steps work on their own objects (stack reader, grid, VoidManager), no window:
+the viewer's Auto Run (sat_widgets/auto_run.py) runs them on a worker thread and shows the result
+of every step in the window; tools/auto_run.py runs them without a window.
 
-    summary = run_wafer(path, settings)
+    summary = WaferRun(path, settings, on_step=None, cancel=None).run()
 
 Steps (summary["steps"]):
-    wafer_id  patches.json "wafer_id" (projects) > plugin parse_wafer_id(file_name, settings) >
-              config.json "wafer_id" pattern > file name
+    wafer_id  patches.json "wafer_id" (projects) > plugin parse_wafer_id(file_name, settings)
+              (str, or {"wafer_id", "lot"}) > config.json "wafer_id" pattern ("group", "lot_group")
+              > file name
     open      TiffStack (a project folder / patches.json: MosaicTiffStack), layer range
-    product   plugin product_for(wafer_id, file_name, settings) > auto_run "products" rules
-              (regex on the file name, then the wafer ID) > products.json "default"; applied like
-              the viewer's WF Product (grid keys, um_per_px, bbox size, layout, type_rules)
+    product   plugin product_for(wafer_id, file_name, settings) > first auto_run "products" rule
+              whose given patterns ("lot", "wafer_id", "file") all match; none -> needs_attention.
+              Applied like the viewer's WF Product (grid keys, um_per_px, bbox size, layout, type_rules)
     bonding   plugin fetch_bonding_map(ctx, settings) -> BondingMap; grid rows / cols from the map
     bbox      detect_layout -> fit_grid -> grid moved (bboxes keep their place in the cells) ->
               detect_layout again on the fitted grid
@@ -18,18 +21,23 @@ Steps (summary["steps"]):
               of the product when its model file exists)
     save      voids.json + meta.json, summary.json, pipeline.log in the wafer's output folder
     send      optional: plugin send(build_payload(ctx), settings) (auto_run "send_results")
-    notify    review_queue.jsonl in the output root, plugin notify(summary, settings) if it has one
+    notify    plugin notify_review(title, body, recipients, ctx, settings) -> (ok, message);
+              without the plugin function: printed and appended to <output_root>/review_queue.jsonl
 
 A failed gate stops the wafer with status "needs_attention" and the reason; an exception gives
-"error". Either way what exists is saved and the reviewer is notified. Every result is marked
-"review": "pending" (summary.json and meta.json).
+"error"; cancel (threading.Event) gives "cancelled". Except when cancelled, what exists is saved and
+the reviewer is notified. Every result is marked "review": "pending" (summary.json and meta.json).
 
-Settings: config.json "auto_run" (read only) with command line overrides, see docs/AUTO_RUN.md.
-Plugin settings: parse_wafer_id, fetch_bonding_map and send get config.json "results_api" (as in
-the viewer); the new product_for and notify get the "auto_run" settings.
+on_step(run, name, phase): called on the running thread before ("start") and after ("done") every
+step; at "done" the step's result is in the run (grid, bmap, vm, ...).
+
+Settings: config.json "auto_run" (read only), see docs/AUTO_RUN.md. Plugin functions get
+config.json "results_api" as settings (as in the viewer), product_for gets "auto_run".
 """
+import copy
 import datetime
 import getpass
+import glob
 import io
 import json
 import os
@@ -37,6 +45,7 @@ import platform
 import re
 import socket
 import sys
+import threading
 import time
 import traceback
 
@@ -52,7 +61,11 @@ from .void_manager import VoidManager
 
 DEFAULTS = {
     "output_root": "auto_results",
-    "output_dir": "{out}/{product}/{wafer_id}", # {out}, {product}, {wafer_id}, {source_name}, {date}
+    "output_dir": "{out}/{product}/{wafer_id}", # {out}, {product}, {wafer_id}, {lot}, {source_name}, {date}
+    "watch": [],              # Glob patterns of the measured files ("**" recursive)
+    "stable_seconds": 10.0,   # Size and mtime unchanged this long: the file is complete
+    "poll_seconds": 5.0,
+    "state_file": None,       # Default: <output_root>/auto_run_state.json
     "method": "layer_change",
     "use_learned": True,
     "require_bonding_map": True,
@@ -68,9 +81,15 @@ DEFAULTS = {
     },
 }
 
+STEPS = ("wafer_id", "open", "product", "bonding", "bbox", "voids")
+
 
 class GateFailed(Exception):
     """A QC gate stopped the wafer (status needs_attention)."""
+
+
+class Cancelled(Exception):
+    """The run was stopped (Auto Run: Stop)."""
 
 
 class _Tee(io.TextIOBase):
@@ -111,9 +130,11 @@ def _safe(name):
 class WaferRun:
     """State of one wafer through the steps (the headless counterpart of MainWindow)."""
 
-    def __init__(self, path, settings):
+    def __init__(self, path, settings, on_step=None, cancel=None):
         self.path = os.path.abspath(path)
         self.s = merged_settings(settings)
+        self.on_step = on_step
+        self.cancel = cancel or threading.Event()
         self.config_path = self.s.get("config_file") or declaration_path("config.json")
         self.products_path = self.s.get("products_file") or declaration_path("products.json")
         self.config = read_json(self.config_path, {}) or {}
@@ -128,12 +149,12 @@ class WaferRun:
         self.bmap = None
         self.vm = None
         self.product_name, self.product = "", None
-        self.wafer_id = ""
+        self.wafer_id, self.lot = "", ""
         self.cells = []
         self.out_dir = None
         self.summary = {
             "status": "running", "reason": "", "source_file": self.path,
-            "source_name": self.source_name(), "wafer_id": "", "product": "",
+            "source_name": self.source_name(), "wafer_id": "", "lot": "", "product": "",
             "started_at": _now(), "steps": [], "qc": {}, "warnings": [], "models": {},
             "review": "pending",
             "versions": {"app": APP_VERSION, "python": platform.python_version(), "numpy": np.__version__},
@@ -141,10 +162,7 @@ class WaferRun:
 
     # ---------------------------------------------------------------- helpers
     def source_name(self):
-        p = self.path
-        if os.path.basename(p) == "patches.json":
-            p = os.path.dirname(p)
-        return os.path.splitext(os.path.basename(p.rstrip("/\\")))[0]
+        return os.path.splitext(self.file_name())[0]
 
     def file_name(self):
         p = self.path
@@ -190,7 +208,61 @@ class WaferRun:
         g, b = self.grid, self.bmap
         return [(r, c) for r in range(g.rows) for c in range(g.cols) if b is None or b.get_key(r, c)]
 
+    def check_cancel(self):
+        if self.cancel.is_set():
+            raise Cancelled("stopped")
+
+    def _progress1(self, *_):
+        return not self.cancel.is_set()
+
+    def snapshot(self):
+        """Copy of what the window shows (taken on the running thread, applied on the GUI thread)."""
+        return {"wafer_id": self.wafer_id, "lot": self.lot, "product": self.product_name,
+                "grid": {k: getattr(self.grid, k) for k in GRID_KEYS},
+                "bonding": None if self.bmap is None else
+                {"text": getattr(self.bmap, "source_text", ""), "reject_values": list(self.bmap.reject_values)},
+                "voids": copy.deepcopy(self.vm.voids) if self.vm is not None else None,
+                "layers": self.layers()}
+
     # ---------------------------------------------------------------- steps
+    def step_wafer_id(self):
+        name = self.file_name()
+        wid, lot, how = None, None, None
+        pj = self.path if self.path.endswith("patches.json") else os.path.join(self.path, "patches.json")
+        if os.path.isfile(pj): # Saved with the export (as when the viewer opens it)
+            saved = read_json(pj, {}) or {}
+            wid, lot = saved.get("wafer_id"), saved.get("lot")
+            how = "patches.json" if wid else None
+        fn = self.plugin_fn("parse_wafer_id")
+        if not wid and fn is not None:
+            try:
+                res = fn(name, self.results_settings)
+                if isinstance(res, dict):
+                    wid, lot = res.get("wafer_id"), res.get("lot")
+                else:
+                    wid = res
+                how = "plugin"
+            except Exception as e:
+                self.warn(f"plugin parse_wafer_id: {e}")
+        rule = self.config.get("wafer_id") or {}
+        if (not wid or not lot) and rule.get("pattern"):
+            try:
+                m = re.search(rule["pattern"], name)
+                if m:
+                    if not wid:
+                        wid, how = m.group(rule.get("group", 1 if m.groups() else 0)), "config pattern"
+                    if not lot and rule.get("lot_group") is not None:
+                        lot = m.group(rule["lot_group"])
+                elif not wid:
+                    self.warn(f"wafer_id pattern {rule['pattern']!r} does not match {name!r}")
+            except (re.error, IndexError) as e:
+                self.warn(f"wafer_id pattern: {e}")
+        if not wid:
+            wid, how = os.path.splitext(name)[0], "file name"
+        self.wafer_id, self.lot = str(wid).strip(), str(lot or "").strip()
+        self.summary.update(wafer_id=self.wafer_id, lot=self.lot)
+        return {"wafer_id": self.wafer_id, "lot": self.lot, "from": how}
+
     def step_open(self):
         p = self.path
         if os.path.isdir(p):
@@ -212,59 +284,37 @@ class WaferRun:
         return {"layers": [layers[0], layers[-1]], "size": [self.stack.width, self.stack.height],
                 "backend": getattr(self.stack, "backend", "mosaic")}
 
-    def step_wafer_id(self):
-        name = self.file_name()
-        wid, how = None, None
-        pj = self.path if self.path.endswith("patches.json") else os.path.join(self.path, "patches.json")
-        if os.path.isfile(pj): # Saved with the export (as when the viewer opens it)
-            wid = (read_json(pj, {}) or {}).get("wafer_id")
-            how = "patches.json" if wid else None
-        fn = self.plugin_fn("parse_wafer_id")
-        if not wid and fn is not None:
-            try:
-                wid, how = fn(name, self.results_settings), "plugin"
-            except Exception as e:
-                self.warn(f"plugin parse_wafer_id: {e}")
-        if not wid:
-            rule = self.config.get("wafer_id") or {}
-            if rule.get("pattern"):
-                try:
-                    m = re.search(rule["pattern"], name)
-                    if m:
-                        wid, how = m.group(rule.get("group", 1 if m.groups() else 0)), "config pattern"
-                    else:
-                        self.warn(f"wafer_id pattern {rule['pattern']!r} does not match {name!r}")
-                except (re.error, IndexError) as e:
-                    self.warn(f"wafer_id pattern: {e}")
-        if not wid:
-            wid, how = os.path.splitext(name)[0], "file name"
-        self.wafer_id = str(wid).strip()
-        self.summary["wafer_id"] = self.wafer_id
-        return {"wafer_id": self.wafer_id, "from": how}
-
-    def step_product(self):
-        products, default = load_products(self.products_path)
-        name, how = None, None
+    def match_product(self):
+        """(product name, how) from the plugin or the first matching rule, else (None, None)."""
         fn = self.plugin_fn("product_for")
         if fn is not None:
             try:
-                name, how = fn(self.wafer_id, self.file_name(), self.s), "plugin"
+                name = fn(self.wafer_id, self.file_name(), self.s)
+                if name:
+                    return name, "plugin"
             except Exception as e:
                 self.warn(f"plugin product_for: {e}")
+        values = {"lot": self.lot, "wafer_id": self.wafer_id, "file": self.file_name()}
+        for i, rule in enumerate(self.s.get("products") or []):
+            given = [k for k in ("lot", "wafer_id", "file") if rule.get(k)]
+            if not given or not rule.get("product"):
+                self.warn(f"products rule {i + 1}: needs \"product\" and at least one of lot / wafer_id / file")
+                continue
+            try:
+                if all(re.search(rule[k], values[k]) for k in given):
+                    return rule["product"], f"rule {i + 1} ({', '.join(f'{k}={rule[k]!r}' for k in given)})"
+            except re.error as e:
+                self.warn(f"products rule {i + 1}: {e}")
+        return None, None
+
+    def step_product(self):
+        products, _ = load_products(self.products_path)
+        name, how = self.match_product()
         if not name:
-            for rule in self.s.get("products") or []:
-                pat = rule.get("pattern")
-                try:
-                    if pat and (re.search(pat, self.file_name()) or re.search(pat, self.wafer_id)):
-                        name, how = rule.get("product"), f"rule {pat!r}"
-                        break
-                except re.error as e:
-                    self.warn(f"products rule {pat!r}: {e}")
-        if not name:
-            name, how = default, "products.json default"
-        if not name or name not in products:
-            raise GateFailed(f"product {name!r} not declared in {self.products_path}" if name else
-                             f"no product (none declared in {self.products_path})")
+            raise GateFailed(f"no product for lot {self.lot!r} / wafer ID {self.wafer_id!r} "
+                             '(config.json "auto_run": "products" rules)')
+        if name not in products:
+            raise GateFailed(f"product {name!r} not declared in {self.products_path}")
         self.apply_product(name, products[name])
         info = {"product": name, "from": how, "um_per_px": self.vm.um_per_px}
         t = self.vm.types.get(self.bbox_type() or "", {})
@@ -358,7 +408,8 @@ class WaferRun:
 
     def _layout(self, tid, size, params, zs):
         res = detect_layout(self.stack, zs, self.abs_layer(0), self.grid, self.ct, self.vm, tid, size,
-                            self.cells, params)
+                            self.cells, params, self._progress1)
+        self.check_cancel()
         if res is None:
             raise GateFailed("bbox: not enough chips to align (at least 3 bonded cells)")
         self.vm.resnap(self.grid, self.ct)
@@ -484,10 +535,11 @@ class WaferRun:
         params = self.detect_params()
         refs = self.vm.reference_bboxes(self.grid, self.ct)
         res = void_detect.detect_voids(self.stack, self.grid, self.ct, refs, self.cells, self.layers(), self.vm,
-                                       type_name, params, apply=True)
+                                       type_name, params, self._progress1, apply=True)
         self.stack.release_cache()
+        self.check_cancel()
         if res is None:
-            raise GateFailed("void detection cancelled")
+            raise GateFailed("void detection stopped")
         info = {"method": params["method"], "type": type_name, "added": res["added"],
                 "per_layer": {str(k): v for k, v in res["per_layer"].items()},
                 "per_type": dict(res.get("types", {})),
@@ -500,12 +552,15 @@ class WaferRun:
             raise GateFailed(f"{res['added']} voids ({per_chip:.1f} per chip > {lim}): check the wafer / grid")
         return info
 
+    # ---------------------------------------------------------------- results
+    def output_root(self):
+        return self.s.get("output_root") or DEFAULTS["output_root"]
+
     def output_dir(self):
-        out = self.s.get("output_root") or "auto_results"
         pattern = self.s.get("output_dir") or DEFAULTS["output_dir"]
-        path = pattern.format(out=out, product=_safe(self.product_name or "no_product"),
-                              wafer_id=_safe(self.wafer_id or self.source_name()), source_name=_safe(self.source_name()),
-                              date=datetime.date.today().isoformat())
+        path = pattern.format(out=self.output_root(), product=_safe(self.product_name or "no_product"),
+                              wafer_id=_safe(self.wafer_id or self.source_name()), lot=_safe(self.lot or "no_lot"),
+                              source_name=_safe(self.source_name()), date=datetime.date.today().isoformat())
         os.makedirs(path, exist_ok=True)
         return path
 
@@ -532,9 +587,9 @@ class WaferRun:
             if self.ct is None:
                 self.update_transform()
             extra = {"app_version": APP_VERSION, "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                     "source_file": self.path, "wafer_id": self.wafer_id, "product": self.product_name,
-                     "layers": self.layers(), "auto_run": {"status": self.summary["status"],
-                                                           "reason": self.summary["reason"]},
+                     "source_file": self.path, "wafer_id": self.wafer_id, "lot": self.lot,
+                     "product": self.product_name, "layers": self.layers(),
+                     "auto_run": {"status": self.summary["status"], "reason": self.summary["reason"]},
                      "review": "pending"}
             self.vm.save_to_file(os.path.join(self.out_dir, "voids.json"), self.grid, self.bmap, self.ct, extra)
             if self.bmap is not None:
@@ -558,34 +613,63 @@ class WaferRun:
             self.warn(f"results not sent: {msg}")
         return {"ok": bool(ok), "message": str(msg)}
 
+    def review_text(self):
+        """(title, body) of the review request."""
+        s, c = self.summary, self.summary.get("counts") or {}
+        who = f"{self.product_name or '-'} {self.wafer_id or self.source_name()}"
+        if s["status"] == "ok":
+            title = f"[TIF Viewer] {who}: {c.get('voids', 0)} voids, review"
+        else:
+            title = f"[TIF Viewer] {who} {s['status'].replace('_', ' ')}: {s['reason']}"
+        fmt = lambda d: ", ".join(f"{k}: {v}" for k, v in (d or {}).items()) or "-"
+        qc = ", ".join(f"{k}: {v:.3g}" if isinstance(v, float) else f"{k}: {v}" for k, v in s["qc"].items()) or "-"
+        lines = [f"Product: {self.product_name or '-'}", f"Lot: {self.lot or '-'}", f"Wafer ID: {self.wafer_id or '-'}",
+                 f"File: {self.path}", f"Status: {s['status']}" + (f" ({s['reason']})" if s["reason"] else ""),
+                 f"Voids: {c.get('voids', 0)}  (per layer: {fmt(c.get('per_layer'))}; per type: {fmt(c.get('per_type'))})",
+                 f"BBoxes: {c.get('bboxes', 0)} of {c.get('bonded_cells', 0)} bonded cells",
+                 f"QC: {qc}", f"Results: {s.get('output_dir', '-')}"]
+        if s["warnings"]:
+            lines.append("Warnings: " + "; ".join(s["warnings"]))
+        return title, "\n".join(lines)
+
+    def review_queue_path(self):
+        return os.path.join(self.output_root(), "review_queue.jsonl")
+
     def notify(self):
-        root = self.s.get("output_root") or "auto_results"
-        os.makedirs(root, exist_ok=True)
-        entry = {k: self.summary.get(k) for k in ("status", "reason", "wafer_id", "product", "source_file",
-                                                   "output_dir", "finished_at", "counts", "review")}
-        with open(os.path.join(root, "review_queue.jsonl"), "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False, default=_jsonable) + "\n")
-        c = self.summary.get("counts") or {}
-        print(f"[auto_run] {self.summary['status'].upper()}: {self.wafer_id or self.source_name()} "
-              f"({self.product_name or '-'}) {c.get('voids', 0)} voids, {c.get('bboxes', 0)} bboxes "
-              f"-> {self.summary.get('output_dir')}" + (f"  [{self.summary['reason']}]" if self.summary["reason"] else ""))
-        fn = self.plugin_fn("notify")
-        if fn is not None:
-            fn(self.summary, self.s)
-            return {"plugin": True}
-        return {"plugin": False}
+        title, body = self.review_text()
+        recipients = list((self.results_settings.get("notify") or {}).get("recipients") or [])
+        self.summary["review_request"] = {"title": title, "recipients": recipients}
+        print(f"[auto_run] {self.summary['status'].upper()}: {title}", flush=True)
+        fn = self.plugin_fn("notify_review")
+        if fn is None:
+            append_review_queue(self.review_queue_path(), title, body, recipients, self.summary)
+            return {"plugin": False, "ok": True, "message": "written to review_queue.jsonl"}
+        ctx = dict(build_context(self), summary=self.summary, review_queue=self.review_queue_path())
+        try:
+            ok, msg = fn(title, body, recipients, ctx, self.results_settings)
+        except Exception as e:
+            print(traceback.format_exc())
+            ok, msg = False, f"{type(e).__name__}: {e}"
+        if not ok: # Never lost: kept in review_queue.jsonl
+            self.warn(f"review request not sent ({msg}); written to review_queue.jsonl")
+            append_review_queue(self.review_queue_path(), title, body, recipients, self.summary)
+        return {"plugin": True, "ok": bool(ok), "message": str(msg)}
 
     # ---------------------------------------------------------------- run
     def run_step(self, name, fn):
         t0 = time.monotonic()
         entry = {"name": name, "ok": False}
         self.summary["steps"].append(entry)
-        print(f"[auto_run] {name}...")
+        print(f"[auto_run] {name}...", flush=True)
+        if self.on_step is not None:
+            self.on_step(self, name, "start")
         try:
             entry["info"] = fn()
             entry["ok"] = True
         finally:
             entry["seconds"] = round(time.monotonic() - t0, 2)
+        if self.on_step is not None:
+            self.on_step(self, name, "done")
 
     def run(self):
         log = io.StringIO()
@@ -594,11 +678,12 @@ class WaferRun:
         t0 = time.monotonic()
         try:
             try:
-                for name, fn in (("wafer_id", self.step_wafer_id), ("open", self.step_open),
-                                 ("product", self.step_product), ("bonding", self.step_bonding),
-                                 ("bbox", self.step_bbox), ("voids", self.step_voids)):
-                    self.run_step(name, fn)
+                for name in STEPS:
+                    self.check_cancel()
+                    self.run_step(name, getattr(self, "step_" + name))
                 self.summary["status"] = "ok"
+            except Cancelled:
+                self.summary.update(status="cancelled", reason="stopped by the user")
             except GateFailed as e:
                 self.summary.update(status="needs_attention", reason=str(e))
                 self.summary["steps"][-1]["error"] = str(e)
@@ -611,16 +696,16 @@ class WaferRun:
                 print(tb)
             self.summary["finished_at"] = _now()
             self.summary["seconds"] = round(time.monotonic() - t0, 2)
+            if self.summary["status"] == "cancelled": # Processed again later: nothing saved or sent
+                return self.summary
             for name, fn in (("save", self.save), ("send", self.send), ("notify", self.notify)):
                 try:
                     self.run_step(name, fn)
                 except Exception as e:
-                    tb = traceback.format_exc()
-                    print(tb)
+                    print(traceback.format_exc())
                     self.warn(f"{name} failed: {e}")
                     if name == "save" and self.out_dir is None: # Somewhere to report it
-                        self.out_dir = os.path.join(self.s.get("output_root") or "auto_results", "_failed",
-                                                    _safe(self.source_name()))
+                        self.out_dir = os.path.join(self.output_root(), "_failed", _safe(self.source_name()))
                         os.makedirs(self.out_dir, exist_ok=True)
                         self.summary["output_dir"] = os.path.abspath(self.out_dir)
         finally:
@@ -635,6 +720,18 @@ class WaferRun:
             with open(os.path.join(self.out_dir, "pipeline.log"), "w", encoding="utf-8") as f:
                 f.write(log.getvalue())
         return self.summary
+
+
+def append_review_queue(path, title, body, recipients, summary=None):
+    """Default review request: printed and appended to review_queue.jsonl (one JSON object per line)."""
+    print(f"[review] {title}\n{body}")
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    entry = {"title": title, "body": body, "recipients": list(recipients or []), "queued_at": _now()}
+    for k in ("status", "reason", "wafer_id", "lot", "product", "source_file", "output_dir", "review"):
+        if summary and k in summary:
+            entry[k] = summary[k]
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False, default=_jsonable) + "\n")
 
 
 def _layout_info(res, n_cells):
@@ -678,6 +775,7 @@ def build_context(run):
         "source_file": source,
         "source_name": run.source_name(),
         "wafer_id": run.wafer_id,
+        "lot": run.lot,
         "layers": layers,
         "current_layer": layers[0] if layers else 0,
         "grid": {k: getattr(g, k) for k in ("start_x", "start_y", "pitch_x", "pitch_y", "rows", "cols", "angle")},
@@ -688,10 +786,101 @@ def build_context(run):
         "types": {k: dict(v) for k, v in vm.types.items()} if vm is not None else {},
         "last_export_dir": run.out_dir,
         "settings": run.results_settings,
-        "auto_run": True, # Called by the unattended pipeline (no window)
+        "auto_run": True, # Called by the automatic run
     }
 
 
 def run_wafer(path, settings=None):
     """Runs every step on one measured file / project folder; returns the summary (also in summary.json)."""
     return WaferRun(path, settings).run()
+
+
+# -------------------------------------------------------------------- watching
+def watch_globs(settings):
+    """auto_run "watch": one glob pattern or a list ("**" recursive)."""
+    w = settings.get("watch") or []
+    return [w] if isinstance(w, str) else [str(p) for p in w]
+
+
+class State:
+    """Finished files: path -> {size, mtime, status, output_dir, finished_at}. Written atomically."""
+
+    def __init__(self, path):
+        self.path = path
+        self.data = read_json(path, {}) or {}
+
+    def done(self, path, size, mtime):
+        e = self.data.get(path)
+        return e is not None and e.get("size") == size and e.get("mtime") == mtime
+
+    def record(self, path, size, mtime, summary):
+        self.data[path] = {"size": size, "mtime": mtime, "status": summary.get("status"),
+                           "reason": summary.get("reason", ""), "output_dir": summary.get("output_dir"),
+                           "finished_at": summary.get("finished_at")}
+        os.makedirs(os.path.dirname(os.path.abspath(self.path)), exist_ok=True)
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(self.data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp, self.path)
+
+
+class FileWatcher:
+    """
+    Polls glob patterns; a matching file is ready when its size and mtime did not change for
+    stable_seconds (copy finished) and the state has no record of it with that size / mtime.
+    poll() returns each ready file once (until forget(path)). Safe to call from any one thread.
+    """
+
+    def __init__(self, globs, stable_seconds, state):
+        self.globs = list(globs)
+        self.stable = float(stable_seconds)
+        self.state = state
+        self.seen = {} # path -> (size, mtime, unchanged since)
+        self.handed = {} # path -> (size, mtime) returned by poll, not recorded yet
+
+    @staticmethod
+    def for_settings(settings):
+        s = merged_settings(settings)
+        state = State(s.get("state_file") or os.path.join(s["output_root"], "auto_run_state.json"))
+        return FileWatcher(watch_globs(s), s["stable_seconds"], state)
+
+    def files(self):
+        out = set()
+        for pattern in self.globs:
+            try:
+                for p in glob.glob(os.path.expanduser(pattern), recursive=True):
+                    if os.path.isfile(p):
+                        out.add(os.path.abspath(p))
+            except OSError as e: # Network share away for a moment
+                print(f"[auto_run] {pattern}: {e}")
+        return sorted(out)
+
+    def poll(self):
+        ready, now = [], time.time()
+        for p in self.files():
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue # Removed / renamed meanwhile
+            key = (st.st_size, st.st_mtime)
+            if self.state.done(p, *key) or self.handed.get(p) == key:
+                continue
+            prev = self.seen.get(p)
+            if prev is None or prev[:2] != key:
+                self.seen[p] = key + (now,)
+                continue
+            if now - prev[2] < self.stable or st.st_size == 0:
+                continue
+            self.handed[p] = key
+            self.seen.pop(p, None)
+            ready.append(p)
+        return ready
+
+    def finished(self, path, summary):
+        """Records a processed file (not a cancelled one: it is offered again)."""
+        key = self.handed.pop(path, None)
+        if key is not None and summary.get("status") != "cancelled":
+            self.state.record(path, key[0], key[1], summary)
+
+    def forget(self, path):
+        self.handed.pop(path, None)

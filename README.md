@@ -219,16 +219,11 @@ WF Product 묶음에 연 파일 이름(**File**)과 **Wafer ID** 칸이 있습�
 
 마킹 결과를 다른 시스템으로 보내거나 다른 시스템에서 불러오는 부분은 직접 작성하는 플러그인 `plugins/results_api.py`로 분리했습니다(Extraction 패널의 **Results API: Preview / Send / Load**). 페이로드 만들기(`build_payload`), 전송(`send`), 요청(`fetch`), 응답 변환(`to_voids`) 네 함수를 고치면 되고, 버튼을 누를 때마다 파일을 다시 읽으므로 재시작·재빌드가 필요 없습니다. 설정은 `config.json`의 `"results_api"`입니다. 자세한 내용은 [docs/RESULTS_API.md](docs/RESULTS_API.md)를 보세요.
 
-### 자동 실행 (측정 파일 감시)
+### 자동 실행 (Auto Run)
 
-측정된 TIF가 폴더에 들어오면 화면 없이 Wafer ID → 제품 → 본딩맵 → bbox 검출·Fit Grid → 보이드 검출 → 저장까지 하고 검토를 요청합니다(`review_queue.jsonl`, 플러그인 `notify`). 단계마다 품질 관문이 있어 이상하면 `needs_attention`과 이유를 남깁니다. 결과 폴더의 `voids.json`을 뷰어로 열어 점선 마킹만 확인하면 됩니다.
+Extraction 아래 **Auto Run** 묶음에 측정 파일 경로(glob, 예: `D:/SAT/raw/**/*.tif`)를 넣고 **Start Auto Run**을 누르면, 새 파일이 다 써질 때마다 창에서 차례로 Wafer ID → 제품(Lot / Wafer ID 규칙) → 본딩맵 → Detect BBOX + Fit Grid → Detect Voids → 저장(`voids.json`, `meta.json`, `summary.json`)까지 하고 검토 요청 메일을 보냅니다(플러그인 `notify_review`). 단계마다 품질 관문이 있어 이상하면 `needs_attention`과 이유를 남기고 다음 파일로 넘어갑니다. 사람은 결과의 점선 마킹만 확인하면 됩니다. 창 없이 `python tools/auto_run.py --watch`로도 돌릴 수 있습니다.
 
-```bash
-python tools/auto_run.py --watch D:\SAT\in        # 폴더 감시 (Ctrl+C 종료)
-python tools/auto_run.py --once  D:\SAT\in\LOT1234_W07.tif
-```
-
-설정은 `config.json`의 `"auto_run"`입니다. 자세한 내용은 [docs/AUTO_RUN.md](docs/AUTO_RUN.md)를 보세요.
+설정은 `config.json`의 `"auto_run"`(감시 경로, 제품 규칙, 품질 기준)과 `"results_api": {"notify"}`(메일 서버)입니다. 자세한 내용은 [docs/AUTO_RUN.md](docs/AUTO_RUN.md)를 보세요.
 
 ### WF 제품군 (`products.json`)
 

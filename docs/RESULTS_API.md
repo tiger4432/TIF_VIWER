@@ -73,11 +73,12 @@ def fetch(ctx, settings) -> object      # 응답(파싱된 JSON 등), to_voids�
 def to_voids(data, ctx) -> dict | list  # voids.json 형식
 def fetch_bonding_map(ctx, settings) -> str | list | dict   # ctx["wafer_id"]의 본딩맵
 def parse_wafer_id(file_name, settings) -> str              # 선택: 파일 이름 -> Wafer ID
-def product_for(wafer_id, file_name, settings) -> str       # 선택, 자동 실행: 제품 이름
-def notify(summary, settings) -> None                       # 선택, 자동 실행: 검토 요청 알림
+def product_for(wafer_id, file_name, settings) -> str | None   # 선택, Auto Run: 제품 이름 (settings = "auto_run")
+def notify_review(title, body, recipients, ctx, settings) -> (bool, str)   # Auto Run: 검토 요청 알림
 ```
 
-`product_for`, `notify`는 자동 실행(`tools/auto_run.py`)에서만 부르고 `settings`로 `config.json`의 `"auto_run"`을 받습니다. [AUTO_RUN.md](AUTO_RUN.md)를 보세요.
+- `parse_wafer_id`는 `{"wafer_id": ..., "lot": ...}`도 돌려줄 수 있습니다(뷰어는 `wafer_id`만 씀, Auto Run은 Lot으로 제품을 고름).
+- `notify_review`: 기본은 `"results_api": {"notify": {"url": "http://mailserver/send?to={to}&title={title}&body={body}", "recipients": [...], "recipients_sep": ",", "timeout": 30, "headers": {}}}`로 GET 요청(세 자리표시자는 URL 인코딩), `url`이 없으면 출력하고 `review_queue.jsonl`에 추가합니다. 인자·반환·기본 동작의 자세한 약속은 [AUTO_RUN.md 7절](AUTO_RUN.md#7-검토-요청-알림-notify_review-직접-바꿀-수-있는-곳)에 있습니다.
 
 `fetch_bonding_map`이 돌려줄 수 있는 형식:
 

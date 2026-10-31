@@ -11,7 +11,9 @@ Settings: config.json "results_api" (passed as `settings`), e.g.
         "receive": {"url": "http://server/api/voids?wafer={wafer_id}", "timeout": 30,
                     "replace": true},
         "bonding_map": {"url": "http://mapserver/api/bondingmap/{wafer_id}", "timeout": 30,
-                        "auto_fetch": true}    # fetch when a file is opened (wafer ID parsed)
+                        "auto_fetch": true},   # fetch when a file is opened (wafer ID parsed)
+        "notify":  {"url": "http://mailserver/send?to={to}&title={title}&body={body}",
+                    "recipients": ["a@x.com", "b@x.com"], "recipients_sep": ",", "timeout": 30}
     }
 
 The functions below are called by the program:
@@ -20,13 +22,14 @@ The functions below are called by the program:
     fetch(ctx, settings)        -> data                 background   the request of "Load"
     to_voids(data, ctx)         -> voids.json content   GUI thread   converts the response
     fetch_bonding_map(ctx, settings) -> map             background   "Fetch Map" (wafer ID -> bonding map)
-    parse_wafer_id(file_name, settings) -> str          GUI thread   optional: wafer ID from the opened
+    parse_wafer_id(file_name, settings) -> str | dict   GUI thread   optional: wafer ID from the opened
                                                                      file name (else config.json
                                                                      "wafer_id": {"pattern": ...})
-    product_for(wafer_id, file_name, settings) -> str   unattended   optional: product of a measured wafer
-    notify(summary, settings)                           unattended   optional: review request (mail, ...)
-                                                                     (tools/auto_run.py, docs/AUTO_RUN.md;
-                                                                     settings = config.json "auto_run")
+    product_for(wafer_id, file_name, settings) -> str   Auto Run     optional: product of a measured wafer
+                                                                     (settings = config.json "auto_run")
+    notify_review(title, body, recipients, ctx, settings) -> (ok, message)
+                                                        Auto Run     review request of a finished wafer
+                                                                     (docs/AUTO_RUN.md)
 
 ctx (read only) describes the current state:
     app_version, timestamp (ISO 8601), user, host
@@ -142,32 +145,44 @@ def fetch_bonding_map(ctx, settings):
 
 
 # Optional: wafer ID from the opened file name (overrides config.json "wafer_id": {"pattern": ...}).
+# A dict also gives the lot (Auto Run picks the product from lot / wafer ID).
 # def parse_wafer_id(file_name, settings):
-#     # e.g. "LOT1234_W07_SAT.tif" -> "LOT1234-07"
+#     # e.g. "LOT1234_W07_SAT.tif" -> {"lot": "LOT1234", "wafer_id": "LOT1234-07"}
 #     lot, wafer = file_name.split("_")[:2]
-#     return f"{lot}-{wafer[1:]}"
+#     return {"lot": lot, "wafer_id": f"{lot}-{wafer[1:]}"}
 
 
-# Optional, unattended pipeline (tools/auto_run.py, docs/AUTO_RUN.md): product of a measured wafer
-# (overrides config.json "auto_run": {"products": [{"pattern", "product"}]} and products.json "default").
+# Optional, Auto Run (docs/AUTO_RUN.md): product of a measured wafer (overrides config.json
+# "auto_run": {"products": [{"lot", "wafer_id", "file", "product"}]}). None: the rules decide.
 # settings: config.json "auto_run".
 # def product_for(wafer_id, file_name, settings):
 #     # e.g. from the lot prefix, or ask the MES: GET http://mes/api/wafer/{wafer_id} -> {"product": ...}
 #     return {"LOTA": "WF_A", "LOTB": "WF_B"}.get(wafer_id[:4])
 
 
-# Optional, unattended pipeline: tells a reviewer that a wafer is done (mail, messenger, ...).
-# summary: summary.json content (status "ok" / "needs_attention" / "error", reason, wafer_id, product,
-# output_dir, counts, qc, steps). Without this function only review_queue.jsonl and the console report it.
-# def notify(summary, settings):
-#     cfg = settings.get("notify") or {}            # e.g. "auto_run": {"notify": {"webhook": "http://..."}}
-#     text = f"[{summary['status']}] {summary['wafer_id']} ({summary['product']}): " \
-#            f"{summary['counts']['voids']} voids, review in {summary['output_dir']}"
-#     if summary["reason"]:
-#         text += f"\n{summary['reason']}"
-#     data = json.dumps({"text": text}).encode("utf-8")
-#     req = urllib.request.Request(cfg["webhook"], data=data, headers={"Content-Type": "application/json"})
-#     urllib.request.urlopen(req, timeout=10).close()
+def notify_review(title, body, recipients, ctx, settings):
+    """
+    Automatic run (Auto Run / tools/auto_run.py): asks a reviewer to check a finished wafer.
+    title, body: text built by the program; recipients: config "results_api": {"notify": {"recipients"}}.
+    ctx: as above plus "summary" (summary.json content) and "review_queue" (path of review_queue.jsonl).
+    Returns (ok, message). Default: GET notify.url with {to}, {title}, {body} filled in (URL-encoded,
+    recipients joined by notify.recipients_sep, default ","); no url: printed and appended to
+    review_queue.jsonl.
+    """
+    cfg = settings.get("notify") or {}
+    url = cfg.get("url")
+    if not url:
+        entry = {"title": title, "body": body, "recipients": recipients, "wafer_id": ctx["wafer_id"],
+                 "product": ctx["product"], "status": ctx["summary"]["status"], "output_dir": ctx["last_export_dir"],
+                 "queued_at": ctx["timestamp"]}
+        print(f"[review] {title}\n{body}")
+        with open(ctx["review_queue"], "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        return True, "no notify.url: written to review_queue.jsonl"
+    q = lambda v: urllib.parse.quote(str(v), safe="")
+    full = url.format(to=q(cfg.get("recipients_sep", ",").join(recipients)), title=q(title), body=q(body))
+    status, resp = _request(full, dict(cfg, method="GET"))
+    return 200 <= status < 300, f"HTTP {status}: {resp[:300].decode('utf-8', 'replace')}"
 
 
 def to_voids(data, ctx):
