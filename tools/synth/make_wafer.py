@@ -5,6 +5,9 @@ VOID_R="lo,hi": void radius range in chip px (default 6,25; e.g. 3,8 for small v
 LAYOUT_FROM=k: layout (die, lines, bumps, pad) only from layer k on; the layers above show the
     brightness gradient, background and noise only (x LAYOUT_RESID of the layout, default 0.03), as
     real top layers do. Same random draws as without it: the same seed gives the same voids.
+NL_EXTRA=n: n more layers below the NL layers (voids only start on the first NL; they continue
+    below): a deeper scan. The first NL layers are the same as without it.
+NOISE=s: pixel noise standard deviation (8-bit levels, default 4).
     -> OUTDIR/NAME.tif (8-bit pages = layers) and OUTDIR/NAME_truth.json
 
 Grid: origin 100, pitch 300 px, 14 x 14 chips, angle 0.4 deg; chip (bbox) 280 px centred in the cell.
@@ -28,6 +31,8 @@ R = C = 14
 NL = int(os.environ.get("NL", 8))
 LAYOUT_FROM = int(os.environ.get("LAYOUT_FROM", 0))
 LAYOUT_RESID = float(os.environ.get("LAYOUT_RESID", 0.03))
+NL_EXTRA = int(os.environ.get("NL_EXTRA", 0))
+NOISE = float(os.environ.get("NOISE", 4.0))
 R_LO, R_HI = (float(v) for v in os.environ.get("VOID_R", "6,25").split(","))
 SIZE = ORG * 2 + P * R
 m = (P - B) / 2
@@ -96,7 +101,7 @@ order = np.argsort(cid, kind="stable")
 bounds = np.searchsorted(cid[order], np.arange(R * C + 1))
 cell_idx = {(r, c): order[bounds[r * C + c]:bounds[r * C + c + 1]] for (r, c) in truth}
 with tifffile.TiffWriter(os.path.join(W, name + ".tif")) as tw:
-    for k in range(NL):
+    for k in range(NL + NL_EXTRA):
         jit = rng.normal(0, 0.6, (R, C, 2)); gain = rng.uniform(0.85, 1.15, (R, C))
         lxi = np.clip(np.round(lxo + jit[rr, cc, 0]).astype(np.int32), 0, B - 1)
         lyi = np.clip(np.round(lyo + jit[rr, cc, 1]).astype(np.int32), 0, B - 1)
@@ -113,6 +118,6 @@ with tifffile.TiffWriter(os.path.join(W, name + ".tif")) as tw:
                 val[ix] = val[ix] * (1 + (fk - 1) * soft)
         img = np.zeros((SIZE, SIZE), np.float32)
         img[ok] = val
-        img = img * 160 + rng.normal(0, 4, img.shape).astype(np.float32)
+        img = img * 160 + rng.normal(0, NOISE, img.shape).astype(np.float32)
         tw.write(np.clip(img, 0, 255).astype(np.uint8), contiguous=False)
 print(f"written {name}: {len(truth)} voids, {NL} layers, {time.time() - t0:.0f}s")
