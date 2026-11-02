@@ -187,7 +187,7 @@ class MainWindow(QMainWindow):
         # ---------------------------------------------------------
         # Dock Widget for Grid/Map Controls
         # ---------------------------------------------------------
-        dock = QDockWidget("Grid & Map Tools", self)
+        dock = QDockWidget("Grid && Map Tools", self)
         dock.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
         
@@ -355,7 +355,7 @@ class MainWindow(QMainWindow):
         # (added at the bottom of the dock, below Void Marking)
         
         # 3.2 Coordinate Display & Navigation
-        gb_coord = QGroupBox("Coordinates & Navigation")
+        gb_coord = QGroupBox("Coordinates && Navigation")
         form_coord = QFormLayout(gb_coord)
         
         self.lbl_cursor_pos = QLabel("Hover: -")
@@ -501,15 +501,18 @@ class MainWindow(QMainWindow):
         h_detect.addWidget(btn_detect)
         h_detect.addWidget(self.cb_detect_method)
         h_detect.addWidget(self.sb_detect_thr)
-        h_detect.addWidget(btn_next_det)
-        h_detect.addWidget(btn_next_l0)
+        # Second row: review / evaluation (one row was wider than the dock)
+        h_review = QHBoxLayout()
+        h_review.addWidget(btn_next_det)
+        h_review.addWidget(btn_next_l0)
         self.btn_eval = btn_eval = QPushButton("Evaluate")
         btn_eval.setToolTip("Run the detection without marking and compare it with the voids marked by hand on the loaded\n"
                             "layers: misses and false detections with their reasons, as a short code to type and send,\n"
                             "plus a report folder with chip images (see docs/VOID_EVAL.md).")
         btn_eval.clicked.connect(self.evaluate_detection)
-        h_detect.addWidget(btn_eval)
+        h_review.addWidget(btn_eval)
         v_layout_void.addLayout(h_detect)
+        v_layout_void.addLayout(h_review)
         # Layer of a spot found on several layers
         h_rule = QHBoxLayout()
         h_rule.addWidget(QLabel("Mark on layer:"))
@@ -665,8 +668,13 @@ class MainWindow(QMainWindow):
         # scroll.setMaximumHeight(1000) # Removed fixed limit
         
         scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        
+        # No horizontal scrolling: the dock is never narrower than its content (+ vertical scroll bar)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setMinimumWidth(dock_content.minimumSizeHint().width() + scroll.verticalScrollBar().sizeHint().width()
+                               + 2 * scroll.frameWidth())
+
         dock.setWidget(scroll)
+        self.resizeDocks([dock], [540], Qt.Horizontal) # Initial width; the splitter can still move it
 
         # Sync initial state
         self.on_window_changed()
