@@ -8,6 +8,8 @@ LAYOUT_FROM=k: layout (die, lines, bumps, pad) only from layer k on; the layers 
 NL_EXTRA=n: n more layers below the NL layers (voids only start on the first NL; they continue
     below): a deeper scan. The first NL layers are the same as without it.
 NOISE=s: pixel noise standard deviation (8-bit levels, default 4).
+ALIGNED=1: the chip offset (jitter) is the same on every layer, as the gates of one scan are; the
+    default draws it per layer (layers of a chip shifted by up to ~1 px against each other).
     -> OUTDIR/NAME.tif (8-bit pages = layers) and OUTDIR/NAME_truth.json
 
 Grid: origin 100, pitch 300 px, 14 x 14 chips, angle 0.4 deg; chip (bbox) 280 px centred in the cell.
@@ -33,6 +35,7 @@ LAYOUT_FROM = int(os.environ.get("LAYOUT_FROM", 0))
 LAYOUT_RESID = float(os.environ.get("LAYOUT_RESID", 0.03))
 NL_EXTRA = int(os.environ.get("NL_EXTRA", 0))
 NOISE = float(os.environ.get("NOISE", 4.0))
+ALIGNED = os.environ.get("ALIGNED", "0") == "1"
 R_LO, R_HI = (float(v) for v in os.environ.get("VOID_R", "6,25").split(","))
 SIZE = ORG * 2 + P * R
 m = (P - B) / 2
@@ -103,6 +106,9 @@ cell_idx = {(r, c): order[bounds[r * C + c]:bounds[r * C + c + 1]] for (r, c) in
 with tifffile.TiffWriter(os.path.join(W, name + ".tif")) as tw:
     for k in range(NL + NL_EXTRA):
         jit = rng.normal(0, 0.6, (R, C, 2)); gain = rng.uniform(0.85, 1.15, (R, C))
+        if ALIGNED: # One offset per chip for all layers (drawn per layer anyway: same random stream)
+            jit0 = jit if k == 0 else jit0
+            jit = jit0
         lxi = np.clip(np.round(lxo + jit[rr, cc, 0]).astype(np.int32), 0, B - 1)
         lyi = np.clip(np.round(lyo + jit[rr, cc, 1]).astype(np.int32), 0, B - 1)
         a = 1.0 if k >= LAYOUT_FROM else LAYOUT_RESID
