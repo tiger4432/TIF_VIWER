@@ -124,7 +124,7 @@ class _Tile(QWidget):
         self.image.setAlignment(Qt.AlignCenter)
         self.image.setMinimumSize(90, 90) # Compact: shown small at the bottom of Grid Configuration
         self.image.setFixedHeight(130)
-        self.image.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.image.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed) # Picture fills the width, never widens the panel
         self.image.setStyleSheet("background-color: #202020;")
         lay.addWidget(self.title)
         lay.addWidget(self.image, 1)
@@ -140,9 +140,9 @@ class _Tile(QWidget):
         if self.resized:
             self.resized()
 
-    def side(self):
-        """Square render size in pixels (rendered at display size, no extra scaling)."""
-        return max(64, min(self.image.width(), self.image.height()) - 4)
+    def size_px(self):
+        """Render size (w, h) in pixels: fills the image box (no letterbox), no extra scaling."""
+        return max(64, self.image.width() - 2), max(64, self.image.height() - 2)
 
     def set_content(self, title, cell, pixmap):
         self.title.setText(title)
@@ -251,7 +251,7 @@ class AnglePreview(QWidget):
 
         refs = mw.void_manager.reference_bboxes(grid, glw.coord_transform)
         for tile, (name, kr, kc) in zip(self.tiles, crossings):
-            out = self._render(stack, mw.current_z, grid, kr, kc, view_scale, refs, tile.side())
+            out = self._render(stack, mw.current_z, grid, kr, kc, view_scale, refs, tile.size_px())
             title = f"{name}  (X{kc:02d}|Y{kr:02d})"
             cell = (min(kr, grid.rows - 1), min(kc, grid.cols - 1)) # Click: a cell at the crossing
             if out is None: # Region still loading in the background
@@ -297,16 +297,19 @@ class AnglePreview(QWidget):
         self.schedule_update()
 
     def _render(self, stack, z, grid, row, col, view_scale, refs, size):
-        """Patch centered on the crossing of grid lines row (y) and col (x)."""
+        """Patch centered on the crossing of grid lines row (y) and col (x), size (w, h) pixels.
+        view_scale pitches tall; a wide tile shows more to the left and right at the same scale."""
         glw = self.mw.glw
-        half = 0.5 * view_scale * max(grid.pitch_x, grid.pitch_y)
+        sw, sh = size
+        half_y = 0.5 * view_scale * max(grid.pitch_x, grid.pitch_y)
+        half_x = half_y * sw / sh
         cx = grid.start_x + col * grid.pitch_x
         cy = grid.start_y + row * grid.pitch_y
-        x0, y0 = cx - half, cy - half # Patch top-left (Deskewed)
+        x0, y0 = cx - half_x, cy - half_y # Patch top-left (Deskewed)
+        x1, y1 = cx + half_x, cy + half_y
 
-        # Deskewed square -> raw quad (TL, TR, BR, BL), like the main view
-        corners = [glw.deskew_to_raw(x, y) for x, y in
-                   [(x0, y0), (cx + half, y0), (cx + half, cy + half), (x0, cy + half)]]
+        # Deskewed rectangle -> raw quad (TL, TR, BR, BL), like the main view
+        corners = [glw.deskew_to_raw(x, y) for x, y in [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]]
         xs = [p[0] for p in corners]
         ys = [p[1] for p in corners]
         hit, did_read = self._region(stack, z, row, col, min(xs), min(ys), max(xs), max(ys),
@@ -319,14 +322,14 @@ class AnglePreview(QWidget):
         quad = []
         for px, py in (corners[0], corners[3], corners[2], corners[1]): # PIL QUAD: UL, LL, LR, UR
             quad += [px - rx0, py - ry0]
-        warped = np.asarray(region.transform((size, size), Image.QUAD, tuple(quad), resample=Image.BILINEAR))
+        warped = np.asarray(region.transform((sw, sh), Image.QUAD, tuple(quad), resample=Image.BILINEAR))
         lkey = (glw.win_lo, glw.win_hi)
         if self._lut_key != lkey:
             self._lut = ImageNormalizer.process(np.arange(65536, dtype=np.float32), glw.win_lo, glw.win_hi)
             self._lut_key = lkey
         u8 = np.ascontiguousarray(self._lut[np.clip(warped, 0, 65535).astype(np.uint16)])
-        img = QImage(u8.data, size, size, size, QImage.Format_Grayscale8).convertToFormat(QImage.Format_ARGB32)
-        sx = sy = size / (2 * half)
+        img = QImage(u8.data, sw, sh, sw, QImage.Format_Grayscale8).convertToFormat(QImage.Format_ARGB32)
+        sx = sy = sh / (2 * half_y)
 
         # Everything drawn here is axis-aligned: no antialiasing (it dominated the draw time)
         p = QPainter(img)
@@ -336,19 +339,21 @@ class AnglePreview(QWidget):
         p.setPen(pen)
         gx_end = grid.start_x + grid.cols * grid.pitch_x
         gy_end = grid.start_y + grid.rows * grid.pitch_y
-        for k in range(col - 3, col + 4):
+        c_lo, c_hi = math.floor((x0 - grid.start_x) / grid.pitch_x), math.ceil((x1 - grid.start_x) / grid.pitch_x)
+        r_lo, r_hi = math.floor((y0 - grid.start_y) / grid.pitch_y), math.ceil((y1 - grid.start_y) / grid.pitch_y)
+        for k in range(c_lo, c_hi + 1):
             x = grid.start_x + k * grid.pitch_x
-            if 0 <= k <= grid.cols and x0 <= x <= x0 + 2 * half:
+            if 0 <= k <= grid.cols and x0 <= x <= x1:
                 p.drawLine(QPointF((x - x0) * sx, (max(y0, grid.start_y) - y0) * sy),
-                           QPointF((x - x0) * sx, (min(y0 + 2 * half, gy_end) - y0) * sy))
-        for k in range(row - 3, row + 4):
+                           QPointF((x - x0) * sx, (min(y1, gy_end) - y0) * sy))
+        for k in range(r_lo, r_hi + 1):
             y = grid.start_y + k * grid.pitch_y
-            if 0 <= k <= grid.rows and y0 <= y <= y0 + 2 * half:
+            if 0 <= k <= grid.rows and y0 <= y <= y1:
                 p.drawLine(QPointF((max(x0, grid.start_x) - x0) * sx, (y - y0) * sy),
-                           QPointF((min(x0 + 2 * half, gx_end) - x0) * sx, (y - y0) * sy))
+                           QPointF((min(x1, gx_end) - x0) * sx, (y - y0) * sy))
 
-        # Reference bboxes and product layout of the cells around the crossing
-        for bbox in (refs.get((r, c)) for r in (row - 1, row) for c in (col - 1, col)):
+        # Reference bboxes and product layout of the cells in view
+        for bbox in (refs.get((r, c)) for r in range(r_lo, r_hi) for c in range(c_lo, c_hi)):
             if bbox is None:
                 continue
             bx, by, bw, bh = bbox
@@ -371,7 +376,7 @@ class AnglePreview(QWidget):
         pen.setWidth(1)
         p.setPen(pen)
         ccx, ccy = (cx - x0) * sx, (cy - y0) * sy
-        arm, gap = max(8.0, 0.15 * size), 3.0 # Open center: the street crossing stays visible
+        arm, gap = max(8.0, 0.15 * sh), 3.0 # Open center: the street crossing stays visible
         for d in (-1, 1):
             p.drawLine(QPointF(ccx + d * gap, ccy), QPointF(ccx + d * arm, ccy))
             p.drawLine(QPointF(ccx, ccy + d * gap), QPointF(ccx, ccy + d * arm))
