@@ -2,6 +2,9 @@
 
     python tools/synth/make_wafer.py OUTDIR NAME          (env SEED, NL, VOID_R; deterministic per SEED)
 VOID_R="lo,hi": void radius range in chip px (default 6,25; e.g. 3,8 for small voids).
+LAYOUT_FROM=k: layout (die, lines, bumps, pad) only from layer k on; the layers above show the
+    brightness gradient, background and noise only (x LAYOUT_RESID of the layout, default 0.03), as
+    real top layers do. Same random draws as without it: the same seed gives the same voids.
     -> OUTDIR/NAME.tif (8-bit pages = layers) and OUTDIR/NAME_truth.json
 
 Grid: origin 100, pitch 300 px, 14 x 14 chips, angle 0.4 deg; chip (bbox) 280 px centred in the cell.
@@ -23,6 +26,8 @@ rng = np.random.default_rng(int(os.environ.get("SEED", 31)))
 P, B, ORG, ANG = 300, 280, 100, 0.4
 R = C = 14
 NL = int(os.environ.get("NL", 8))
+LAYOUT_FROM = int(os.environ.get("LAYOUT_FROM", 0))
+LAYOUT_RESID = float(os.environ.get("LAYOUT_RESID", 0.03))
 R_LO, R_HI = (float(v) for v in os.environ.get("VOID_R", "6,25").split(","))
 SIZE = ORG * 2 + P * R
 m = (P - B) / 2
@@ -57,10 +62,11 @@ def structure():
     return lines, _blur(bumps, rng.uniform(0.8, 2.5)), light
 
 
-def layer_mix(st):
+def layer_mix(st, a=1.0):
+    """a: layout visibility (0 = flat chip, background and gradient only)."""
     lines, bl, light = st
-    v = (rng.uniform(0.35, 0.75) + rng.uniform(-0.25, 0.25) * die + rng.uniform(-0.45, 0.35) * bl
-         + rng.choice([-1, 1]) * rng.uniform(0.05, 0.35) * lines + rng.uniform(-0.4, 0.4) * pad)
+    v = (rng.uniform(0.35, 0.75) + a * (rng.uniform(-0.25, 0.25) * die + rng.uniform(-0.45, 0.35) * bl
+         + rng.choice([-1, 1]) * rng.uniform(0.05, 0.35) * lines + rng.uniform(-0.4, 0.4) * pad))
     return np.clip(v * light, 0.02, None) ** rng.uniform(0.7, 1.4)
 
 
@@ -94,7 +100,8 @@ with tifffile.TiffWriter(os.path.join(W, name + ".tif")) as tw:
         jit = rng.normal(0, 0.6, (R, C, 2)); gain = rng.uniform(0.85, 1.15, (R, C))
         lxi = np.clip(np.round(lxo + jit[rr, cc, 0]).astype(np.int32), 0, B - 1)
         lyi = np.clip(np.round(lyo + jit[rr, cc, 1]).astype(np.int32), 0, B - 1)
-        LAYS = np.stack([np.stack([layer_mix(STRUCT[r][c]) for c in range(C)]) for r in range(R)])
+        a = 1.0 if k >= LAYOUT_FROM else LAYOUT_RESID
+        LAYS = np.stack([np.stack([layer_mix(STRUCT[r][c], a) for c in range(C)]) for r in range(R)])
         val = LAYS[rr, cc, lyi, lxi] * gain[rr, cc]
         for (r, c), (vx, vy, vrx, vry, l0, l1, f) in truth.items():
             if k >= l0:

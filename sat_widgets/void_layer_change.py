@@ -53,6 +53,9 @@ DEFAULTS = {
     "lc_tlo": 3.0, # Evidence of a void-free layer (first layer: CUSUM level)
     "lc_scales": [2.0, 3.0, 4.5, 6.5], # Centre-surround sigmas (working px)
     "lc_sources": 7, # At most this many layers above as sources (nearest first)
+    "lc_top_pad_sigma": 0.0, # Virtual source layer for the top targets (working px; 0 = none), see lc_top_pad_src
+    "lc_top_pad_src": "self", # Its image, blurred: "self" (the target layer) or "below" (the layer under it)
+    "lc_top_pad_upto": 1, # Targets 1 .. this get it (their layers above show little layout)
     "lc_goldens": 8, # Golden chips of the nearest this many layers as sources
     "lc_regions": 4, # Layout regions with their own coefficients (k-means of the goldens)
     "lc_border": 10, # Working px at the chip border not searched
@@ -328,9 +331,17 @@ class _Context:
         self.Fs = self.Ff[::self.sub]
         self.FF = self.Fs.T @ self.Fs
         self.fidx, self.sources = {}, {}
+        # Virtual sources (ids nl + k): layer src of the chip blurred by sigma, for the top targets whose
+        # layers above show little layout (real top layers: only from the second layer on)
+        self.virtual = {}
+        tps = float(p.get("lc_top_pad_sigma", 0.0) or 0.0)
         for k in targets:
             golds = sorted(range(nl), key=lambda j: (abs(j - k), j))[:int(p["lc_goldens"])]
             self.sources[k] = list(range(k - 1, -1, -1))[:int(p["lc_sources"])]
+            if tps > 0 and 1 <= k <= int(p.get("lc_top_pad_upto", 1)):
+                src = k + 1 if p.get("lc_top_pad_src", "self") == "below" and k + 1 < nl else k
+                self.virtual[nl + k] = (src, tps)
+                self.sources[k] = [nl + k] + self.sources[k]
             self.fidx[k] = np.concatenate([span[("bias",)]] + ([span[("regions",)]] if self.regions else []) +
                                           [span[("gold", j)] for j in golds])
 
@@ -341,7 +352,11 @@ class _Context:
 
         def source(j):
             if j not in Sf:
-                f = _feats(chip[j])
+                if j in self.virtual:
+                    src, sig = self.virtual[j]
+                    f = _feats(_gauss(chip[src].astype(np.float32), sig))
+                else:
+                    f = _feats(chip[j])
                 c = [a * t for a in f for t in self.tents] + [f[0] * m for m in self.regions] + [f[1] * m for m in self.regions]
                 Sf[j] = np.stack([x.ravel() for x in c], 1).astype(np.float64)
                 Ss[j] = Sf[j][::self.sub]
