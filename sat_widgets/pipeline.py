@@ -66,7 +66,7 @@ DEFAULTS = {
     "stable_seconds": 10.0,   # Size and mtime unchanged this long: the file is complete
     "poll_seconds": 5.0,
     "state_file": None,       # Default: <output_root>/auto_run_state.json
-    "method": "layer_change",
+    "method": None, # None: the product's "detect_method", else layer_change
     "use_learned": True,
     "require_bonding_map": True,
     "fit_grid": True,
@@ -488,7 +488,7 @@ class WaferRun:
         rules = (self.product or {}).get("type_rules")
         if rules is not None:
             params["type_rules"] = rules
-        method = self.s.get("method") or params.get("method") or "layer_change"
+        method = self.s.get("method") or (self.product or {}).get("detect_method") or "layer_change"
         params["method"] = method
         if method == "segmentation":
             from . import void_seg

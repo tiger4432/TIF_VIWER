@@ -106,7 +106,7 @@ python tools/auto_run.py --once D:/SAT/raw/LOT1234_W07.tif
 | `output_dir` | `{out}/{product}/{wafer_id}` | 웨이퍼별 폴더. `{out}`, `{product}`, `{wafer_id}`, `{lot}`, `{source_name}`(확장자 뺀 파일 이름), `{date}`(YYYY-MM-DD). 같은 폴더면 덮어씀 |
 | `products` | 없음 | 제품 규칙 (아래) |
 | `start_layer`, `end_layer` | 창의 값 (창 없이: `ui_defaults`, 없으면 전부) | 불러올 레이어 범위 |
-| `method` | `layer_change` | `layer_change` / `die_to_die` / `patchcore` / `segmentation`(`"seg_model"`, 기본 `models/void_unet.onnx`) |
+| `method` | `layer_change` | `layer_change` / `die_to_die` / `patchcore` / `segmentation`(`"seg_model"`, 기본 `models/void_unet.onnx`). 이 값을 적지 않으면 제품(products.json)의 `detect_method`, 그것도 없으면 `layer_change` |
 | `threshold` | 방법의 기본값 (`void_detect`의 `lc_threshold` 등) | 검출 Thr |
 | `void_type` | `ui_defaults.void_type`, 없으면 bbox가 아닌 첫 타입 | 자동 마킹 타입 |
 | `skip_layers`, `layer_rule` | `ui_defaults` → `void_detect` | 뷰어의 Skip layers / Mark on layer |

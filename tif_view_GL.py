@@ -18,10 +18,10 @@ from PySide6.QtWidgets import (
     QFormLayout, QPushButton, QDoubleSpinBox, QPlainTextEdit,
     QFileDialog, QProgressDialog, QCheckBox, QRadioButton,
     QButtonGroup, QComboBox, QDialog, QScrollArea, QMessageBox, QLineEdit,
-    QTextEdit, QAbstractSpinBox, QSizePolicy, QProgressBar
+    QTextEdit, QAbstractSpinBox, QSizePolicy, QProgressBar, QToolButton
 )
 from PySide6.QtGui import QSurfaceFormat, QAction, QImage, QPainter, QKeySequence
-from PySide6.QtCore import Qt, QTimer, QEvent, QPointF
+from PySide6.QtCore import Qt, QTimer, QEvent, QPointF, QSettings
 
 # Imports from sat_widgets
 from sat_widgets.core_data import TiffStack, MosaicTiffStack, GridConfig, BondingMap, to_uint16, ImageNormalizer, CoordinateTransform
@@ -498,21 +498,49 @@ class MainWindow(QMainWindow):
                                          "PatchCore: CNN features (optional, slower, coarse outlines), see docs/PATCHCORE.md.")
         self._detect_thr = {}
         self.cb_detect_method.currentIndexChanged.connect(self._on_detect_method)
-        h_detect.addWidget(btn_detect)
-        h_detect.addWidget(self.cb_detect_method)
+        btn_next_det.setText("Next Detected \u25B6")
+        btn_prev_det = QPushButton("\u25C0")
+        btn_prev_det.setToolTip("Go to the previous detected void that was not reviewed yet")
+        btn_prev_det.setMaximumWidth(36)
+        btn_prev_det.clicked.connect(self.prev_detected_void)
+        self.lbl_review = QLabel("")
+        self.lbl_review.setToolTip("Places (layer + cell) with detected voids not reviewed (edited) yet;\n"
+                                   "after Next / Prev: position among them")
+        self.btn_next_l0 = btn_next_l0
+        btn_next_l0.setText("Layer-0")
+
+        # Void Detection: run + review on top; method, layer options and training under "Advanced"
+        self.gb_detect = QGroupBox("Void Detection")
+        v_det = QVBoxLayout(self.gb_detect)
+        h_detect.addWidget(btn_detect, 1)
         h_detect.addWidget(self.sb_detect_thr)
-        # Second row: review / evaluation (one row was wider than the dock)
+        v_det.addLayout(h_detect)
         h_review = QHBoxLayout()
-        h_review.addWidget(btn_next_det)
+        h_review.addWidget(btn_prev_det)
+        h_review.addWidget(btn_next_det, 1)
+        h_review.addWidget(self.lbl_review)
         h_review.addWidget(btn_next_l0)
+        v_det.addLayout(h_review)
+
+        self.btn_detect_adv = QToolButton()
+        self.btn_detect_adv.setText("Advanced")
+        self.btn_detect_adv.setCheckable(True)
+        self.btn_detect_adv.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_detect_adv.setAutoRaise(True)
+        self.btn_detect_adv.setToolTip("Method, layer options, learned filter training and evaluation")
+        v_det.addWidget(self.btn_detect_adv)
+        self.detect_adv = QWidget()
+        v_adv = QVBoxLayout(self.detect_adv)
+        v_adv.setContentsMargins(12, 0, 0, 0)
+        h_method = QHBoxLayout()
+        h_method.addWidget(QLabel("Method:"))
+        h_method.addWidget(self.cb_detect_method, 1)
+        v_adv.addLayout(h_method)
         self.btn_eval = btn_eval = QPushButton("Evaluate")
         btn_eval.setToolTip("Run the detection without marking and compare it with the voids marked by hand on the loaded\n"
                             "layers: misses and false detections with their reasons, as a short code to type and send,\n"
                             "plus a report folder with chip images (see docs/VOID_EVAL.md).")
         btn_eval.clicked.connect(self.evaluate_detection)
-        h_review.addWidget(btn_eval)
-        v_layout_void.addLayout(h_detect)
-        v_layout_void.addLayout(h_review)
         # Layer of a spot found on several layers
         h_rule = QHBoxLayout()
         h_rule.addWidget(QLabel("Mark on layer:"))
@@ -534,35 +562,41 @@ class MainWindow(QMainWindow):
         self.le_skip_layers.setText(", ".join(map(str, skip)) if isinstance(skip, list) else str(skip))
         self.le_skip_layers.setMaximumWidth(80)
         h_rule.addWidget(self.le_skip_layers)
-        v_layout_void.addLayout(h_rule)
+        v_adv.addLayout(h_rule)
         h_learn = QHBoxLayout()
         self.chk_learned = QCheckBox("Learned filter")
         self.chk_learned.setToolTip("Die-to-die / Layer change: candidates scored by a model trained from hand markings\n"
-                                    "(Train; one model per method) instead of the Thr threshold (sat_widgets/void_learn.py)")
-        self.chk_learned.setEnabled(os.path.exists(void_learn.model_path(self._config().get("void_detect", {}))))
+                                    "(Train; one model per method, Layer change one per product) instead of the Thr\n"
+                                    "threshold (sat_widgets/void_learn.py). Turned on when the model exists.")
         self.btn_train = btn_train = QPushButton("Train")
         btn_train.setToolTip("Add this file's hand markings to the training set and retrain the learned filter\n"
                              "(one entry per file; training the same file again replaces it)")
         btn_train.clicked.connect(self.train_detector)
         h_learn.addWidget(self.chk_learned)
         h_learn.addWidget(btn_train)
+        h_learn.addWidget(btn_eval)
         btn_seg = QPushButton("Seg Data")
         btn_seg.setToolTip("Build and review the U-Net training data from marked files (docs/SEGMENTATION.md)")
         btn_seg.clicked.connect(self.open_seg_data)
         h_learn.addWidget(btn_seg)
+        v_adv.addLayout(h_learn)
         self.chk_detect_state = QCheckBox("Cell status")
         self.chk_detect_state.setChecked(True)
         self.chk_detect_state.setToolTip("Detect Voids progress per cell: a circle at the top-right corner of each inspected cell\n"
                                          "(empty: pending, filling: in progress, check: done); shown with the grid")
         self.chk_detect_state.toggled.connect(self._toggle_detect_state)
-        h_learn.addWidget(self.chk_detect_state)
-        h_learn.addStretch(1)
-        v_layout_void.addLayout(h_learn)
+        v_adv.addWidget(self.chk_detect_state)
+        v_det.addWidget(self.detect_adv)
+        self.btn_detect_adv.toggled.connect(self._show_detect_advanced)
+        self.btn_detect_adv.setChecked(self._ui_state("detect_advanced", False))
+        self._show_detect_advanced(self.btn_detect_adv.isChecked())
         self._init_detect_method()
         self._detect_job = None # Detect Voids running in the background (sat_widgets/detect_job.py)
         self._detect_added = 0
+        self._review_n, self._review_pos = 0, None # Void Detection review counter
         
         dock_layout.addWidget(self.gb_void)
+        dock_layout.addWidget(self.gb_detect)
         
         # Init Types
         self.populate_void_types()
@@ -794,6 +828,8 @@ class MainWindow(QMainWindow):
             return
         self.current_product = prod
         self.current_product_name = name
+        if prod.get("detect_method") and hasattr(self, "cb_detect_method"):
+            self._select_detect_method(prod["detect_method"])
         if hasattr(self, "chk_learned"):
             self._update_learned_state() # Layer change: one learned model per product
         
@@ -1672,6 +1708,7 @@ class MainWindow(QMainWindow):
         if custom and all(self.cb_detect_method.itemData(i)[1] != custom for i in range(self.cb_detect_method.count())):
             self.cb_detect_method.addItem("PatchCore (config.json)", ("patchcore", custom))
         start = 0
+        want = cfg.get("method") or "layer_change"
         for i in range(1, self.cb_detect_method.count()):
             method, model = self.cb_detect_method.itemData(i)
             item = self.cb_detect_method.model().item(i)
@@ -1681,7 +1718,7 @@ class MainWindow(QMainWindow):
                                 "Marks the layer where the void first appears (Mark on layer). Skipped layers still serve\n"
                                 "as the layers above. Thr: evidence from the void's first layer down (default 26;\n"
                                 "lower finds more and marks more falsely).")
-                if cfg.get("method") == "layer_change":
+                if want == "layer_change":
                     start = i
                 continue
             if method == "segmentation":
@@ -1697,6 +1734,18 @@ class MainWindow(QMainWindow):
                 start = i
         self.cb_detect_method.setCurrentIndex(start)
         self._on_detect_method()
+        prod = getattr(self, "current_product", None)
+        if prod and prod.get("detect_method"):
+            self._select_detect_method(prod["detect_method"])
+
+    def _select_detect_method(self, method):
+        """Selects the first enabled item of a method ("die_to_die", "layer_change", "patchcore", "segmentation")."""
+        for i in range(self.cb_detect_method.count()):
+            if self.cb_detect_method.itemData(i)[0] == method and self.cb_detect_method.model().item(i).isEnabled():
+                self.cb_detect_method.setCurrentIndex(i)
+                return True
+        print(f"[products] detect_method {method!r} is not available here")
+        return False
 
     def _on_detect_method(self, *_):
         """Each method keeps its own threshold (config.json "void_detect": threshold / pc_threshold)."""
@@ -1726,8 +1775,9 @@ class MainWindow(QMainWindow):
         change one per product, sat_widgets/void_learn.model_path)."""
         method = self.cb_detect_method.currentData()[0]
         cfg = self._config().get("void_detect", {})
-        self.chk_learned.setEnabled(method in ("die_to_die", "layer_change") and
-                                    os.path.exists(void_learn.model_path(cfg, method, self._product_key())))
+        ok = method in ("die_to_die", "layer_change") and os.path.exists(void_learn.model_path(cfg, method, self._product_key()))
+        self.chk_learned.setEnabled(ok)
+        self.chk_learned.setChecked(ok) # Used whenever there is a model (uncheck to compare with Thr)
 
     # -----------------------------------------------
     # Results API (plugins/results_api.py)
@@ -2237,6 +2287,9 @@ class MainWindow(QMainWindow):
         """Navigates through the detected voids not reviewed yet (layer, row, col order)."""
         self._next_void(lambda v: v.get("auto") == "detected", "Detected void", "No detected voids left to review.")
 
+    def prev_detected_void(self):
+        self._next_void(lambda v: v.get("auto") == "detected", "Detected void", "No detected voids left to review.", step=-1)
+
     def next_layer0_void(self):
         """Navigates through the voids flagged as already visible on layer 0 (layer, row, col order)."""
         self._next_void(lambda v: v.get("layer0"), "Layer-0 void", "No voids flagged as visible on layer 0.")
@@ -2247,7 +2300,7 @@ class MainWindow(QMainWindow):
             n = sum(1 for vs in self.void_manager.voids.values() for v in vs if v.get("layer0"))
             self.statusBar().showMessage(f"Layer-0 flag {'set' if state else 'cleared'} ({n} flagged; Ctrl+Z undoes)")
 
-    def _next_void(self, pick, what, none_msg):
+    def _next_void(self, pick, what, none_msg, step=1):
         items = []
         for layer, vs in self.void_manager.voids.items():
             for v in vs:
@@ -2259,18 +2312,68 @@ class MainWindow(QMainWindow):
             return
         items = sorted(set(items))
         here = (self.glw.current_layer,) + tuple(self.glw.center_cell())
-        nxt = next((it for it in items if it > here), items[0])
+        if step > 0:
+            nxt = next((it for it in items if it > here), items[0])
+        else:
+            nxt = next((it for it in reversed(items) if it < here), items[-1])
         layer, r, c = nxt
         z = next((z for z in range(len(self.full_data)) if self.abs_layer(z) == layer), None)
         if z is not None and z != self.current_z:
             self.spin_layer.setValue(z)
         self.glw.fit_to_cell(c, r)
         self.statusBar().showMessage(f"{what} {items.index(nxt) + 1}/{len(items)}: layer {layer}, X{c:02d} Y{r:02d}")
+        if what == "Detected void":
+            self._review_pos = items.index(nxt) + 1
+            self._update_review_ui()
 
     def update_void_ui(self):
         # Update label count (voids are keyed by absolute layer number)
         count = len(self.void_manager.voids.get(self.glw.current_layer, []))
         self.lbl_void_count.setText(f"Voids: {count}")
+        self._update_review_ui()
+
+    def _update_review_ui(self):
+        """Void Detection: detected voids left to review, layer-0 flags."""
+        if not hasattr(self, "lbl_review"):
+            return
+        places, l0 = set(), 0 # Next / Prev stop once per layer and cell
+        for layer, vs in self.void_manager.voids.items():
+            for v in vs:
+                if v.get("auto") == "detected":
+                    places.add((layer,) + tuple(self.glw.raw_to_cell(v["globalCX"], v["globalCY"])))
+                l0 += bool(v.get("layer0"))
+        todo = len(places)
+        pos = getattr(self, "_review_pos", None)
+        if todo == 0:
+            self._review_pos = None
+            self.lbl_review.setText("")
+        elif pos is not None and todo == self._review_n:
+            self.lbl_review.setText(f"{min(pos, todo)}/{todo}")
+        else:
+            self._review_pos = None
+            self.lbl_review.setText(f"{todo} to review")
+        self._review_n = todo
+        self.btn_next_l0.setText(f"Layer-0 ({l0})" if l0 else "Layer-0")
+        self.btn_next_l0.setEnabled(l0 > 0)
+
+    def _ui_state(self, key, default):
+        """Per-user window state (QSettings), not a declaration: e.g. the Advanced section open."""
+        try:
+            v = QSettings("TIF_Viewer", "TIF_Viewer").value(f"ui/{key}", default)
+            return v in (True, "true", "1", 1) if isinstance(default, bool) else v
+        except Exception:
+            return default
+
+    def _set_ui_state(self, key, value):
+        try:
+            QSettings("TIF_Viewer", "TIF_Viewer").setValue(f"ui/{key}", value)
+        except Exception:
+            pass
+
+    def _show_detect_advanced(self, on):
+        self.detect_adv.setVisible(on)
+        self.btn_detect_adv.setArrowType(Qt.DownArrow if on else Qt.RightArrow)
+        self._set_ui_state("detect_advanced", bool(on))
 
     # -----------------------------------------------
     # Data / Layer Management

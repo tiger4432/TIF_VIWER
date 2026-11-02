@@ -269,6 +269,7 @@ Extraction 아래 **Auto Run** 묶음에 측정 파일 경로(glob, 예: `D:/SAT
 - 이전 형식(`"bbox": {"w", "h"}` 픽셀 + `layout.design_size`)도 그대로 읽습니다.
 - bbox 크기는 **제품마다** 다르게 적습니다(`chip_size_um` 또는 `bbox`). 제품을 바꾸면 bbox 타입의 기본 크기(그리기, Detect BBOX)가 그 제품 값으로 바뀌고, 둘 다 없는 제품은 `config.json`의 bbox 타입 크기로 돌아갑니다.
 - bbox 크기는 **항상 선택한 제품 크기**를 따릅니다. 이미 그린 bbox도 제품·Scale을 바꾸면 중심은 그대로 두고 크기만 바뀌고, voids.json·프로젝트·API에서 불러온 bbox도 저장된 크기 대신 **중심 좌표만** 쓰고 제품 크기로 그립니다. bbox는 손으로 크기를 조절할 수 없고(가장자리를 잡아도 이동), 크기가 정해지지 않은 경우(Scale 없음, 크기 선언 없음)에만 처음 그릴 때 드래그로 크기를 정합니다.
+- **`detect_method`:** (생략 가능) 이 제품의 Detect Voids 방법: `"layer_change"`, `"die_to_die"`, `"patchcore"`, `"segmentation"`. 제품을 고르면 Void Detection의 방법이 이것으로 바뀌고, Auto Run도 (`auto_run`의 `method`를 적지 않았으면) 이 방법을 씁니다. 없으면 화면은 `config.json`의 `"void_detect": {"method": ...}`, 그것도 없으면 Layer change.
 - bbox 코너에 붙은 마킹(`snap: "bbox_corner"`)은 bbox를 따라갑니다. bbox를 옮기면 모든 레이어의 그 bbox 코너 마킹이 같이 움직이고(되돌리기 한 번), bbox 크기가 바뀌거나(제품·Scale·불러오기) Detect BBOX로 다시 그려지면 가장 가까운 코너에 다시 붙습니다.
 
 ### 축척 (Scale)
@@ -352,7 +353,12 @@ Grid Configuration 묶음 아래쪽의 작은 Angle Preview(항상 표시)가 �
 
 ## 자동 보이드 인식 (Detect Voids)
 
-Void Marking 패널의 **Detect Voids**는 대략적인 보이드를 자동으로 찾아 마킹합니다. 칩 안의 배경은 layout 때문에 균일하지 않지만 칩마다 반복되므로, 평평한 배경 대신 **같은 레이어의 다른 칩들과 비교**합니다(die-to-die).
+**Void Detection** 패널(Void Marking 아래)의 **Detect Voids**는 대략적인 보이드를 자동으로 찾아 마킹합니다.
+
+- **평소에 쓰는 것:** 첫 줄 **Detect Voids**와 **Thr**(낮을수록 많이 찾음), 둘째 줄 검토 이동 **◀ / Next Detected ▶**(검토 전 검출로 이동, 옆에 남은 개수 또는 지금 위치 `3/36`), **Layer-0 (개수)**(레이어 0에서도 보이는 보이드로 이동).
+- **Advanced**(눌러서 펼침, 열림 상태는 기억): 방법(Method), Mark on layer, Skip layers, Learned filter·Train·Evaluate·Seg Data, Cell status. 방법은 제품의 `detect_method` → `config.json` `"void_detect": {"method"}` → Layer change 순으로 정해지므로 보통 바꿀 일이 없습니다. **Learned filter**는 그 방법(Layer change는 그 제품)의 학습 모델이 있으면 자동으로 켜집니다(끄면 Thr로 비교).
+
+방법별 동작: 칩 안의 배경은 layout 때문에 균일하지 않지만 칩마다 반복되므로, 평평한 배경 대신 **같은 레이어의 다른 칩들과 비교**합니다(die-to-die).
 
 1. 본딩된 칸마다 기준 bbox(없으면 칸)에 맞춰 칩을 잘라 작업 크기로 줄입니다.
 2. 레이어마다 칩들의 화소별 중앙값으로 "기준 칩"을 만들고, 칩 사이 흩어짐(MAD)을 화소별로 구합니다. layout 경계처럼 원래 흔들리는 곳은 흩어짐이 커서 잘못 잡히지 않습니다.
