@@ -61,7 +61,8 @@ DEFAULTS = {
     "lc_goldens": 8, # Golden chips of the nearest this many layers as sources
     "lc_regions": 4, # Layout regions with their own coefficients (k-means of the goldens)
     "lc_border": 10, # Working px at the chip border not searched
-    "lc_border_zero": 0, # Remainder zeroed this many working px in from the edge before filtering (0 = off)
+    "lc_border_zero": 10, # Remainder zeroed this many working px in from the edge before filtering, so the chip edge
+                          # does not leak into the searched part (synthetic, layers aligned: missed 11.2 -> 7.5 %; 0 = off)
     "lc_register": False, # Layers of each chip moved onto its first layer (sub-pixel; a scan's layers are aligned)
     "lc_workers": 0, # Chips fitted in parallel (0 = CPU count, 1 without threadpoolctl)
     "lc_cand_threshold": 5.0, # Learned filter: candidates down to this place score (Train; synthetic: 8 -> 5 missed 12.7 -> 11.0 % at 1 false per wafer)
