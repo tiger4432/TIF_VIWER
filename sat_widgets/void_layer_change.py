@@ -53,6 +53,8 @@ DEFAULTS = {
     "lc_tlo": 3.0, # Evidence of a void-free layer (first layer: CUSUM level)
     "lc_scales": [2.0, 3.0, 4.5, 6.5], # Centre-surround sigmas (working px)
     "lc_sources": 7, # At most this many layers above as sources (nearest first)
+    "lc_tents": 2, # Fit coefficients vary over the chip on n x n nodes (bilinear between them)
+    "lc_src_blurs": [], # Extra source features: blur differences at these sigmas (focus / sharpness changes)
     "lc_top_pad_sigma": 0.0, # Virtual source layer for the top targets (working px; 0 = none), see lc_top_pad_src
     "lc_top_pad_src": "self", # Its image, blurred: "self" (the target layer) or "below" (the layer under it)
     "lc_top_pad_upto": 1, # Targets 1 .. this get it (their layers above show little layout)
@@ -241,11 +243,16 @@ def presence(X, gold, k, i, cy, cx, r):
     return float(res[core].mean()) / (float(np.std(res[ring])) + 1e-6)
 
 
-def _tents(h, w):
-    """2 x 2 bilinear weights over the chip (they sum to 1)."""
+def _tents(h, w, n=2):
+    """n x n piecewise-bilinear weights over the chip (they sum to 1; n = 2: the four corners)."""
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
-    v, u = yy / (h - 1), xx / (w - 1)
-    return [(1 - v) * (1 - u), (1 - v) * u, v * (1 - u), v * u]
+    if n == 2: # The four corners (same floats as before n was a parameter)
+        v, u = yy / (h - 1), xx / (w - 1)
+        return [(1 - v) * (1 - u), (1 - v) * u, v * (1 - u), v * u]
+    v, u = yy / (h - 1) * (n - 1), xx / (w - 1) * (n - 1)
+    hv = [np.maximum(0.0, 1.0 - np.abs(v - i)) for i in range(n)]
+    hu = [np.maximum(0.0, 1.0 - np.abs(u - i)) for i in range(n)]
+    return [a * b for a in hv for b in hu]
 
 
 def _bias(h, w):
@@ -266,10 +273,10 @@ def _regions(gold, k, iters=20):
     return [(lab == j).astype(np.float32) for j in range(k)]
 
 
-def _feats(L):
+def _feats(L, blurs=()):
     c = L - L.mean()
     gy, gx = np.gradient(L)
-    return [c, c * c - (c * c).mean(), gx, gy, _gauss(L, 1.5) - L]
+    return [c, c * c - (c * c).mean(), gx, gy, _gauss(L, 1.5) - L] + [_gauss(L, float(s)) - L for s in blurs]
 
 
 def _robust_fit(y, X, iters=4, clip=3.0, sub=2):
@@ -312,7 +319,8 @@ class _Context:
         self.p, self.shape = p, (h, w)
         gold = np.stack([np.median(X[k].astype(np.float32), axis=0) for k in range(nl)])
         self.gold = gold
-        self.tents = _tents(h, w)
+        self.tents = _tents(h, w, int(p.get("lc_tents", 2)))
+        self.src_blurs = tuple(p.get("lc_src_blurs") or ())
         regions = _regions(gold, int(p["lc_regions"])) if int(p["lc_regions"]) > 1 else []
         self.regions = regions[1:]
         self.sub = int(p.get("lc_fit_sub", 2)) # Least squares on every sub-th pixel (see _block_fit)
@@ -354,9 +362,9 @@ class _Context:
             if j not in Sf:
                 if j in self.virtual:
                     src, sig = self.virtual[j]
-                    f = _feats(_gauss(chip[src].astype(np.float32), sig))
+                    f = _feats(_gauss(chip[src].astype(np.float32), sig), self.src_blurs)
                 else:
-                    f = _feats(chip[j])
+                    f = _feats(chip[j], self.src_blurs)
                 c = [a * t for a in f for t in self.tents] + [f[0] * m for m in self.regions] + [f[1] * m for m in self.regions]
                 Sf[j] = np.stack([x.ravel() for x in c], 1).astype(np.float64)
                 Ss[j] = Sf[j][::self.sub]
