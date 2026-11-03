@@ -61,6 +61,7 @@ DEFAULTS = {
     "lc_goldens": 8, # Golden chips of the nearest this many layers as sources
     "lc_regions": 4, # Layout regions with their own coefficients (k-means of the goldens)
     "lc_border": 10, # Working px at the chip border not searched
+    "lc_border_zero": 0, # Remainder zeroed this many working px in from the edge before filtering (0 = off)
     "lc_register": False, # Layers of each chip moved onto its first layer (sub-pixel; a scan's layers are aligned)
     "lc_workers": 0, # Chips fitted in parallel (0 = CPU count, 1 without threadpoolctl)
     "lc_cand_threshold": 5.0, # Learned filter: candidates down to this place score (Train; synthetic: 8 -> 5 missed 12.7 -> 11.0 % at 1 false per wafer)
@@ -489,8 +490,11 @@ def find(X, searched, p, rule="first", progress=None):
     b = int(p["lc_border"])
     S = np.zeros((nl, n, h, w), np.float16)
     SIG = np.zeros((nl, n, h, w), np.uint8)
+    zb = int(p.get("lc_border_zero", 0) or 0) # Remainder zeroed this far in before filtering
     for k in targets:
         Z = _normalise(rem.pop(k))
+        if zb > 0: # The chip edge (not searched) must not leak into the searched part through the filter
+            Z[:, :zb] = 0; Z[:, -zb:] = 0; Z[:, :, :zb] = 0; Z[:, :, -zb:] = 0
         best = arg = None
         for si, s in enumerate(scales):
             d = np.abs(_gauss(Z, s) - _gauss(Z, 2 * s))
