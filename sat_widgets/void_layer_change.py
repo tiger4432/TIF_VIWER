@@ -66,6 +66,7 @@ DEFAULTS = {
     "lc_first_frac": 0.5, # Mark on layer "First strong": the first layer whose evidence is >= this x the void's peak
     "lc_region_merge": 1.3, # A weaker peak is the same void when inside a kept void's box x this (1: its region only).
                             # After the learned filter. 600 px chips, voids up to half the chip: split 15 -> 7 of 272
+    "lc_region_join": 0.0, # Detections of one chip whose boxes x this overlap are one void (ragged voids; 0 = off)
     "lc_region_level": 0.4, # Void extent: connected region of its layer's evidence >= this x its peak; weaker
                             # peaks inside it are the same void (0 = off: radius 1.6 x the filter sigma). Large
                             # voids: size found / true 0.40 -> about 1, split 11 -> 2 of 77
@@ -644,6 +645,30 @@ def find(X, searched, p, rule="first", progress=None):
             if reg is not None:
                 regions.setdefault(i, []).append(reg)
         merged.append(d)
+    join = float(p.get("lc_region_join", 0.0) or 0.0)
+    if join > 0 and rlev > 0 and not collect: # Ragged voids: lobes found apart; boxes (x join) that overlap are one void
+        changed = True
+        while changed:
+            changed = False
+            for a in range(len(merged)):
+                for b in range(a + 1, len(merged)):
+                    da, db = merged[a], merged[b]
+                    if da["i"] != db["i"]:
+                        continue
+                    ax, ay = da.get("rx", da["r"]) * join, da.get("ry", da["r"]) * join
+                    bx, by = db.get("rx", db["r"]) * join, db.get("ry", db["r"]) * join
+                    if abs(da["x"] - db["x"]) <= ax + bx and abs(da["y"] - db["y"]) <= ay + by:
+                        x0 = min(da["x"] - da.get("rx", da["r"]), db["x"] - db.get("rx", db["r"]))
+                        x1 = max(da["x"] + da.get("rx", da["r"]), db["x"] + db.get("rx", db["r"]))
+                        y0 = min(da["y"] - da.get("ry", da["r"]), db["y"] - db.get("ry", db["r"]))
+                        y1 = max(da["y"] + da.get("ry", da["r"]), db["y"] + db.get("ry", db["r"]))
+                        da.update(x=(x0 + x1) / 2, y=(y0 + y1) / 2, rx=(x1 - x0) / 2, ry=(y1 - y0) / 2,
+                                  r=max(x1 - x0, y1 - y0) / 2) # The stronger (earlier) keeps its layer, score
+                        del merged[b]
+                        changed = True
+                        break
+                if changed:
+                    break
     return {"dets": merged, "evidence": S, "scale": SIG, "place": A}
 
 
