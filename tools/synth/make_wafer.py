@@ -22,6 +22,9 @@ VOID_ROUGH=a: ragged void outlines (0 = ellipses): the radius varies with the an
     total amplitude about a, and a few lobes stick out; the same shape on every layer (own random stream).
 VOID_SOFT=w: soft void edges, as if Gaussian-blurred with a sigma of w x the radius (default: the edge
     ramps over about +-15 % of the radius).
+VOID_CONTRAST="lo,hi": void contrast (relative brightness change, default 0.06,0.14: faint, hard to see by
+    eye next to the layout's +-0.45; e.g. 0.2,0.4 for voids as visible as in the field). Drawn from the same
+    stream, scaled: the same voids, stronger.
 ALIGNED=1: the chip offset (jitter) is the same on every layer, as the gates of one scan are; the
     default draws it per layer (layers of a chip shifted by up to ~1 px against each other).
     -> OUTDIR/NAME.tif (8-bit pages = layers) and OUTDIR/NAME_truth.json
@@ -116,6 +119,9 @@ for r in range(R):
             truth[(r, c)] = tuple(t)
 ROUGH = float(os.environ.get("VOID_ROUGH", 0.0))
 SOFT = float(os.environ.get("VOID_SOFT", 0.0))
+C_LO, C_HI = (float(v) for v in os.environ.get("VOID_CONTRAST", "0.06,0.14").split(","))
+if (C_LO, C_HI) != (0.06, 0.14): # Map the drawn contrast 0.06..0.14 onto the range (same random stream)
+    truth = {k: tuple(t[:6]) + (C_LO + (t[6] - 0.06) / 0.08 * (C_HI - C_LO),) for k, t in truth.items()}
 rng3 = np.random.default_rng(int(os.environ.get("SEED", 31)) + 104729) # VOID_ROUGH only
 SHAPE = {}
 for key in truth:
