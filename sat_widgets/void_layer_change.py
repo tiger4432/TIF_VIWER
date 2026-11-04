@@ -64,9 +64,11 @@ DEFAULTS = {
     "lc_regions": 4, # Layout regions with their own coefficients (k-means of the goldens)
     "lc_border": 10, # Working px at the chip border not searched
     "lc_first_frac": 0.5, # Mark on layer "First strong": the first layer whose evidence is >= this x the void's peak
-    "lc_region_merge": 1.3, # A weaker peak is the same void when inside a kept void's box x this (1: its region only).
-                            # After the learned filter. 600 px chips, voids up to half the chip: split 15 -> 7 of 272
-    "lc_region_join": 0.0, # Detections of one chip whose boxes x this overlap are one void (ragged voids; 0 = off)
+    "lc_region_merge": 1.6, # A weaker peak is the same void when inside a kept void's box x this (1: its region only).
+                            # After the learned filter. 600 px chips, voids up to half the chip: split 15 -> 7 of 272;
+                            # ragged soft voids: 26 -> 20 of 239, with lc_region_join 1.0: 10
+    "lc_region_join": 1.0, # Detections of one chip whose boxes x this overlap are one void (ragged voids; 0 = off).
+                           # Two separate voids whose boxes overlap become one too: lower it if Evaluate shows mg
     "lc_region_level": 0.4, # Void extent: connected region of its layer's evidence >= this x its peak; weaker
                             # peaks inside it are the same void (0 = off: radius 1.6 x the filter sigma). Large
                             # voids: size found / true 0.40 -> about 1, split 11 -> 2 of 77
