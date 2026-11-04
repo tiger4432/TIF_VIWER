@@ -18,6 +18,10 @@ VOID_L0="lo,hi": first layer of the voids in this range (default any layer), e.g
 VOID_COMMON=frac, VOID_SPOT="x,y": this share of the voids sits at the same place in their chips (x, y as
     fractions of the chip, +- 3 % of the chip): a weak spot many chips share.
     (These two draw from their own random stream: without them the output is unchanged.)
+VOID_ROUGH=a: ragged void outlines (0 = ellipses): the radius varies with the angle by harmonics 2-9 of
+    total amplitude about a, and a few lobes stick out; the same shape on every layer (own random stream).
+VOID_SOFT=w: soft void edges, as if Gaussian-blurred with a sigma of w x the radius (default: the edge
+    ramps over about +-15 % of the radius).
 ALIGNED=1: the chip offset (jitter) is the same on every layer, as the gates of one scan are; the
     default draws it per layer (layers of a chip shifted by up to ~1 px against each other).
     -> OUTDIR/NAME.tif (8-bit pages = layers) and OUTDIR/NAME_truth.json
@@ -110,8 +114,35 @@ for r in range(R):
             if COMMON > 0 and rng2.random() < COMMON:
                 t[0], t[1] = (float(np.clip(SPOT[i] * B + rng2.normal(0, 0.03 * B), 0, B - 1)) for i in (0, 1))
             truth[(r, c)] = tuple(t)
+ROUGH = float(os.environ.get("VOID_ROUGH", 0.0))
+SOFT = float(os.environ.get("VOID_SOFT", 0.0))
+rng3 = np.random.default_rng(int(os.environ.get("SEED", 31)) + 104729) # VOID_ROUGH only
+SHAPE = {}
+for key in truth:
+    if ROUGH > 0: # Harmonics (k, amplitude, phase) of the outline radius, plus lobes (angle, width, height)
+        hk = [(k, ROUGH * rng3.uniform(0.2, 1.0) / np.sqrt(k - 1), rng3.uniform(0, 2 * np.pi)) for k in range(2, 10)]
+        lobes = [(rng3.uniform(0, 2 * np.pi), rng3.uniform(0.15, 0.4), ROUGH * rng3.uniform(0.5, 1.5))
+                 for _ in range(int(rng3.integers(0, 4)))]
+        SHAPE[key] = (hk, lobes)
+
+
+def _outline(key, dx, dy):
+    """Radius factor of a ragged void (1 = ellipse) at the angle of (dx, dy) in units of its radii."""
+    if key not in SHAPE:
+        return 1.0
+    hk, lobes = SHAPE[key]
+    th = np.arctan2(dy, dx)
+    m = 1.0 + sum(a * np.cos(k * th + ph) for k, a, ph in hk)
+    for ang, wid, hgt in lobes:
+        dth = np.angle(np.exp(1j * (th - ang)))
+        m = m + hgt * np.exp(-0.5 * (dth / wid) ** 2)
+    return np.clip(m, 0.35, None)
 ct = CoordinateTransform(ANG, SIZE, SIZE)
 json.dump({f"{r},{c}": t for (r, c), t in truth.items()}, open(os.path.join(W, name + "_truth.json"), "w"))
+if SHAPE: # Ragged voids: how far the outline reaches (x the radius), for scoring
+    _th = np.linspace(0, 2 * np.pi, 360, endpoint=False)
+    json.dump({f"{r},{c}": float(np.max(_outline((r, c), np.cos(_th), np.sin(_th)))) for (r, c) in SHAPE},
+              open(os.path.join(W, name + "_shape.json"), "w"))
 ys, xs = np.mgrid[0:SIZE, 0:SIZE].astype(np.float32)
 u, v = ct.raw_to_deskew(xs, ys)
 del xs, ys
@@ -142,8 +173,12 @@ with tifffile.TiffWriter(os.path.join(W, name + ".tif")) as tw:
                 fk = 1 + rng.choice([-1, 1]) * rng.uniform(0.5, 1.3) * f
                 sk = float(np.exp(rng.uniform(np.log(G_LO), np.log(G_HI)))) if k > l0 else 1.0
                 ix = cell_idx[(r, c)]
-                d = ((lxo[ix] - vx) / (vrx * sk)) ** 2 + ((lyo[ix] - vy) / (vry * sk)) ** 2
-                soft = np.clip((1.3 - d) / 0.6, 0, 1)
+                ux, uy = (lxo[ix] - vx) / (vrx * sk), (lyo[ix] - vy) / (vry * sk)
+                d = (ux ** 2 + uy ** 2) / _outline((r, c), ux, uy) ** 2
+                if SOFT > 0: # Gaussian-like edge (logistic ~ normal CDF), sigma SOFT x the radius
+                    soft = 1.0 / (1.0 + np.exp(np.clip((np.sqrt(d) - 1.0) / (0.588 * SOFT), -50, 50)))
+                else:
+                    soft = np.clip((1.3 - d) / 0.6, 0, 1)
                 val[ix] = val[ix] * (1 + (fk - 1) * soft)
         img = np.zeros((SIZE, SIZE), np.float32)
         img[ok] = val
