@@ -23,6 +23,8 @@ layer0: Detect Voids "Layer change" found the void already visible on layer 0 (b
 the reviewer clears it (B). JSON true / false, CSV 1 / 0. Files without it read as false.
 auto_state: "detected" (detected void) / "estimated" (Detect BBOX) while not reviewed (edited)
 yet, else empty. Read back so the review can continue after loading.
+snr: signal-to-noise of a detected void on its layer (Detect Voids); hand markings 100; empty for
+bboxes. Voids below the SNR filter (Void Detection panel, meta.json "snr_min") are not written.
 
 Pixel values (positions and sizes: PIXEL_KEYS) are written scaled as if the grid's x pitch were
 NORM_PITCH_X (value x 300 / pitch_x), so files of scans with another resolution compare
@@ -73,6 +75,7 @@ JSON_FIELDS = {
     "bbox_rel_y_um": "bboxRelYUm",
     "layer0": "layer0",
     "auto_state": "autoState",
+    "snr": "snr",
 }
 
 # voids.csv
@@ -107,6 +110,7 @@ CSV_COLUMNS = {
     "bbox_rel_y_um": "BBoxRelY_um",
     "layer0": "Layer0",
     "auto_state": "AutoState",
+    "snr": "SNR",
 }
 
 

@@ -206,7 +206,7 @@ voids.json·voids.csv·결과 API의 픽셀 값(`globalCX/Y`, `centerX/Y`, `radi
     "calib_enabled": false, "calib_robust": true, "calib_all_layers": true,
     "target_mean": 30000, "target_std": 10000,
     "void_type": "edge",
-    "void_line_width": 2, "void_min_px": 5,
+    "void_line_width": 2, "void_min_px": 5, "snr_min": 0,
     "export": {"raw": true, "overlay": true, "mask": false, "merged": false, "json": true, "csv": true}
 }
 ```
@@ -360,6 +360,7 @@ Grid Configuration 묶음 아래쪽의 작은 Angle Preview(항상 표시)가 �
 **Void Detection** 패널(Void Marking 아래)의 **Detect Voids**는 대략적인 보이드를 자동으로 찾아 마킹합니다.
 
 - **평소에 쓰는 것:** 첫 줄 **Detect Voids**와 **Thr**(낮을수록 많이 찾음), 둘째 줄 검토 이동 **◀ / Next Detected ▶**(검토 전 검출로 이동, 옆에 남은 개수 또는 지금 위치 `3/36`), **Layer-0 (개수)**(레이어 0에서도 보이는 보이드로 이동).
+- **SNR ≥ 슬라이더**(0~100, 0 = 끔): 검출 보이드마다 **SNR**(그 레이어에서 보이드 신호 / 배경 잡음; Layer change는 마킹 레이어의 증거, Die-to-die는 칩 간 흩어짐 단위의 편차, PatchCore·U-Net은 각자의 점수)이 붙고, **손으로 그린 마킹은 100**입니다. 슬라이더 값보다 낮은 검출은 화면에서 숨고, 수정·Next·개수에서 빠지며, **Save JSON·Export·Results API에서도 빠집니다**(meta.json에 `snr_min`과 뺀 개수 `snr_filtered`). bbox는 거르지 않습니다. 슬라이더를 내리면 다시 보입니다(지워지지 않음). voids.json에 `snr`, voids.csv에 `SNR` 컬럼. 시작 값은 `ui_defaults`의 `"snr_min"`, Auto Run은 `"auto_run": {"snr_min": ...}`.
 - **Advanced**(눌러서 펼침, 열림 상태는 기억): 방법(Method), Mark on layer, Skip layers, Learned filter·Train·Evaluate·Seg Data, Cell status. 방법은 제품의 `detect_method` → `config.json` `"void_detect": {"method"}` → Layer change 순으로 정해지므로 보통 바꿀 일이 없습니다. **Learned filter**는 그 방법(Layer change는 그 제품)의 학습 모델이 있으면 자동으로 켜집니다(끄면 Thr로 비교).
 
 방법별 동작: 칩 안의 배경은 layout 때문에 균일하지 않지만 칩마다 반복되므로, 평평한 배경 대신 **같은 레이어의 다른 칩들과 비교**합니다(die-to-die).

@@ -680,6 +680,10 @@ def place_found(vm, found, rects, grid_cfg, coord_transform):
                           hint=(gx, gy), drag_point=far)
         v["auto"] = "detected" # Only the dashed outline until reviewed (any edit clears it)
         v["score"] = round(float(score), 1)
+        # SNR: the void's signal on its layer / the background noise (layer change: its evidence there;
+        # die-to-die: the deviation in units of the chip-to-chip spread, i.e. the score)
+        snr = c.get("snr") if isinstance(c, dict) else None
+        v["snr"] = round(float(score if snr is None else snr), 1)
         if c.get("layer0"):
             v["layer0"] = True # Already visible on layer 0 (bubble?): see void_layer_change.presence
         types[vtype] = types.get(vtype, 0) + 1
@@ -749,7 +753,7 @@ def _layer_change(read_layer, layer_numbers, skip, order, rects, size, p, progre
             continue
         box = (max(0, int(d["y"] - d["r"])), min(H - 1, int(math.ceil(d["y"] + d["r"])) - 1),
                max(0, int(d["x"] - d["r"])), min(W, int(math.ceil(d["x"] + d["r"]))))
-        c = {"box": box, "area": int(math.pi * d["r"] ** 2), "merged": 1, "score": d["score"],
+        c = {"box": box, "area": int(math.pi * d["r"] ** 2), "merged": 1, "score": d["score"], "snr": d.get("snr"),
              "status": "kept", "extent": extent}
         if "learned" in d:
             c["learned"] = d["learned"]

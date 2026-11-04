@@ -301,6 +301,8 @@ class ExportManager(QObject):
         index = {}
         for layer, v_list in self.void_manager.voids.items():
             for v in v_list:
+                if not self.void_manager.passes(v):
+                    continue # Below the SNR filter: not exported
                 gx, gy = glw.raw_to_deskew(v["globalCX"], v["globalCY"])
                 index.setdefault(cfg.cell_at(gx, gy), []).append((layer, v, gx, gy))
         return index

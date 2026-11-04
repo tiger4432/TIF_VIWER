@@ -68,6 +68,7 @@ DEFAULTS = {
     "state_file": None,       # Default: <output_root>/auto_run_state.json
     "method": None, # None: the product's "detect_method", else layer_change
     "use_learned": True,
+    "snr_min": 0.0, # SNR filter: detected voids below it are not saved / counted / sent (hand markings 100)
     "require_bonding_map": True,
     "fit_grid": True,
     "send_results": False,
@@ -571,6 +572,8 @@ class WaferRun:
         n_bbox = 0
         for layer, vs in self.vm.voids.items() if self.vm is not None else ():
             for v in vs:
+                if not self.vm.passes(v):
+                    continue # Below the SNR filter
                 if self.vm.is_bbox(v):
                     n_bbox += 1
                     continue
@@ -583,12 +586,16 @@ class WaferRun:
         l0_layer = dict(sorted(l0_layer.items(), key=lambda kv: int(kv[0])))
         return {"bboxes": n_bbox, "voids": sum(per_layer.values()), "per_layer": per_layer, "per_type": per_type,
                 "layer0": {"voids": sum(l0_layer.values()), "per_layer": l0_layer, "per_type": l0_type},
-                "bonded_cells": len(self.cells)}
+                "bonded_cells": len(self.cells),
+                "snr_min": self.vm.snr_min if self.vm is not None else 0.0,
+                "snr_filtered": sum(1 for vs in self.vm.voids.values() for v in vs if not self.vm.passes(v)) if self.vm is not None else 0}
 
     def save(self):
         """voids.json + meta.json (when markings exist) and summary.json; returns the folder."""
         self.out_dir = self.output_dir()
         self.summary["output_dir"] = os.path.abspath(self.out_dir)
+        if self.vm is not None:
+            self.vm.snr_min = float(self.s.get("snr_min") or 0.0)
         self.summary["counts"] = self.counts()
         if self.vm is not None and self.stack is not None:
             if self.ct is None:

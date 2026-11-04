@@ -559,7 +559,8 @@ def find(X, searched, p, rule="first", progress=None):
         yy, xx = (y0 + int(win.argmax()) // win.shape[1], x0 + int(win.argmax()) % win.shape[1]) \
             if float(win.max()) >= tlo else (y, x)
         dets.append({"z": first, "i": i, "x": xx + 0.5, "y": yy + 0.5,
-                     "r": 1.6 * scales[SIG[first, i, yy, xx]], "score": score})
+                     "r": 1.6 * scales[SIG[first, i, yy, xx]], "score": score,
+                     "snr": float(S[first, i, yy, xx])}) # Evidence on its layer, in units of the background noise
         if feat is not None:
             dets[-1]["features"] = feat.row(i, y, x, first, float(SIG[first, i, yy, xx]))
     l0 = p.get("lc_layer0_index") # Index of the scan's layer 0 among the loaded layers (set by void_detect)

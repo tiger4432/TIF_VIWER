@@ -104,6 +104,7 @@ class VoidManager:
         self.config_path = config_path
         
         # Undo history: snapshots of self.voids taken before each change (see checkpoint)
+        self.snr_min = 0.0 # SNR filter (Void Detection panel): voids below it hidden and not saved
         self._undo = []
         self._undo_key = None
         self._undo_time = 0.0
@@ -248,6 +249,7 @@ class VoidManager:
             p1 = to_paint(x0 + (bx + bw) * sx, y0 + (by + bh) * sy)
             painter.drawRect(QRectF(QPointF(*p0), QPointF(*p1)))
 
+    MANUAL_SNR = 100.0 # SNR of hand markings (detections carry their measured one)
     LAYER0_COLOR = (255, 0, 255) # Badge of voids already visible on layer 0 (see paint_layer0_badge)
 
     def paint_layer0_badge(self, painter: QPainter, v, cx, cy, rx, ry, ghost=False, quadrant=None):
@@ -275,6 +277,25 @@ class VoidManager:
         painter.setPen(QColor(255, 255, 255, 140 if ghost else 255))
         painter.drawText(rect, Qt.AlignCenter, "0")
         painter.restore()
+
+    def snr_of(self, v):
+        """SNR of a void: measured (detections), else the old detection score, else MANUAL_SNR (hand); None for bboxes."""
+        if self.is_bbox(v):
+            return None
+        snr = v.get("snr")
+        if snr is None and v.get("auto") == "detected":
+            snr = v.get("score")
+        return float(self.MANUAL_SNR if snr is None else snr)
+
+    def passes(self, v):
+        """True unless the SNR filter (snr_min) hides it: hidden voids are not drawn, edited, counted or saved."""
+        snr = self.snr_of(v)
+        return snr is None or snr >= self.snr_min
+
+    def visible_voids(self, layer=None):
+        """[(layer, void)] passing the SNR filter (one layer or all)."""
+        layers = [layer] if layer is not None else sorted(self.voids)
+        return [(l, v) for l in layers for v in self.voids.get(l, []) if self.passes(v)]
 
     def paint_void(self, painter: QPainter, v, cx, cy, scale=1.0, style="normal", width=1.0, quadrant=None, badges=False,
                    halo=False, min_radius=0.0):
@@ -753,7 +774,7 @@ class VoidManager:
         # corner voids lie on its outline and would otherwise lose to it.
         best = None
         for v in reversed(self.voids[layer]):
-            if not allow_bbox and self.is_bbox(v):
+            if (not allow_bbox and self.is_bbox(v)) or not self.passes(v):
                 continue
             cx, cy = v["globalCX"], v["globalCY"]
             
@@ -917,6 +938,8 @@ class VoidManager:
         records = []
         for layer in sorted(self.voids):
             for v in self.voids[layer]:
+                if not self.passes(v):
+                    continue # Below the SNR filter: not written
                 # Raw (storage) -> Deskewed (grid space)
                 gx, gy = v["globalCX"], v["globalCY"]
                 if coord_transform:
@@ -952,6 +975,7 @@ class VoidManager:
                     "bbox_rel_y": gy - bbox[1] if bbox else None,
                     "layer0": bool(v.get("layer0")), # Layer change: already visible on layer 0 (bubble?)
                     "auto_state": v.get("auto") or None, # "detected" / "estimated" until reviewed
+                    "snr": self.snr_of(v),
                 })
                 rec = records[-1]
                 for key in ("center_x", "center_y", "radius_x", "radius_y", "bbox_rel_x", "bbox_rel_y"):
@@ -980,8 +1004,10 @@ class VoidManager:
                             "scale": self.pixel_scale(grid_cfg)} if self.norm_pitch else None,
             "grid": {k: getattr(grid_cfg, k) for k in ("start_x", "start_y", "pitch_x", "pitch_y", "rows", "cols", "angle")},
             "types": self.types, # name -> {name, color, shape, ...}
-            "layer0_voids": sum(1 for vs in self.voids.values() for v in vs if v.get("layer0")),
-            "unreviewed_voids": sum(1 for vs in self.voids.values() for v in vs if v.get("auto") == "detected"),
+            "layer0_voids": sum(1 for _, v in self.visible_voids() if v.get("layer0")),
+            "unreviewed_voids": sum(1 for _, v in self.visible_voids() if v.get("auto") == "detected"),
+            "snr_min": self.snr_min, # SNR filter: voids below it were not written
+            "snr_filtered": sum(1 for vs in self.voids.values() for v in vs if not self.passes(v)),
         }
         meta.update(extra or {})
         return meta
@@ -1163,6 +1189,12 @@ class VoidManager:
             auto = self._field(item, "auto_state")
             if isinstance(auto, str) and auto:
                 v_obj["auto"] = auto
+            snr = self._field(item, "snr")
+            if snr not in (None, ""):
+                try:
+                    v_obj["snr"] = float(snr)
+                except (TypeError, ValueError):
+                    pass
 
             self.voids[layer].append(v_obj)
             count += 1

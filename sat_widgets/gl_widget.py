@@ -1076,6 +1076,8 @@ class GLImageWidget(QOpenGLWidget):
              hover = self.hover_void
 
              def paint(v, style):
+                 if not vm.passes(v):
+                     return # Below the SNR filter
                  # Raw (storage) -> Deskewed (visual, applies the grid rotation) -> Screen
                  dx, dy = self.raw_to_deskew(v["globalCX"], v["globalCY"])
                  sx, sy = self.deskew_to_screen(dx, dy)

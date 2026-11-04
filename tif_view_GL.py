@@ -521,6 +521,23 @@ class MainWindow(QMainWindow):
         h_review.addWidget(self.lbl_review)
         h_review.addWidget(btn_next_l0)
         v_det.addLayout(h_review)
+        # SNR filter: detections below it are hidden, not edited / counted, and not saved (hand markings: 100)
+        h_snr = QHBoxLayout()
+        h_snr.addWidget(QLabel("SNR \u2265"))
+        self.slider_snr = QSlider(Qt.Horizontal)
+        self.slider_snr.setRange(0, 200) # 0.5 steps up to 100
+        self.sb_snr = QDoubleSpinBox()
+        self.sb_snr.setRange(0.0, 100.0); self.sb_snr.setSingleStep(0.5); self.sb_snr.setDecimals(1)
+        tip = ("SNR filter: detected voids whose SNR (signal on their layer / background noise) is below this are\n"
+               "hidden, skipped by Next / editing / counts, and left out when saving or exporting (the value is\n"
+               "written to meta.json as snr_min). Hand markings have SNR 100; bboxes are never filtered. 0 = off.")
+        for w_ in (self.slider_snr, self.sb_snr):
+            w_.setToolTip(tip)
+        self.slider_snr.valueChanged.connect(lambda v: self.sb_snr.setValue(v / 2.0))
+        self.sb_snr.valueChanged.connect(self._set_snr_min)
+        h_snr.addWidget(self.slider_snr, 1)
+        h_snr.addWidget(self.sb_snr)
+        v_det.addLayout(h_snr)
 
         self.btn_detect_adv = QToolButton()
         self.btn_detect_adv.setText("Advanced")
@@ -787,6 +804,7 @@ class MainWindow(QMainWindow):
             "export": lambda v: None, # Read by the export dialog when it opens
             "void_line_width": lambda v: setattr(self.glw, "void_line_width", max(0.5, float(v))),
             "void_min_px": lambda v: setattr(self.glw, "void_min_px", max(0.0, float(v))),
+            "snr_min": lambda v: self.sb_snr.setValue(float(v)),
         }
 
     def _apply_ui_defaults(self):
@@ -1468,6 +1486,10 @@ class MainWindow(QMainWindow):
         if path:
             self.void_manager.save_to_file(path, self.glw.grid_cfg, self.glw.bonding_map, self.glw.coord_transform,
                                            self.void_meta())
+            vm = self.void_manager
+            hidden = sum(1 for vs in vm.voids.values() for v in vs if not vm.passes(v))
+            if hidden:
+                self.statusBar().showMessage(f"Saved without {hidden} voids below SNR {vm.snr_min:.1f} (snr_min in meta.json)")
 
     def void_meta(self):
         """Source information written to meta.json next to voids.json."""
@@ -2314,7 +2336,7 @@ class MainWindow(QMainWindow):
         items = []
         for layer, vs in self.void_manager.voids.items():
             for v in vs:
-                if pick(v):
+                if pick(v) and self.void_manager.passes(v):
                     r, c = self.glw.raw_to_cell(v["globalCX"], v["globalCY"])
                     items.append((layer, r, c))
         if not items:
@@ -2338,8 +2360,10 @@ class MainWindow(QMainWindow):
 
     def update_void_ui(self):
         # Update label count (voids are keyed by absolute layer number)
-        count = len(self.void_manager.voids.get(self.glw.current_layer, []))
-        self.lbl_void_count.setText(f"Voids: {count}")
+        vm = self.void_manager
+        here = vm.voids.get(self.glw.current_layer, [])
+        shown = sum(1 for v in here if vm.passes(v))
+        self.lbl_void_count.setText(f"Voids: {shown}" + (f"  ({len(here) - shown} hidden by SNR)" if shown < len(here) else ""))
         self._update_review_ui()
 
     def _update_review_ui(self):
@@ -2349,6 +2373,8 @@ class MainWindow(QMainWindow):
         places, l0 = set(), 0 # Next / Prev stop once per layer and cell
         for layer, vs in self.void_manager.voids.items():
             for v in vs:
+                if not self.void_manager.passes(v):
+                    continue
                 if v.get("auto") == "detected":
                     places.add((layer,) + tuple(self.glw.raw_to_cell(v["globalCX"], v["globalCY"])))
                 l0 += bool(v.get("layer0"))
@@ -2365,6 +2391,25 @@ class MainWindow(QMainWindow):
         self._review_n = todo
         self.btn_next_l0.setText(f"Layer-0 ({l0})" if l0 else "Layer-0")
         self.btn_next_l0.setEnabled(l0 > 0)
+
+    def _set_snr_min(self, value):
+        """SNR filter changed (slider / box): redraw, recount; hidden voids are not saved."""
+        value = float(value)
+        if int(round(value * 2)) != self.slider_snr.value():
+            self.slider_snr.blockSignals(True)
+            self.slider_snr.setValue(int(round(value * 2)))
+            self.slider_snr.blockSignals(False)
+        vm = self.void_manager
+        vm.snr_min = value
+        if self.glw.active_void is not None and not vm.passes(self.glw.active_void):
+            self.glw.active_void = None
+        self._review_pos = None
+        self.glw.refresh_hover()
+        self.update_void_ui()
+        hidden = sum(1 for vs in vm.voids.values() for v in vs if not vm.passes(v))
+        self.statusBar().showMessage(f"SNR filter {value:.1f}: {hidden} voids hidden (not saved)" if value > 0
+                                     else "SNR filter off")
+        self.glw.update()
 
     def _ui_state(self, key, default):
         """Per-user window state (QSettings), not a declaration: e.g. the Advanced section open."""

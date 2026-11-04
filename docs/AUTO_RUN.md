@@ -110,6 +110,7 @@ python tools/auto_run.py --once D:/SAT/raw/LOT1234_W07.tif
 | `threshold` | 방법의 기본값 (`void_detect`의 `lc_threshold` 등) | 검출 Thr |
 | `void_type` | `ui_defaults.void_type`, 없으면 bbox가 아닌 첫 타입 | 자동 마킹 타입 |
 | `skip_layers`, `layer_rule` | `ui_defaults` → `void_detect` | 뷰어의 Skip layers / Mark on layer |
+| `snr_min` | `0` | SNR 필터: 검출 보이드 중 SNR이 이보다 낮은 것은 저장·개수·전송·알림에서 뺌(손 마킹은 100, meta.json·summary.json에 `snr_min`, 뺀 개수 `snr_filtered`) |
 | `use_learned` | `true` | 제품의 학습 필터(예: `~/TIF_Viewer_train/products/<제품>/lc_classifier.json`)가 **있으면** 사용 |
 | `require_bonding_map` | `true` | 본딩맵을 못 가져오면 멈춤. `false`면 모든 칸 검사 |
 | `fit_grid` | `true` | bbox로 그리드 맞추고 bbox 다시 검출 |
