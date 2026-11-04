@@ -16,7 +16,8 @@ import tifffile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from sat_widgets.core_data import CoordinateTransform # noqa: E402
 
-ORG, P, B, ANG, R = 100, 300, 280, 0.4, 14
+_B = int(os.environ.get("CHIP", 280)) # Chip (bbox) size in px; the layout pattern scales with it
+ORG, P, B, ANG, R = 100, int(os.environ.get("PITCH", _B + 20)), _B, 0.4, int(os.environ.get("NCHIP", 14))
 M = (P - B) / 2
 
 

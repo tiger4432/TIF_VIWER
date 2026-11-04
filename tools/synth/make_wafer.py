@@ -8,6 +8,9 @@ LAYOUT_FROM=k: layout (die, lines, bumps, pad) only from layer k on; the layers 
 NL_EXTRA=n: n more layers below the NL layers (voids only start on the first NL; they continue
     below): a deeper scan. The first NL layers are the same as without it.
 NOISE=s: pixel noise standard deviation (8-bit levels, default 4).
+CHIP=px (default 280), PITCH=px (default CHIP + 20), NCHIP=n (default 14): chip size, cell pitch and
+    chips per side; the layout pattern (lines, bumps, pad, die edge) and the void margins scale with
+    CHIP / 280 (e.g. CHIP=600 PITCH=640 NCHIP=10 VOID_R=10,150 for production-size chips with large voids).
 ALIGNED=1: the chip offset (jitter) is the same on every layer, as the gates of one scan are; the
     default draws it per layer (layers of a chip shifted by up to ~1 px against each other).
     -> OUTDIR/NAME.tif (8-bit pages = layers) and OUTDIR/NAME_truth.json
@@ -28,8 +31,10 @@ from sat_widgets.void_detect import _blur
 
 t0 = time.time()
 rng = np.random.default_rng(int(os.environ.get("SEED", 31)))
-P, B, ORG, ANG = 300, 280, 100, 0.4
-R = C = 14
+B = int(os.environ.get("CHIP", 280))
+P, ORG, ANG = int(os.environ.get("PITCH", B + 20)), 100, 0.4
+R = C = int(os.environ.get("NCHIP", 14))
+K = B / 280.0 # Layout pattern scale (1 = the original 280 px chips)
 NL = int(os.environ.get("NL", 8))
 LAYOUT_FROM = int(os.environ.get("LAYOUT_FROM", 0))
 LAYOUT_RESID = float(os.environ.get("LAYOUT_RESID", 0.03))
@@ -41,16 +46,17 @@ SIZE = ORG * 2 + P * R
 m = (P - B) / 2
 yy, xx = np.mgrid[0:B, 0:B].astype(np.float32)
 line_maps = []
-for y0 in range(20, B - 10, 35):
-    a = np.zeros((B, B), np.float32); a[(np.abs(yy - y0) < 2) & (xx > 10) & (xx < B - 10)] = 1; line_maps.append(a)
-for x0 in range(25, B - 10, 35):
-    a = np.zeros((B, B), np.float32); a[(np.abs(xx - x0) < 2) & (yy > 10) & (yy < B - 10)] = 1; line_maps.append(a)
+_s = lambda v: int(round(v * K))
+for y0 in range(_s(20), B - _s(10), _s(35)):
+    a = np.zeros((B, B), np.float32); a[(np.abs(yy - y0) < 2 * K) & (xx > 10 * K) & (xx < B - 10 * K)] = 1; line_maps.append(a)
+for x0 in range(_s(25), B - _s(10), _s(35)):
+    a = np.zeros((B, B), np.float32); a[(np.abs(xx - x0) < 2 * K) & (yy > 10 * K) & (yy < B - 10 * K)] = 1; line_maps.append(a)
 bumps = np.zeros((B, B), np.float32)
-for cx in range(42, B - 30, 35):
-    for cy in range(37, B - 30, 35):
-        bumps[(xx - cx) ** 2 + (yy - cy) ** 2 < 36] = 1
-pad = np.zeros((B, B), np.float32); pad[(xx > 190) & (xx < 250) & (yy > 200) & (yy < 240)] = 1
-die = np.zeros((B, B), np.float32); die[(xx > 8) & (xx < B - 8) & (yy > 8) & (yy < B - 8)] = 1
+for cx in range(_s(42), B - _s(30), _s(35)):
+    for cy in range(_s(37), B - _s(30), _s(35)):
+        bumps[(xx - cx) ** 2 + (yy - cy) ** 2 < 36 * K * K] = 1
+pad = np.zeros((B, B), np.float32); pad[(xx > 190 * K) & (xx < 250 * K) & (yy > 200 * K) & (yy < 240 * K)] = 1
+die = np.zeros((B, B), np.float32); die[(xx > 8 * K) & (xx < B - 8 * K) & (yy > 8 * K) & (yy < B - 8 * K)] = 1
 
 
 def wavy(scale, amp):
@@ -61,13 +67,13 @@ def wavy(scale, amp):
 
 def structure():
     lines = sum(lm * rng.uniform(0.4, 1.0) for lm in line_maps)
-    s1, s2 = rng.uniform(1.0, 2.5), rng.uniform(3.0, 6.5)
+    s1, s2 = rng.uniform(1.0, 2.5) * K, rng.uniform(3.0, 6.5) * K
     wgt = np.clip(0.5 + 0.5 * np.sin(xx / B * rng.uniform(1, 4) + rng.uniform(0, 6)) * np.cos(yy / B * rng.uniform(1, 4)), 0, 1)
     lines = (1 - wgt) * _blur(lines, s1) + wgt * _blur(lines, s2) * 1.6
     a = rng.uniform(0, 2 * np.pi)
     light = 1 + ((xx - B / 2) * np.cos(a) + (yy - B / 2) * np.sin(a)) / B * rng.uniform(0.1, 0.5) \
         + wavy(int(rng.integers(3, 6)), rng.uniform(0.04, 0.12))
-    return lines, _blur(bumps, rng.uniform(0.8, 2.5)), light
+    return lines, _blur(bumps, rng.uniform(0.8, 2.5) * K), light
 
 
 def layer_mix(st, a=1.0):
@@ -84,7 +90,7 @@ for r in range(R):
     for c in range(C):
         if rng.random() < 0.3:
             l0 = int(rng.integers(0, NL))
-            truth[(r, c)] = (float(rng.uniform(35, B - 35)), float(rng.uniform(35, B - 35)),
+            truth[(r, c)] = (float(rng.uniform(35 * K, B - 35 * K)), float(rng.uniform(35 * K, B - 35 * K)),
                              float(rng.uniform(R_LO, R_HI)), float(rng.uniform(R_LO, R_HI)), l0, NL - 1,
                              float(rng.uniform(0.06, 0.14)))
 ct = CoordinateTransform(ANG, SIZE, SIZE)
