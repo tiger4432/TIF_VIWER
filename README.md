@@ -207,6 +207,7 @@ voids.json·voids.csv·결과 API의 픽셀 값(`globalCX/Y`, `centerX/Y`, `radi
     "target_mean": 30000, "target_std": 10000,
     "void_type": "edge",
     "void_line_width": 2, "void_min_px": 5, "snr_min": 0,
+    "origin_x": 5000, "origin_y": 5000,
     "export": {"raw": true, "overlay": true, "mask": false, "merged": false, "json": true, "csv": true}
 }
 ```
@@ -216,6 +217,7 @@ voids.json·voids.csv·결과 API의 픽셀 값(`globalCX/Y`, `centerX/Y`, `radi
 
 - 모르는 키는 무시하고 콘솔에 쓸 수 있는 키 목록을 출력합니다.
 - `um_per_px`는 제품에 `um_per_px`가 있으면 제품 값이 우선합니다.
+- `origin_x` / `origin_y`: 그리드 원점(Origin X/Y)의 기본값. 제품의 `grid`에 `start_x` / `start_y`가 있으면 제품 값이 우선합니다. Auto Run도 같은 값을 씁니다.
 - Detect Voids의 방법·Thr 기본값은 `"void_detect"`(`method`: `die_to_die` / `layer_change` / `patchcore`, `threshold`, `lc_threshold`, `pc_threshold`)에 적습니다.
 
 ### Wafer ID
@@ -451,6 +453,7 @@ Detect BBOX를 누르면 기존 bbox(모든 칸, 모든 레이어)를 모두 지
 5. 합성 웨이퍼(14×14칩, 칩 40%의 한쪽 경계가 4~15 px 튀어나옴, 선언 격자 각도 0.25°/원점 12 px 어긋남): bbox 오차 최대 2.0 px(경계 방식 20.7 px), 각도 0.397°(실제 0.4°). 196칩 약 6초.
 
 - **Refine BBOX:** 지금 bbox들을 다시 레이아웃으로 맞춥니다. **이번에 손으로 놓거나 옮긴 bbox는 그대로 두고** 나머지를 그 위치 기준으로 맞춥니다(몇 개만 손으로 고쳐 기준을 잡는 용도).
+- **Auto BBOX + Grid:** 버튼 하나로 Detect BBOX → Fit Grid(확인 없이 적용) → 맞춘 격자로 Detect BBOX를 다시 합니다(Auto Run과 같은 순서). 맞춘 결과가 이상하면(잔차 > 3 px 또는 각도가 1° 넘게 바뀜, `auto_run.qc`의 `max_fit_rms_px` / `max_angle_change`) 경고합니다. 상태 표시줄에 전후 원점·피치·각도가 나옵니다.
 - **Fit Grid:** bbox 중심들로 격자 원점·피치·각도를 맞춰, 지금 값과 비교해 보여 주고 확인하면 적용합니다(products.json은 바꾸지 않음). bbox가 칸 안에서 놓인 평균 위치(선언된 원점 규칙)는 유지합니다. 각도가 장비마다 조금 다를 때 씁니다. 순서: Detect BBOX → Fit Grid → (필요하면) Refine BBOX.
 - 예전 방식(`"method": "edge"`)은 아래 경계 검출이고, `layout_refine`(기본 켜짐)이면 이어서 레이아웃으로 맞춥니다.
 

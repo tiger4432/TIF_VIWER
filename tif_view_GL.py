@@ -695,6 +695,11 @@ class MainWindow(QMainWindow):
         btn_next_est = QPushButton("Next Estimated")
         btn_next_est.setToolTip("Go to the next bbox that was estimated because detection failed (drawn dashed)")
         btn_next_est.clicked.connect(self.next_estimated_bbox)
+        btn_bbox_grid = QPushButton("Auto BBOX + Grid")
+        btn_bbox_grid.setToolTip("Detect BBOX, Fit Grid (applied without asking) and Detect BBOX again on the fitted grid,\n"
+                                 "as the Auto Run does. Warns when the fit looks wrong (config auto_run qc limits).")
+        btn_bbox_grid.clicked.connect(self.auto_bbox_grid)
+        form_calib.addRow(btn_bbox_grid)
         h_auto.addWidget(btn_auto_bbox)
         h_auto.addWidget(btn_refine_bbox)
         form_calib.addRow(h_auto)
@@ -805,6 +810,8 @@ class MainWindow(QMainWindow):
             "void_line_width": lambda v: setattr(self.glw, "void_line_width", max(0.5, float(v))),
             "void_min_px": lambda v: setattr(self.glw, "void_min_px", max(0.0, float(v))),
             "snr_min": lambda v: self.sb_snr.setValue(float(v)),
+            "origin_x": lambda v: self.sb_grid_x.setValue(float(v)),
+            "origin_y": lambda v: self.sb_grid_y.setValue(float(v)),
         }
 
     def _apply_ui_defaults(self):
@@ -1539,12 +1546,47 @@ class MainWindow(QMainWindow):
                 return name
         return None
 
-    def auto_bbox(self):
-        """Detects and draws the reference bbox of every (bonded) cell on the topmost layer."""
+    def auto_bbox_grid(self):
+        """One click: Detect BBOX -> Fit Grid (applied) -> Detect BBOX on the fitted grid (pipeline.step_bbox)."""
+        if self._detect_busy() or self.full_data is None or self.glw.tiled_image is None:
+            return
+        cfg = self.glw.grid_cfg
+        before = {k: getattr(cfg, k) for k in ("start_x", "start_y", "pitch_x", "pitch_y", "angle")}
+        first = self.auto_bbox(report=False)
+        if first is None:
+            return
+        new = self.fit_grid_to_bboxes(confirm=False)
+        if new is None:
+            self._report_layout_bbox("Auto BBOX + Grid (grid not fitted)", first, len(self._bbox_setup("Auto BBOX")[2]))
+            return
+        second = self.auto_bbox(report=False)
+        if second is None:
+            return
+        n_cells = len(self._bbox_setup("Auto BBOX")[2])
+        self._report_layout_bbox("Auto BBOX + Grid", second, n_cells)
+        msg = (f"Auto BBOX + Grid: origin ({before['start_x']:.1f}, {before['start_y']:.1f}) -> ({new['Origin X']:.1f}, "
+               f"{new['Origin Y']:.1f}), pitch ({new['Pitch X']:.2f}, {new['Pitch Y']:.2f}), angle {before['angle']:.3f} -> "
+               f"{new['Angle']:.3f} deg, residual {new['rms']:.2f} px; {second['refined']} aligned, "
+               f"{len(second['estimated'])} estimated")
+        self.statusBar().showMessage(msg)
+        print(msg)
+        qc = dict(self._config().get("auto_run", {}).get("qc") or {})
+        lim_rms, lim_ang = qc.get("max_fit_rms_px", 3.0), qc.get("max_angle_change", 1.0)
+        bad = []
+        if lim_rms is not None and new["rms"] > lim_rms:
+            bad.append(f"residual {new['rms']:.2f} px > {lim_rms} px")
+        if lim_ang is not None and abs(new["Angle"] - before["angle"]) > lim_ang:
+            bad.append(f"angle changed by {abs(new['Angle'] - before['angle']):.2f} deg (> {lim_ang})")
+        if bad:
+            QMessageBox.warning(self, "Auto BBOX + Grid", "The fitted grid looks wrong: " + "; ".join(bad) +
+                                ".\nCheck the origin / pitch (Ctrl+Z undoes the bboxes; set the grid back by hand).")
+
+    def auto_bbox(self, report=True):
+        """Detects and draws the reference bbox of every (bonded) cell on the topmost layer; returns the result."""
         if self._detect_busy():
-            return
+            return None
         if self.full_data is None or self.glw.tiled_image is None:
-            return
+            return None
         tid = self._bbox_type_name()
         if tid is None:
             QMessageBox.warning(self, "Detect BBOX", "No void type named 'bbox' is declared in config.json.")
@@ -1595,12 +1637,13 @@ class MainWindow(QMainWindow):
         if result is None:
             if layout:
                 QMessageBox.warning(self, "Detect BBOX", "Not enough chips to align (at least 3 bonded cells).")
-            return
+            return None
         self.glw.update()
         self.update_void_ui()
         if layout:
-            self._report_layout_bbox("Detect BBOX", result, len(cells))
-            return
+            if report:
+                self._report_layout_bbox("Detect BBOX", result, len(cells))
+            return result
         msg = (f"Detect BBOX on layer {top_layer}: {result['detected']} detected, "
                f"{len(result['estimated'])} estimated (dashed, check with 'Next Estimated'), "
                f"{len(result['failed'])} failed")
@@ -1611,6 +1654,7 @@ class MainWindow(QMainWindow):
         if result["failed"] and not result["detected"]:
             QMessageBox.warning(self, "Detect BBOX", "No box edge could be detected. Check the grid origin/pitch "
                                 "and the bbox size, or adjust auto_bbox in config.json.")
+        return result
 
     def _report_layout_bbox(self, title, result, n_cells):
         est = len(result["estimated"])
@@ -1677,18 +1721,19 @@ class MainWindow(QMainWindow):
         self.update_void_ui()
         self._report_layout_bbox("Refine BBOX", result, len(cells))
 
-    def fit_grid_to_bboxes(self):
-        """Grid origin / pitch / angle fitted to the bbox centers (auto_bbox.fit_grid), applied when confirmed.
-        The bboxes keep their place in the cells (their median offset from the cell centres)."""
+    def fit_grid_to_bboxes(self, confirm=True):
+        """Grid origin / pitch / angle fitted to the bbox centers (auto_bbox.fit_grid), applied when confirmed
+        (confirm=False: applied directly). The bboxes keep their place in the cells (their median offset from
+        the cell centres). Returns the applied values (+ "rms", "n") or None."""
         if self._detect_busy():
-            return
+            return None
         if self.full_data is None:
-            return
+            return None
         cfg, ct, vm = self.glw.grid_cfg, self.glw.coord_transform, self.void_manager
         f = fit_grid(vm, cfg, ct, self.full_data.width, self.full_data.height)
         if f is None:
             QMessageBox.warning(self, "Fit Grid", "At least 4 bboxes over 2 rows and 2 columns are needed (Detect BBOX first).")
-            return
+            return None
         to_deskew = ct.raw_to_deskew if ct else (lambda x, y: (x, y))
         offs = []
         for vs in vm.voids.values():
@@ -1703,13 +1748,18 @@ class MainWindow(QMainWindow):
                "Pitch Y": f["pitch_y"], "Angle": f["angle"]}
         old = {"Origin X": cfg.start_x, "Origin Y": cfg.start_y, "Pitch X": cfg.pitch_x, "Pitch Y": cfg.pitch_y, "Angle": cfg.angle}
         rows = "\n".join(f"{k}: {old[k]:.3f} -> {new[k]:.3f}" for k in new)
-        if QMessageBox.question(self, "Fit Grid", f"Grid fitted to {f['n']} bboxes (residual {f['rms']:.2f} px):\n\n{rows}\n\n"
-                                "Apply? (products.json is not changed)", QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
-            return
+        if confirm and QMessageBox.question(
+                self, "Fit Grid", f"Grid fitted to {f['n']} bboxes (residual {f['rms']:.2f} px):\n\n{rows}\n\n"
+                "Apply? (products.json is not changed)", QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return None
         for sb, k in ((self.sb_grid_x, "Origin X"), (self.sb_grid_y, "Origin Y"), (self.sb_pitch_x, "Pitch X"),
                       (self.sb_pitch_y, "Pitch Y"), (self.sb_angle, "Angle")):
             sb.setValue(new[k])
+        cfg.start_x, cfg.start_y = new["Origin X"], new["Origin Y"] # Exact (the boxes round)
+        cfg.pitch_x, cfg.pitch_y, cfg.angle = new["Pitch X"], new["Pitch Y"], new["Angle"]
+        self.glw.update_grid_params()
         self.statusBar().showMessage(f"Fit Grid applied ({f['n']} bboxes, residual {f['rms']:.2f} px)")
+        return dict(new, rms=f["rms"], n=f["n"])
 
     def next_estimated_bbox(self):
         """Navigates through the bboxes estimated by Detect BBOX (row-major order)."""

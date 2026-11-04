@@ -326,6 +326,10 @@ class WaferRun:
         """As MainWindow.apply_product: declared grid keys, scale, bbox default size, layout."""
         self.product_name, self.product = name, prod
         self.summary["product"] = name
+        ui = self.config.get("ui_defaults") or {} # Origin default (the product's grid wins when it declares one)
+        for key, ukey in (("start_x", "origin_x"), ("start_y", "origin_y")):
+            if ui.get(ukey) is not None:
+                setattr(self.grid, key, float(ui[ukey]))
         for key in GRID_KEYS:
             if key in prod.get("grid", {}):
                 setattr(self.grid, key, prod["grid"][key])
