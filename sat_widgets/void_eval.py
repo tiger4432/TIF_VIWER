@@ -353,7 +353,7 @@ class Evaluation:
         """
         p = self.p
         m = ("l" if p.get("learned_model") is not None else "d") if p.get("method") == "die_to_die" else \
-            "c" if p.get("method") == "layer_change" else "p"
+            (("k" if p.get("learned_model") is not None else "c") if p.get("method") == "layer_change" else "p")
         if p.get("seg_model") is not None:
             m = "s" if p["seg_model"].mode == "seg" else "r"
         thr = _threshold(p)
