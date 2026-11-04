@@ -593,8 +593,14 @@ class MainWindow(QMainWindow):
         btn_train.setToolTip("Add this file's hand markings to the training set and retrain the learned filter\n"
                              "(one entry per file; training the same file again replaces it)")
         btn_train.clicked.connect(self.train_detector)
+        btn_reset_learn = QPushButton("Reset")
+        btn_reset_learn.setToolTip("Starts the learned filter of this method (Layer change: of this product) over: its model and\n"
+                                   "training set are renamed to *.bak (kept, can be restored). A shared model declared in\n"
+                                   "products.json / config.json is not touched.")
+        btn_reset_learn.clicked.connect(self.reset_learned)
         h_learn.addWidget(self.chk_learned)
         h_learn.addWidget(btn_train)
+        h_learn.addWidget(btn_reset_learn)
         h_learn.addWidget(btn_eval)
         btn_seg = QPushButton("Seg Data")
         btn_seg.setToolTip("Build and review the U-Net training data from marked files (docs/SEGMENTATION.md)")
@@ -2340,6 +2346,43 @@ class MainWindow(QMainWindow):
                 + (f"Product: {product[0]}\n" if product else "") + f"Model: {path}\nTraining set: {dataset}")
         print("Train:\n" + full)
         EvalDialog(self, full, os.path.dirname(path), None, len(truths), short).exec()
+
+    def reset_learned(self):
+        """Learned filter of the current method / product back to none: model and training set renamed to
+        *.<time>.bak under the training folder; a declared (shared) model elsewhere stays."""
+        if self._detect_busy():
+            return
+        method = self.cb_detect_method.currentData()[0]
+        if method not in ("die_to_die", "layer_change"):
+            QMessageBox.information(self, "Reset", "The learned filter is for Die-to-die and Layer change.")
+            return
+        product = self._product_key() if method == "layer_change" else None
+        model = void_learn.model_path(self._config().get("void_detect", {}), method, product)
+        dataset = void_learn.dataset_path(method, product)
+        own = os.path.abspath(void_learn.TRAIN_DIR)
+        local = lambda f: os.path.abspath(f).startswith(own + os.sep)
+        files = [f for f in (model, dataset) if os.path.exists(f) and local(f)]
+        shared = os.path.exists(model) and not local(model)
+        what = f"{'Layer change' if method == 'layer_change' else 'Die-to-die'}" + (f", product {product[0]}" if product else "")
+        if not files:
+            QMessageBox.information(self, "Reset", f"No local learned filter for {what}." +
+                                    (f"\nThe shared model {model} (declared) is not changed here." if shared else ""))
+            return
+        if QMessageBox.question(self, "Reset", f"Reset the learned filter for {what}?\n\n" + "\n".join(files) +
+                                "\n\nThe files are renamed to *.bak (kept). Train again to build a new one." +
+                                (f"\n\nThe shared model {model} is declared and stays in use." if shared else ""),
+                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        moved = []
+        for f in files:
+            dst = f"{f}.{stamp}.bak"
+            os.replace(f, dst)
+            moved.append(dst)
+        self._update_learned_state()
+        msg = f"Learned filter reset ({what}): " + ", ".join(os.path.basename(m) for m in moved)
+        self.statusBar().showMessage(msg)
+        print(msg)
 
     def evaluate_detection(self):
         """
