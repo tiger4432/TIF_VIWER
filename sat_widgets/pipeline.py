@@ -437,7 +437,8 @@ class WaferRun:
             f = fit_grid(self.vm, self.grid, self.ct, self.stack.width, self.stack.height)
             if f is None:
                 raise GateFailed("Fit Grid: at least 4 bboxes over 2 rows and 2 columns are needed")
-            off = self._bbox_offset()
+            # Origin corrected too (cells centred on the bboxes) unless auto_bbox keep_offset
+            off = self._bbox_offset() if params.get("keep_offset", False) else (0.0, 0.0)
             info["fit"] = {k: f[k] for k in ("start_x", "start_y", "pitch_x", "pitch_y", "angle", "rms", "n")}
             self.summary["qc"]["fit_rms_px"] = f["rms"]
             self.summary["qc"]["angle_change"] = f["angle"] - declared["angle"]
@@ -446,7 +447,7 @@ class WaferRun:
             if qc.get("max_angle_change") is not None and abs(f["angle"] - declared["angle"]) > qc["max_angle_change"]:
                 raise GateFailed(f"fitted angle {f['angle']:.3f} deg is {abs(f['angle'] - declared['angle']):.2f} deg "
                                  "off the declared one")
-            # As MainWindow.fit_grid_to_bboxes: the bboxes keep their median offset in the cells
+            # As MainWindow.fit_grid_to_bboxes
             self.grid.start_x, self.grid.start_y = f["start_x"] - off[0], f["start_y"] - off[1]
             self.grid.pitch_x, self.grid.pitch_y, self.grid.angle = f["pitch_x"], f["pitch_y"], f["angle"]
             self.update_transform()

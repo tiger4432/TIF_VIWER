@@ -1750,8 +1750,9 @@ class MainWindow(QMainWindow):
 
     def fit_grid_to_bboxes(self, confirm=True):
         """Grid origin / pitch / angle fitted to the bbox centers (auto_bbox.fit_grid), applied when confirmed
-        (confirm=False: applied directly). The bboxes keep their place in the cells (their median offset from
-        the cell centres). Returns the applied values (+ "rms", "n") or None."""
+        (confirm=False: applied directly): the cells end up centred on the bboxes (config auto_bbox keep_offset:
+        the bboxes keep their median offset from the cell centres instead). Returns the applied values
+        (+ "rms", "n") or None."""
         if self._detect_busy():
             return None
         if self.full_data is None:
@@ -1770,7 +1771,10 @@ class MainWindow(QMainWindow):
                     k = cfg.cell_at(gx, gy)
                     if k is not None:
                         offs.append((gx - cfg.start_x - (k[1] + 0.5) * cfg.pitch_x, gy - cfg.start_y - (k[0] + 0.5) * cfg.pitch_y))
-        off = np.median(offs, axis=0) if offs else (0.0, 0.0)
+        # The origin is corrected too (cells centred on the bboxes), unless config auto_bbox keep_offset: then
+        # the bboxes keep their median place in the cells (a declared off-centre origin rule)
+        keep = bool((self._config().get("auto_bbox") or {}).get("keep_offset", False))
+        off = np.median(offs, axis=0) if (offs and keep) else (0.0, 0.0)
         new = {"Origin X": f["start_x"] - off[0], "Origin Y": f["start_y"] - off[1], "Pitch X": f["pitch_x"],
                "Pitch Y": f["pitch_y"], "Angle": f["angle"]}
         old = {"Origin X": cfg.start_x, "Origin Y": cfg.start_y, "Pitch X": cfg.pitch_x, "Pitch Y": cfg.pitch_y, "Angle": cfg.angle}

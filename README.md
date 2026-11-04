@@ -453,8 +453,8 @@ Detect BBOX를 누르면 기존 bbox(모든 칸, 모든 레이어)를 모두 지
 5. 합성 웨이퍼(14×14칩, 칩 40%의 한쪽 경계가 4~15 px 튀어나옴, 선언 격자 각도 0.25°/원점 12 px 어긋남): bbox 오차 최대 2.0 px(경계 방식 20.7 px), 각도 0.397°(실제 0.4°). 196칩 약 6초.
 
 - **Refine BBOX:** 지금 bbox들을 다시 레이아웃으로 맞춥니다. **이번에 손으로 놓거나 옮긴 bbox는 그대로 두고** 나머지를 그 위치 기준으로 맞춥니다(몇 개만 손으로 고쳐 기준을 잡는 용도).
-- **Auto BBOX + Grid:** 버튼 하나로 Detect BBOX → Fit Grid(확인 없이 적용) → 맞춘 격자로 Detect BBOX를 다시 합니다(Auto Run과 같은 순서). 맞춘 결과가 이상하면(잔차 > 3 px 또는 각도가 1° 넘게 바뀜, `auto_run.qc`의 `max_fit_rms_px` / `max_angle_change`) 경고합니다. 상태 표시줄에 전후 원점·피치·각도가 나옵니다.
-- **Fit Grid:** bbox 중심들로 격자 원점·피치·각도를 맞춰, 지금 값과 비교해 보여 주고 확인하면 적용합니다(products.json은 바꾸지 않음). bbox가 칸 안에서 놓인 평균 위치(선언된 원점 규칙)는 유지합니다. 각도가 장비마다 조금 다를 때 씁니다. 순서: Detect BBOX → Fit Grid → (필요하면) Refine BBOX.
+- **Auto BBOX + Grid:** 버튼 하나로 Detect BBOX → Fit Grid(확인 없이 적용) → 맞춘 격자로 Detect BBOX를 다시 합니다(Auto Run과 같은 순서). 원점·피치·각도가 모두 맞춰집니다. 맞춘 결과가 이상하면(잔차 > 3 px 또는 각도가 1° 넘게 바뀜, `auto_run.qc`의 `max_fit_rms_px` / `max_angle_change`) 경고합니다. 상태 표시줄에 전후 원점·피치·각도가 나옵니다.
+- **Fit Grid:** bbox 중심들로 격자 원점·피치·각도를 맞춰, 지금 값과 비교해 보여 주고 확인하면 적용합니다(products.json은 바꾸지 않음). 원점도 바로잡아 **칸 중심이 bbox 중심에 오게** 합니다(칸 번호는 그대로: 각 칸에서 찾은 bbox가 그 칸의 중심이 됨). 칸 원점을 일부러 칩 중심이 아닌 곳에 두는 제품이면 config.json `"auto_bbox": {"keep_offset": true}`로 예전처럼 bbox가 칸 안에 놓인 평균 위치를 유지합니다. 각도가 장비마다 조금 다를 때도 씁니다. 순서: Detect BBOX → Fit Grid → (필요하면) Refine BBOX.
 - 예전 방식(`"method": "edge"`)은 아래 경계 검출이고, `layout_refine`(기본 켜짐)이면 이어서 레이아웃으로 맞춥니다.
 
 **경계 방식(`"method": "edge"`)**: Auto Calibration 패널의 "Detect BBOX"를 누르면 최상단 레이어에서 본딩된 칸마다 다음을 수행합니다.
