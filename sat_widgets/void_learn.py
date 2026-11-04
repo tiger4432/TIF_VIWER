@@ -471,18 +471,21 @@ def train_model(cand_threshold, path, rounds=200, dataset=None, features=None, t
     return data
 
 
-def label_rows(collected, truths, any_layer=False):
+def label_rows(collected, truths, any_layer=False, unknown=()):
     """
     Training rows from collected candidates [(layer, cell, [(Deskewed box, area, features)])] and
     hand markings
     [{"layer", "cell", "box" (Deskewed x0, y0, x1, y1)}]: a candidate whose center lies in a hand
     marking (or holds its center) on the same layer and cell is a void (1); over a hand marking on
     another layer it is left out (any_layer: a void too, for a filter that decides the place only);
-    otherwise 0. Returns (rows, markings covered by a candidate).
+    otherwise 0. unknown: places not reviewed yet (detections still dashed; same form, any layer): a
+    candidate there is left out, neither void nor non-void. Returns (rows, markings covered by a candidate).
     """
-    by_cell = {}
+    by_cell, unk = {}, {}
     for i, t in enumerate(truths):
         by_cell.setdefault(tuple(t["cell"]), []).append((i, t))
+    for t in unknown:
+        unk.setdefault(tuple(t["cell"]), []).append(t["box"])
     rows, covered = [], set()
     for layer, cell, cands in collected:
         for b, _, feats in cands:
@@ -500,6 +503,9 @@ def label_rows(collected, truths, any_layer=False):
                         covered.add(i)
                         break
                     label = None # Over a marking of another layer: not used
+            if label == 0 and any(ub[0] <= cx <= ub[2] and ub[1] <= cy <= ub[3] or b[0] <= (ub[0] + ub[2]) / 2 <= b[2]
+                                  and b[1] <= (ub[1] + ub[3]) / 2 <= b[3] for ub in unk.get(tuple(cell), ())):
+                label = None # Not reviewed: unknown
             if label is not None:
                 rows.append({"x": [round(float(v), 5) for v in feats], "y": label, "g": f"{cell[0]},{cell[1]}"})
     return rows, len(covered)

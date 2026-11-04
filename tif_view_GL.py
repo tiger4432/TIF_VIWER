@@ -2100,8 +2100,9 @@ class MainWindow(QMainWindow):
         self.glw.show_detect_state = on
         self.glw.update()
 
-    def _hand_truths(self, layers, refs):
-        """Hand markings (not bboxes, not unreviewed detections) on the loaded layers, as drawn boxes."""
+    def _hand_truths(self, layers, refs, unreviewed=False):
+        """Hand markings (not bboxes, not unreviewed detections) on the loaded layers, as drawn boxes;
+        unreviewed=True: the detections not reviewed yet instead (auto "detected", still dashed)."""
         vm, cfg, ct = self.void_manager, self.glw.grid_cfg, self.glw.coord_transform
         to_deskew = ct.raw_to_deskew if ct else (lambda x, y: (x, y))
         truths = []
@@ -2109,7 +2110,7 @@ class MainWindow(QMainWindow):
             if layer not in layers:
                 continue
             for v in vs:
-                if vm.is_bbox(v) or v.get("auto"):
+                if vm.is_bbox(v) or (v.get("auto") == "detected") != unreviewed or (not unreviewed and v.get("auto")):
                     continue # Hand markings only (reviewed detections count: editing clears "auto")
                 gx, gy = to_deskew(v["globalCX"], v["globalCY"])
                 rx, ry = v["radiusX"], v["radiusY"]
@@ -2171,8 +2172,15 @@ class MainWindow(QMainWindow):
         type_name, cells, refs, params, layers = setup
         vm, cfg, ct = self.void_manager, self.glw.grid_cfg, self.glw.coord_transform
         truths = self._hand_truths(layers, refs)
+        pending = self._hand_truths(layers, refs, unreviewed=True)
         if not truths and QMessageBox.question(
                 self, "Train", "No hand markings on the loaded layers: this file adds only non-voids.\nContinue?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        if pending and QMessageBox.question(
+                self, "Train", f"{len(pending)} detected voids are not reviewed yet (dashed).\n"
+                "Their places are left out of the training (neither void nor non-void).\n"
+                "Review them first (E + click: correct, R + click: wrong) to use them. Continue?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return
         params.pop("learned_model", None)
@@ -2194,7 +2202,7 @@ class MainWindow(QMainWindow):
         if result is None:
             return
         # Layer change: the filter decides the place only (the layer comes from the layer rule)
-        rows, covered = void_learn.label_rows(collected, truths, any_layer=lc)
+        rows, covered = void_learn.label_rows(collected, truths, any_layer=lc, unknown=pending)
         key = self.lbl_source.toolTip() or self.le_wafer_id.text() or "unnamed"
         product = self._product_key() if lc else None # Layer change: one model per product
         dataset = void_learn.dataset_path(method, product)
