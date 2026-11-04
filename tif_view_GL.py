@@ -785,6 +785,8 @@ class MainWindow(QMainWindow):
             "layer_rule": layer_rule,
             "skip_layers": lambda v: self.le_skip_layers.setText(", ".join(map(str, v)) if isinstance(v, list) else str(v)),
             "export": lambda v: None, # Read by the export dialog when it opens
+            "void_line_width": lambda v: setattr(self.glw, "void_line_width", max(0.5, float(v))),
+            "void_min_px": lambda v: setattr(self.glw, "void_min_px", max(0.0, float(v))),
         }
 
     def _apply_ui_defaults(self):

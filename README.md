@@ -206,9 +206,13 @@ voids.json·voids.csv·결과 API의 픽셀 값(`globalCX/Y`, `centerX/Y`, `radi
     "calib_enabled": false, "calib_robust": true, "calib_all_layers": true,
     "target_mean": 30000, "target_std": 10000,
     "void_type": "edge",
+    "void_line_width": 2, "void_min_px": 5,
     "export": {"raw": true, "overlay": true, "mask": false, "merged": false, "json": true, "csv": true}
 }
 ```
+
+- `void_line_width`(기본 2): 화면에 그리는 마킹 선 굵기(px). 현재 레이어 마킹은 아래에 어두운 테두리가 함께 그려져 밝은 곳·어두운 곳 모두에서 보입니다(다른 레이어 마킹은 1 px 점선 그대로).
+- `void_min_px`(기본 5): 축소해서 볼 때 마킹이 이보다 작아지지 않는 화면 반지름(px, bbox 제외). 화면 표시에만 쓰고 저장·내보내기 이미지는 바뀌지 않습니다.
 
 - 모르는 키는 무시하고 콘솔에 쓸 수 있는 키 목록을 출력합니다.
 - `um_per_px`는 제품에 `um_per_px`가 있으면 제품 값이 우선합니다.

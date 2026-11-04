@@ -276,7 +276,8 @@ class VoidManager:
         painter.drawText(rect, Qt.AlignCenter, "0")
         painter.restore()
 
-    def paint_void(self, painter: QPainter, v, cx, cy, scale=1.0, style="normal", width=1.0, quadrant=None, badges=False):
+    def paint_void(self, painter: QPainter, v, cx, cy, scale=1.0, style="normal", width=1.0, quadrant=None, badges=False,
+                   halo=False, min_radius=0.0):
         """
         Single drawing routine for voids (viewer and export).
         (cx, cy): center in the target's pixel space; scale: target pixels per image pixel.
@@ -285,6 +286,8 @@ class VoidManager:
                "hover" (mouse over: translucent outline and fill).
         quadrant: see quadrant_of.
         badges: review marks (viewer only): "0" on voids flagged as visible on layer 0.
+        halo: a dark line under the outline (viewer: visible on bright and dark backgrounds; not on ghosts).
+        min_radius: drawn at least this large (target px; viewer zoomed out: small voids stay visible).
         """
         t = self.type_of(v)
         r, g, b = t.get("color", (255, 255, 0))[:3] # Undeclared type: yellow
@@ -305,10 +308,20 @@ class VoidManager:
                 pen.setStyle(Qt.DashLine) # Estimated bbox / detected void: needs a review
             brush = Qt.NoBrush
         pen.setWidthF(width)
+        rx, ry = v["radiusX"] * scale, v["radiusY"] * scale
+        if min_radius > 0 and max(rx, ry) < min_radius: # Keep the aspect, grow to the minimum
+            k = min_radius / max(rx, ry, 1e-6)
+            rx, ry = rx * k, ry * k
+        shape = t.get("shape", "ellipse")
+        if halo and style != "ghost":
+            dark = QPen(QColor(0, 0, 0, 150))
+            dark.setWidthF(width + 2.0)
+            painter.setPen(dark)
+            painter.setBrush(Qt.NoBrush)
+            self.draw_void_shape(painter, shape, cx, cy, rx, ry, self.p_of(v), quadrant)
         painter.setPen(pen)
         painter.setBrush(brush)
-        rx, ry = v["radiusX"] * scale, v["radiusY"] * scale
-        self.draw_void_shape(painter, t.get("shape", "ellipse"), cx, cy, rx, ry, self.p_of(v), quadrant)
+        self.draw_void_shape(painter, shape, cx, cy, rx, ry, self.p_of(v), quadrant)
         if style in ("active", "hover") and self.has_guide_box(v) and max(rx, ry) >= 1.5:
             # Dashed box: the grab / resize area of curve and corner-snap types
             guide = QPen(QColor(r, g, b, 170))

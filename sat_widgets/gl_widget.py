@@ -201,6 +201,8 @@ class GLImageWidget(QOpenGLWidget):
         self.edit_locked = False # Detect Voids running in the background: viewing only
         self.detect_cells = None # {(row, col): share done 0..1} of the last Detect Voids run
         self.show_detect_state = True # Its circles at the top-right of each cell
+        self.void_line_width = 2.0 # Void outlines on screen (px; config.json ui_defaults "void_line_width")
+        self.void_min_px = 5.0 # Voids drawn at least this radius on screen when zoomed out ("void_min_px")
         self._snap_hint = None # Snap types: press point while drawing (bbox corner nearest to it)
         self._snap_drag_point = None # Snap types: last mouse point while drawing (size on release)
         self._free_quadrant = None # Center-anchored snap type being drawn: quadrant press -> mouse
@@ -1084,7 +1086,10 @@ class GLImageWidget(QOpenGLWidget):
                      style = "hover"
                  quadrant = self._free_quadrant if (v is self.active_void and self._free_quadrant) \
                      else vm.quadrant_of(v, dx, dy, refs, self.grid_cfg)
-                 vm.paint_void(painter, v, sx, sy, self.zoom, style=style, quadrant=quadrant, badges=True)
+                 ghost = style == "ghost"
+                 vm.paint_void(painter, v, sx, sy, self.zoom, style=style, quadrant=quadrant, badges=True,
+                               width=1.0 if ghost else self.void_line_width, halo=not ghost,
+                               min_radius=0.0 if vm.is_bbox(v) else self.void_min_px)
 
              for layer_idx, v_list in vm.voids.items():
                  if layer_idx == self.current_layer:
