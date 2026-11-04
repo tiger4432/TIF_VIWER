@@ -449,12 +449,16 @@ class MainWindow(QMainWindow):
         self.btn_clear_all = QPushButton("Clear All")
         self.btn_clear_all.setToolTip("Removes every marking on all layers, bboxes included (Ctrl+Z restores)")
         self.btn_clear_all.clicked.connect(self.clear_all_voids)
+        self.btn_clear_keep_bbox = QPushButton("Clear Voids")
+        self.btn_clear_keep_bbox.setToolTip("Removes every void on all layers and keeps the bboxes (Ctrl+Z restores)")
+        self.btn_clear_keep_bbox.clicked.connect(self.clear_voids_keep_bbox)
 
         h_layout_void_btns.addWidget(self.btn_load_voids)
         h_layout_void_btns.addWidget(self.btn_save_voids)
         h_clear_btns = QHBoxLayout()
         h_clear_btns.addWidget(self.btn_clear_voids)
         h_clear_btns.addWidget(self.btn_clear_chip)
+        h_clear_btns.addWidget(self.btn_clear_keep_bbox)
         h_clear_btns.addWidget(self.btn_clear_all)
 
         v_layout_void.addWidget(self.lbl_void_hint)
@@ -1540,6 +1544,29 @@ class MainWindow(QMainWindow):
         self.glw.refresh_hover()
         self.glw.setFocus()
 
+    def clear_voids_keep_bbox(self):
+        """Removes every void on all layers (SNR-hidden ones too) and keeps the bboxes. One undo step."""
+        if self._detect_busy():
+            return
+        vm = self.void_manager
+        n = sum(1 for vs in vm.voids.values() for v in vs if not vm.is_bbox(v))
+        if n == 0:
+            self.statusBar().showMessage("No voids to remove (bboxes kept).")
+            return
+        hidden = sum(1 for vs in vm.voids.values() for v in vs if not vm.is_bbox(v) and not vm.passes(v))
+        if QMessageBox.question(self, "Clear Voids",
+                                f"Remove all {n} voids on all layers" + (f" ({hidden} hidden by the SNR filter)" if hidden else "")
+                                + "?\nThe bboxes stay. Ctrl+Z restores them.",
+                                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        vm.remove_voids_where(lambda layer, v: not vm.is_bbox(v))
+        self.glw.active_void = None
+        self.update_void_ui()
+        self.glw.refresh_hover()
+        self.glw.update()
+        self.statusBar().showMessage(f"Removed {n} voids; bboxes kept (Ctrl+Z restores).")
+        self.glw.setFocus()
+
     def _bbox_type_name(self):
         for name in self.void_manager.types:
             if name.strip().lower() == self.void_manager.BBOX_TYPE_NAME:
@@ -2085,7 +2112,7 @@ class MainWindow(QMainWindow):
             self.glw.active_void = None
         self._apply_held_mode()
         for w in (self.btn_detect, self.btn_eval, self.btn_train, self.btn_load_voids, self.btn_clear_voids,
-                  self.btn_clear_chip, self.btn_clear_all, self.btn_edit_types):
+                  self.btn_clear_chip, self.btn_clear_all, self.btn_clear_keep_bbox, self.btn_edit_types):
             w.setEnabled(not on)
 
     def _detect_widgets(self, show):
