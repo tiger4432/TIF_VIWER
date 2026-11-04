@@ -386,7 +386,7 @@ class Evaluation:
         thr = _threshold(p)
         layers = sorted(self.layer_stats) or self.layers
         n_cells = len(self.rects)
-        rule = {"first": "rf", "last": "rl", "strongest": "rs"}.get(p.get("layer_rule", "first"), "r" + str(p.get("layer_rule"))[:1])
+        rule = {"first": "rf", "first_strong": "rfs", "last": "rl", "strongest": "rs"}.get(p.get("layer_rule", "first"), "r" + str(p.get("layer_rule"))[:1])
         for k in sorted(int(x) for x in (p.get("skip_layers") or [])):
             rule += f" sk{k}"
         if p.get("learned_model") is not None:

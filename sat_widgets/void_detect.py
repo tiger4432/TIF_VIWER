@@ -32,7 +32,9 @@ Parameters (config.json "void_detect", defaults in DEFAULTS):
     max_area_frac    blobs larger than this fraction of the chip are ignored (misaligned / broken chip)
     work_size        longest side of the working chip image (pixels)
     template_cells   chips used to build the golden chip
-    layer_rule       "first" (default) | "last" | "strongest": layer of a spot found on several layers
+    layer_rule       "first" (default) | "first_strong" | "last" | "strongest": layer of a spot found on several layers
+                     ("first_strong", layer change: the first layer where its evidence reaches lc_first_frac x its
+                     peak, not just above the noise; other methods: as "first")
     skip_layers      absolute layer numbers not searched (default [0]: the top layer is noisy)
     smooth           averaging radius (Gaussian sigma, working px) of the deviation; 0 = pixel by
                      pixel (sharper outlines, misses large faint voids)
@@ -648,7 +650,8 @@ def chip_rects(grid_cfg, refs, cells):
 
 def _settle(found, rule, by_cell):
     """Finds kept by layer_rule (a spot on several layers is one void); by_cell: kept so far, updated."""
-    prefer = {"first": lambda f: (f[0], -f[5]), "last": lambda f: (-f[0], -f[5])}.get(rule, lambda f: (-f[5], f[0]))
+    prefer = {"first": lambda f: (f[0], -f[5]), "first_strong": lambda f: (f[0], -f[5]), # (layer change only)
+              "last": lambda f: (-f[0], -f[5])}.get(rule, lambda f: (-f[5], f[0]))
     chosen = set()
     for f in sorted(found, key=prefer):
         gx, gy, rx, ry, cell, c = f[1], f[2], f[3], f[4], f[7], f[9]

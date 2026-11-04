@@ -566,10 +566,13 @@ class MainWindow(QMainWindow):
         h_rule = QHBoxLayout()
         h_rule.addWidget(QLabel("Mark on layer:"))
         self.cb_layer_rule = QComboBox()
-        for label, key in (("First (from top)", "first"), ("Strongest", "strongest"), ("Last", "last")):
+        for label, key in (("First (from top)", "first"), ("First strong", "first_strong"), ("Strongest", "strongest"),
+                           ("Last", "last")):
             self.cb_layer_rule.addItem(label, key)
         self.cb_layer_rule.setToolTip("A spot found on several layers is marked once, on:\n"
                                       "First: the first layer where it appears (from the top)\n"
+                                      "First strong (Layer change): the first layer where it is clearly there (evidence at\n"
+                                      "least half its peak, lc_first_frac), not where it only starts to show through\n"
                                       "Strongest: the layer where it deviates most\n"
                                       "Last: the deepest layer where it appears")
         rule = str(self._config().get("void_detect", {}).get("layer_rule", "first")).lower()
@@ -797,7 +800,7 @@ class MainWindow(QMainWindow):
         def layer_rule(v):
             i = self.cb_layer_rule.findData(str(v).lower())
             if i < 0:
-                raise ValueError(f"expected first / strongest / last, got {v!r}")
+                raise ValueError(f"expected first / first_strong / strongest / last, got {v!r}")
             self.cb_layer_rule.setCurrentIndex(i)
 
         return {

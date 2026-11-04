@@ -63,6 +63,7 @@ DEFAULTS = {
     "lc_goldens": 8, # Golden chips of the nearest this many layers as sources
     "lc_regions": 4, # Layout regions with their own coefficients (k-means of the goldens)
     "lc_border": 10, # Working px at the chip border not searched
+    "lc_first_frac": 0.5, # Mark on layer "First strong": the first layer whose evidence is >= this x the void's peak
     "lc_region_level": 0.4, # Void extent: connected region of its layer's evidence >= this x its peak; weaker
                             # peaks inside it are the same void (0 = off: radius 1.6 x the filter sigma). Large
                             # voids: size found / true 0.40 -> about 1, split 11 -> 2 of 77
@@ -576,6 +577,9 @@ def find(X, searched, p, rule="first", progress=None):
         prof = S[:, i, y, x].astype(np.float32)
         if rule == "strongest":
             first = int(tg[prof[tg].argmax()])
+        elif rule == "first_strong": # First layer where it is clearly there: evidence >= lc_first_frac x its peak
+            lev = max(tlo, float(p.get("lc_first_frac", 0.5)) * float(prof[tg].max()))
+            first = next(k for k in targets if prof[k] >= lev) if float(prof[tg].max()) >= tlo else int(tg[prof[tg].argmax()])
         elif rule == "last":
             hit = [k for k in targets if prof[k] >= tlo]
             first = hit[-1] if hit else int(tg[prof[tg].argmax()])
