@@ -746,13 +746,14 @@ def _layer_change(read_layer, layer_numbers, skip, order, rects, size, p, progre
         cell, layer = cells[d["i"]], layer_numbers[d["z"]]
         x0, y0, w, h = rects[cell]
         sx, sy = w / W, h / H
-        gx, gy, rx, ry = x0 + d["x"] * sx, y0 + d["y"] * sy, d["r"] * sx, d["r"] * sy
+        gx, gy, rx, ry = x0 + d["x"] * sx, y0 + d["y"] * sy, d.get("rx", d["r"]) * sx, d.get("ry", d["r"]) * sy
         extent = (gx - rx, gy - ry, gx + rx, gy + ry)
         if p.get("learn") is not None: # Training (Train): candidates with their features, nothing kept
             collected.setdefault((layer, cell), []).append((extent, int(math.pi * d["r"] ** 2), d["features"]))
             continue
-        box = (max(0, int(d["y"] - d["r"])), min(H - 1, int(math.ceil(d["y"] + d["r"])) - 1),
-               max(0, int(d["x"] - d["r"])), min(W, int(math.ceil(d["x"] + d["r"]))))
+        drx, dry = d.get("rx", d["r"]), d.get("ry", d["r"])
+        box = (max(0, int(d["y"] - dry)), min(H - 1, int(math.ceil(d["y"] + dry)) - 1),
+               max(0, int(d["x"] - drx)), min(W, int(math.ceil(d["x"] + drx))))
         c = {"box": box, "area": int(math.pi * d["r"] ** 2), "merged": 1, "score": d["score"], "snr": d.get("snr"),
              "status": "kept", "extent": extent}
         if "learned" in d:

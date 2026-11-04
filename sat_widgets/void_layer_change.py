@@ -51,7 +51,9 @@ DEFAULTS = {
     "lc_place": "cusum", # "cusum" or "rms" (see 5.)
     "lc_pad_sigma": 5.0, # Virtual layer below the last: its evidence blurred (working px; 0 = none)
     "lc_tlo": 3.0, # Evidence of a void-free layer (first layer: CUSUM level)
-    "lc_scales": [2.0, 3.0, 4.5, 6.5], # Centre-surround sigmas (working px)
+    "lc_scales": [2.0, 3.0, 4.5, 6.5, 9.5, 14.0, 20.0, 28.0], # Centre-surround sigmas (working px); those above
+                       # 1/7 of the working chip are left out. The large ones find large voids whole (production
+                       # 600 px chips, radius 10-150 px: found 73 -> 88 %, split in pieces 33 -> 11 of 77)
     "lc_sources": 7, # At most this many layers above as sources (nearest first)
     "lc_tents": 2, # Fit coefficients vary over the chip on n x n nodes (bilinear between them)
     "lc_src_blurs": [], # Extra source features: blur differences at these sigmas (focus / sharpness changes)
@@ -61,6 +63,9 @@ DEFAULTS = {
     "lc_goldens": 8, # Golden chips of the nearest this many layers as sources
     "lc_regions": 4, # Layout regions with their own coefficients (k-means of the goldens)
     "lc_border": 10, # Working px at the chip border not searched
+    "lc_region_level": 0.4, # Void extent: connected region of its layer's evidence >= this x its peak; weaker
+                            # peaks inside it are the same void (0 = off: radius 1.6 x the filter sigma). Large
+                            # voids: size found / true 0.40 -> about 1, split 11 -> 2 of 77
     "lc_border_zero": 10, # Remainder zeroed this many working px in from the edge before filtering, so the chip edge
                           # does not leak into the searched part (synthetic, layers aligned: missed 11.2 -> 7.5 %; 0 = off)
     "lc_register": False, # Layers of each chip moved onto its first layer (sub-pixel; a scan's layers are aligned)
@@ -273,6 +278,26 @@ def _regions(gold, k, iters=20):
         cen = np.stack([f[lab == j].mean(0) if np.any(lab == j) else cen[j] for j in range(k)])
     lab = lab.reshape(h, w)
     return [(lab == j).astype(np.float32) for j in range(k)]
+
+
+def _region(E, y, x, level, reach):
+    """Connected part of E >= level around (y, x) within reach px (grown 8-connected, no scipy):
+    (y0, x0, mask) of its window, or None when the seed is below the level."""
+    h, w = E.shape
+    y0, y1, x0, x1 = max(0, y - reach), min(h, y + reach + 1), max(0, x - reach), min(w, x + reach + 1)
+    ok = E[y0:y1, x0:x1] >= level
+    if not ok[y - y0, x - x0]:
+        return None
+    m = np.zeros(ok.shape, bool)
+    m[y - y0, x - x0] = True
+    while True:
+        g = m.copy() # 3 x 3 dilation, kept inside ok
+        g[1:] |= m[:-1]; g[:-1] |= m[1:]
+        g[:, 1:] |= g[:, :-1]; g[:, :-1] |= g[:, 1:]
+        g &= ok
+        if g.sum() == m.sum():
+            return y0, x0, m
+        m = g
 
 
 def _feats(L, blurs=()):
@@ -488,6 +513,7 @@ def find(X, searched, p, rule="first", progress=None):
 
     # Evidence per layer: best centre-surround score over the scales
     scales = [float(s) for s in p["lc_scales"]]
+    scales = [s for s in scales if s <= max(h, w) / 7.0] or scales[:1] # Not larger than the chip allows
     b = int(p["lc_border"])
     S = np.zeros((nl, n, h, w), np.float16)
     SIG = np.zeros((nl, n, h, w), np.uint8)
@@ -541,7 +567,12 @@ def find(X, searched, p, rule="first", progress=None):
     dets = []
     tg = np.array(targets)
     feat = _Features(S, A, pad, tg, tlo) if (model is not None or collect) else None
+    rlev = float(p.get("lc_region_level", 0.0) or 0.0) # Extent: region of the evidence >= this x its peak
+    regions = {} # chip -> [(y0, x0, mask)] of the voids kept: a weaker peak inside one is the same void
     for i, y, x, s, score in kept:
+        if rlev > 0 and any(0 <= y - ry0 < m.shape[0] and 0 <= x - rx0 < m.shape[1] and m[y - ry0, x - rx0]
+                            for ry0, rx0, m in regions.get(i, ())):
+            continue
         prof = S[:, i, y, x].astype(np.float32)
         if rule == "strongest":
             first = int(tg[prof[tg].argmax()])
@@ -558,9 +589,21 @@ def find(X, searched, p, rule="first", progress=None):
         win = S[first, i, y0:y + rad + 1, x0:x + rad + 1]
         yy, xx = (y0 + int(win.argmax()) // win.shape[1], x0 + int(win.argmax()) % win.shape[1]) \
             if float(win.max()) >= tlo else (y, x)
-        dets.append({"z": first, "i": i, "x": xx + 0.5, "y": yy + 0.5,
-                     "r": 1.6 * scales[SIG[first, i, yy, xx]], "score": score,
-                     "snr": float(S[first, i, yy, xx])}) # Evidence on its layer, in units of the background noise
+        r = 1.6 * scales[SIG[first, i, yy, xx]]
+        det = {"z": first, "i": i, "x": xx + 0.5, "y": yy + 0.5, "r": r, "score": score,
+               "snr": float(S[first, i, yy, xx])} # Evidence on its layer, in units of the background noise
+        if rlev > 0: # Extent from the region of strong evidence (large voids: not just the filter size)
+            E = S[first, i].astype(np.float32)
+            reg = _region(E, yy, xx, max(tlo, rlev * float(E[yy, xx])), int(max(3 * r, 0.6 * max(E.shape))))
+            if reg is not None:
+                ry0, rx0, m = reg
+                regions.setdefault(i, []).append(reg)
+                ys, xs = np.nonzero(m)
+                cy, cx = ry0 + (ys.min() + ys.max() + 1) / 2.0, rx0 + (xs.min() + xs.max() + 1) / 2.0
+                rx, ry = (xs.max() - xs.min() + 1) / 2.0, (ys.max() - ys.min() + 1) / 2.0
+                if max(rx, ry) > r: # Larger than the filter size: the region's box (else the filter's)
+                    det.update(x=cx, y=cy, rx=rx, ry=ry, r=max(rx, ry))
+        dets.append(det)
         if feat is not None:
             dets[-1]["features"] = feat.row(i, y, x, first, float(SIG[first, i, yy, xx]))
     l0 = p.get("lc_layer0_index") # Index of the scan's layer 0 among the loaded layers (set by void_detect)
