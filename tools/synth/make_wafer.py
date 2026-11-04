@@ -13,6 +13,11 @@ CHIP=px (default 280), PITCH=px (default CHIP + 20), NCHIP=n (default 14): chip 
     CHIP / 280 (e.g. CHIP=600 PITCH=640 NCHIP=10 VOID_R=10,150 for production-size chips with large voids).
 VOID_GROW="lo,hi": size of a void on each deeper layer, x a random factor in this range (default 0.4,2.5;
     e.g. 0.8,1.2 for voids that keep about their size, as real ones do).
+VOID_L0="lo,hi": first layer of the voids in this range (default any layer), e.g. 1,3: they run through
+    most of the layers.
+VOID_COMMON=frac, VOID_SPOT="x,y": this share of the voids sits at the same place in their chips (x, y as
+    fractions of the chip, +- 3 % of the chip): a weak spot many chips share.
+    (These two draw from their own random stream: without them the output is unchanged.)
 ALIGNED=1: the chip offset (jitter) is the same on every layer, as the gates of one scan are; the
     default draws it per layer (layers of a chip shifted by up to ~1 px against each other).
     -> OUTDIR/NAME.tif (8-bit pages = layers) and OUTDIR/NAME_truth.json
@@ -89,13 +94,22 @@ def layer_mix(st, a=1.0):
 
 STRUCT = [[structure() for c in range(C)] for r in range(R)]
 truth = {}
+rng2 = np.random.default_rng(int(os.environ.get("SEED", 31)) + 7919) # VOID_L0 / VOID_COMMON only
+L0_RANGE = [int(v) for v in os.environ["VOID_L0"].split(",")] if os.environ.get("VOID_L0") else None
+COMMON = float(os.environ.get("VOID_COMMON", 0.0))
+SPOT = [float(v) for v in os.environ.get("VOID_SPOT", "0.4,0.55").split(",")]
 for r in range(R):
     for c in range(C):
         if rng.random() < 0.3:
             l0 = int(rng.integers(0, NL))
-            truth[(r, c)] = (float(rng.uniform(35 * K, B - 35 * K)), float(rng.uniform(35 * K, B - 35 * K)),
-                             float(rng.uniform(R_LO, R_HI)), float(rng.uniform(R_LO, R_HI)), l0, NL - 1,
-                             float(rng.uniform(0.06, 0.14)))
+            t = [float(rng.uniform(35 * K, B - 35 * K)), float(rng.uniform(35 * K, B - 35 * K)),
+                 float(rng.uniform(R_LO, R_HI)), float(rng.uniform(R_LO, R_HI)), l0, NL - 1,
+                 float(rng.uniform(0.06, 0.14))]
+            if L0_RANGE:
+                t[4] = int(rng2.integers(L0_RANGE[0], L0_RANGE[1] + 1))
+            if COMMON > 0 and rng2.random() < COMMON:
+                t[0], t[1] = (float(np.clip(SPOT[i] * B + rng2.normal(0, 0.03 * B), 0, B - 1)) for i in (0, 1))
+            truth[(r, c)] = tuple(t)
 ct = CoordinateTransform(ANG, SIZE, SIZE)
 json.dump({f"{r},{c}": t for (r, c), t in truth.items()}, open(os.path.join(W, name + "_truth.json"), "w"))
 ys, xs = np.mgrid[0:SIZE, 0:SIZE].astype(np.float32)
