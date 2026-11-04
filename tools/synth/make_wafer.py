@@ -11,6 +11,8 @@ NOISE=s: pixel noise standard deviation (8-bit levels, default 4).
 CHIP=px (default 280), PITCH=px (default CHIP + 20), NCHIP=n (default 14): chip size, cell pitch and
     chips per side; the layout pattern (lines, bumps, pad, die edge) and the void margins scale with
     CHIP / 280 (e.g. CHIP=600 PITCH=640 NCHIP=10 VOID_R=10,150 for production-size chips with large voids).
+VOID_GROW="lo,hi": size of a void on each deeper layer, x a random factor in this range (default 0.4,2.5;
+    e.g. 0.8,1.2 for voids that keep about their size, as real ones do).
 ALIGNED=1: the chip offset (jitter) is the same on every layer, as the gates of one scan are; the
     default draws it per layer (layers of a chip shifted by up to ~1 px against each other).
     -> OUTDIR/NAME.tif (8-bit pages = layers) and OUTDIR/NAME_truth.json
@@ -42,6 +44,7 @@ NL_EXTRA = int(os.environ.get("NL_EXTRA", 0))
 NOISE = float(os.environ.get("NOISE", 4.0))
 ALIGNED = os.environ.get("ALIGNED", "0") == "1"
 R_LO, R_HI = (float(v) for v in os.environ.get("VOID_R", "6,25").split(","))
+G_LO, G_HI = (float(v) for v in os.environ.get("VOID_GROW", "0.4,2.5").split(","))
 SIZE = ORG * 2 + P * R
 m = (P - B) / 2
 yy, xx = np.mgrid[0:B, 0:B].astype(np.float32)
@@ -123,7 +126,7 @@ with tifffile.TiffWriter(os.path.join(W, name + ".tif")) as tw:
         for (r, c), (vx, vy, vrx, vry, l0, l1, f) in truth.items():
             if k >= l0:
                 fk = 1 + rng.choice([-1, 1]) * rng.uniform(0.5, 1.3) * f
-                sk = float(np.exp(rng.uniform(np.log(0.4), np.log(2.5)))) if k > l0 else 1.0
+                sk = float(np.exp(rng.uniform(np.log(G_LO), np.log(G_HI)))) if k > l0 else 1.0
                 ix = cell_idx[(r, c)]
                 d = ((lxo[ix] - vx) / (vrx * sk)) ** 2 + ((lyo[ix] - vy) / (vry * sk)) ** 2
                 soft = np.clip((1.3 - d) / 0.6, 0, 1)
