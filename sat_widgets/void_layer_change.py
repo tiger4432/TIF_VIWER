@@ -64,6 +64,8 @@ DEFAULTS = {
     "lc_regions": 4, # Layout regions with their own coefficients (k-means of the goldens)
     "lc_border": 10, # Working px at the chip border not searched
     "lc_first_frac": 0.5, # Mark on layer "First strong": the first layer whose evidence is >= this x the void's peak
+    "lc_region_merge": 1.3, # A weaker peak is the same void when inside a kept void's box x this (1: its region only).
+                            # After the learned filter. 600 px chips, voids up to half the chip: split 15 -> 7 of 272
     "lc_region_level": 0.4, # Void extent: connected region of its layer's evidence >= this x its peak; weaker
                             # peaks inside it are the same void (0 = off: radius 1.6 x the filter sigma). Large
                             # voids: size found / true 0.40 -> about 1, split 11 -> 2 of 77
@@ -569,11 +571,19 @@ def find(X, searched, p, rule="first", progress=None):
     tg = np.array(targets)
     feat = _Features(S, A, pad, tg, tlo) if (model is not None or collect) else None
     rlev = float(p.get("lc_region_level", 0.0) or 0.0) # Extent: region of the evidence >= this x its peak
-    regions = {} # chip -> [(y0, x0, mask)] of the voids kept: a weaker peak inside one is the same void
+    rgrow = float(p.get("lc_region_merge", 1.0) or 1.0) # Same void: inside a kept one's box x this (1 = its region)
+    regions = {} # chip -> [(y0, x0, mask, (cy, cx, ry, rx))] of the voids kept: a weaker peak inside one is the same void
+
+    def inside(i, y, x):
+        for ry0, rx0, m, (cy, cx, hy, hx) in regions.get(i, ()):
+            if rgrow > 1.0:
+                if abs(y + 0.5 - cy) <= rgrow * hy and abs(x + 0.5 - cx) <= rgrow * hx:
+                    return True
+            elif 0 <= y - ry0 < m.shape[0] and 0 <= x - rx0 < m.shape[1] and m[y - ry0, x - rx0]:
+                return True
+        return False
+
     for i, y, x, s, score in kept:
-        if rlev > 0 and any(0 <= y - ry0 < m.shape[0] and 0 <= x - rx0 < m.shape[1] and m[y - ry0, x - rx0]
-                            for ry0, rx0, m in regions.get(i, ())):
-            continue
         prof = S[:, i, y, x].astype(np.float32)
         if rule == "strongest":
             first = int(tg[prof[tg].argmax()])
@@ -594,17 +604,17 @@ def find(X, searched, p, rule="first", progress=None):
         yy, xx = (y0 + int(win.argmax()) // win.shape[1], x0 + int(win.argmax()) % win.shape[1]) \
             if float(win.max()) >= tlo else (y, x)
         r = 1.6 * scales[SIG[first, i, yy, xx]]
-        det = {"z": first, "i": i, "x": xx + 0.5, "y": yy + 0.5, "r": r, "score": score,
+        det = {"z": first, "i": i, "x": xx + 0.5, "y": yy + 0.5, "r": r, "score": score, "_peak": (y, x),
                "snr": float(S[first, i, yy, xx])} # Evidence on its layer, in units of the background noise
         if rlev > 0: # Extent from the region of strong evidence (large voids: not just the filter size)
             E = S[first, i].astype(np.float32)
             reg = _region(E, yy, xx, max(tlo, rlev * float(E[yy, xx])), int(max(3 * r, 0.6 * max(E.shape))))
             if reg is not None:
                 ry0, rx0, m = reg
-                regions.setdefault(i, []).append(reg)
                 ys, xs = np.nonzero(m)
                 cy, cx = ry0 + (ys.min() + ys.max() + 1) / 2.0, rx0 + (xs.min() + xs.max() + 1) / 2.0
                 rx, ry = (xs.max() - xs.min() + 1) / 2.0, (ys.max() - ys.min() + 1) / 2.0
+                det["_reg"] = (ry0, rx0, m, (cy, cx, max(ry, r), max(rx, r)))
                 if max(rx, ry) > r: # Larger than the filter size: the region's box (else the filter's)
                     det.update(x=cx, y=cy, rx=rx, ry=ry, r=max(rx, ry))
         dets.append(det)
@@ -621,7 +631,20 @@ def find(X, searched, p, rule="first", progress=None):
             d["learned"] = float(v)
         cut = float(p["lc_learned_cut"]) if p.get("lc_learned_cut") is not None else model.cut
         dets = [d for d in dets if d["learned"] >= cut]
-    return {"dets": dets, "evidence": S, "scale": SIG, "place": A}
+    # One void, several peaks: a weaker one inside a stronger kept void's region (or its box x lc_region_merge)
+    # is dropped. After the learned filter, so a rejected candidate does not take a real void with it; not
+    # when collecting training candidates (the model sees every peak, fragments too).
+    merged = []
+    for d in dets: # In score order
+        i, (y, x) = d["i"], d.pop("_peak")
+        reg = d.pop("_reg", None)
+        if rlev > 0 and not collect:
+            if inside(i, y, x):
+                continue
+            if reg is not None:
+                regions.setdefault(i, []).append(reg)
+        merged.append(d)
+    return {"dets": merged, "evidence": S, "scale": SIG, "place": A}
 
 
 class _Features:
