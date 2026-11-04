@@ -185,10 +185,12 @@ class ExportManager(QObject):
                             img = QImage(w_pitch, h_pitch, QImage.Format_ARGB32)
                             img.fill(Qt.transparent)
                             merged_accumulators[safe_label] = img
-                        self._draw_chip_voids(img, void_index, cfg, r, c, mode='mask', layers=layers)
+                        self._draw_chip_voids(img, void_index, cfg, r, c, mode='mask', layers=layers, anchor="bbox",
+                                              layout=False) # Layout once per merged image (below)
 
                 if not self.stop_requested:
                     for label, img in merged_accumulators.items():
+                        self._draw_merged_layout(img)
                         path = os.path.join(subdirs['merged'], f"Merged_Label_{label}.png")
                         self._submit(self._save_titled, img, f"LEG:{label}_MERGED", path, None)
 
@@ -372,16 +374,22 @@ class ExportManager(QObject):
             cache[key] = lut
         return lut
 
-    def _draw_chip_voids(self, target_img: QImage, void_index, cfg, r, c, mode='overlay', current_layer=None, layers=None):
+    def _draw_chip_voids(self, target_img: QImage, void_index, cfg, r, c, mode='overlay', current_layer=None, layers=None,
+                         anchor="cell", layout=True):
         """
-        Draws the voids around chip (r, c) onto an image centered on the chip.
+        Draws the voids around chip (r, c) onto an image centered on the chip, and the product layout.
         mode 'overlay': all layers; current_layer solid, other layers as ghosts.
         mode 'mask':    only `layers`, solid, without antialiasing (pure type colors).
+        anchor "cell": the image center is the cell center (as the raw patch); "bbox": the center of the
+        chip's reference bbox (merged: the chips overlaid on their bboxes, not on the grid).
         """
         w, h = target_img.width(), target_img.height()
         pcx, pcy = w / 2, h / 2
         gx_chip = cfg.start_x + (c + 0.5) * cfg.pitch_x
         gy_chip = cfg.start_y + (r + 0.5) * cfg.pitch_y
+        bbox = self._refs.get((r, c))
+        if anchor == "bbox" and bbox is not None:
+            gx_chip, gy_chip = bbox[0] + bbox[2] / 2, bbox[1] + bbox[3] / 2
 
         painter = QPainter(target_img)
         painter.setRenderHint(QPainter.Antialiasing, mode != 'mask')
@@ -405,11 +413,20 @@ class ExportManager(QObject):
             self.void_manager.paint_void(painter, v, pcx + dx, pcy + dy, style="ghost", width=2, quadrant=q)
         for v, dx, dy, q in actives:
             self.void_manager.paint_void(painter, v, pcx + dx, pcy + dy, style="normal", width=2, quadrant=q)
-        if mode == 'overlay':
+        if layout and bbox is not None:
             # Product layout inside the cell's reference bbox
-            bbox = self._refs.get((r, c))
-            if bbox is not None:
-                self.void_manager.paint_layout(painter, bbox, lambda x, y: (pcx + x - gx_chip, pcy + y - gy_chip))
+            self.void_manager.paint_layout(painter, bbox, lambda x, y: (pcx + x - gx_chip, pcy + y - gy_chip))
+        painter.end()
+
+    def _draw_merged_layout(self, img):
+        """Merged image: the product layout once, in the median reference bbox centred on the image (the chips
+        are overlaid on their bbox centres)."""
+        sizes = [(b[2], b[3]) for b in self._refs.values()]
+        if not sizes:
+            return
+        bw, bh = float(np.median([s[0] for s in sizes])), float(np.median([s[1] for s in sizes]))
+        painter = QPainter(img)
+        self.void_manager.paint_layout(painter, (-bw / 2, -bh / 2, bw, bh), lambda x, y: (img.width() / 2 + x, img.height() / 2 + y))
         painter.end()
 
     def _export_json(self, output_dir):
