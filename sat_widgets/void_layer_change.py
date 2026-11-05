@@ -69,6 +69,7 @@ DEFAULTS = {
                             # ragged soft voids: 26 -> 20 of 239, with lc_region_join 1.0: 10
     "lc_region_join": 1.0, # Detections of one chip whose boxes x this overlap are one void (ragged voids; 0 = off).
                            # Two separate voids whose boxes overlap become one too: lower it if Evaluate shows mg
+    "lc_region_map": "evidence", # Extent from "evidence" (the marked layer's) or "place" (the depth-summed place score)
     "lc_region_level": 0.4, # Void extent: connected region of its layer's evidence >= this x its peak; weaker
                             # peaks inside it are the same void (0 = off: radius 1.6 x the filter sigma). Large
                             # voids: size found / true 0.40 -> about 1, split 11 -> 2 of 77
@@ -610,8 +611,14 @@ def find(X, searched, p, rule="first", progress=None):
         det = {"z": first, "i": i, "x": xx + 0.5, "y": yy + 0.5, "r": r, "score": score, "_peak": (y, x),
                "snr": float(S[first, i, yy, xx])} # Evidence on its layer, in units of the background noise
         if rlev > 0: # Extent from the region of strong evidence (large voids: not just the filter size)
-            E = S[first, i].astype(np.float32)
-            reg = _region(E, yy, xx, max(tlo, rlev * float(E[yy, xx])), int(max(3 * r, 0.6 * max(E.shape))))
+            if p.get("lc_region_map", "evidence") == "place": # The place score (what is thresholded): no leak into
+                E = A[i]                                       # one layer's background; floor = the candidate level
+                ey, ex = (yy, xx) if E[yy, xx] >= E[y, x] else (y, x)
+                lev = max(float(p["lc_cand_threshold"]), rlev * float(E[ey, ex]))
+            else:
+                E = S[first, i].astype(np.float32)
+                ey, ex, lev = yy, xx, max(tlo, rlev * float(S[first, i, yy, xx]))
+            reg = _region(E, ey, ex, lev, int(max(3 * r, 0.6 * max(E.shape))))
             if reg is not None:
                 ry0, rx0, m = reg
                 ys, xs = np.nonzero(m)
