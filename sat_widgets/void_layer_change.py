@@ -70,7 +70,9 @@ DEFAULTS = {
     "lc_region_join": 1.0, # Detections of one chip whose boxes x this overlap are one void (ragged voids; 0 = off).
                            # Two separate voids whose boxes overlap become one too: lower it if Evaluate shows mg
     "lc_region_map": "evidence", # Extent from "evidence" (the marked layer's) or "place" (the depth-summed place score)
-    "lc_union_frac": 0.0, # lc_region_union: only pieces with a place score >= this x the stronger's widen the box
+    "lc_union_frac": 0.5, # lc_region_union: only pieces with a place score >= this x the stronger's widen the box
+                          # (a weak peak's region runs into the background and stretched the box: boxes > 1.4 x the
+                          # void 35 -> 7 of 235)
     "lc_region_union": True, # lc_region_join: the box becomes the union (True) or stays the stronger's (False)
     "lc_region_level": 0.4, # Void extent: connected region of its layer's evidence >= this x its peak; weaker
                             # peaks inside it are the same void (0 = off: radius 1.6 x the filter sigma). Large
