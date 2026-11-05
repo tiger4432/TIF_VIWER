@@ -75,9 +75,10 @@ DEFAULTS = {
                           # void 35 -> 7 of 235)
     "lc_region_union": True, # lc_region_join: the box becomes the union (True) or stays the stronger's (False)
     "lc_refit_z": 0.0, # Refit each layer without the pixels whose smoothed remainder is >= this (noise units; 0 = off)
-    "lc_shape": "evidence", # Void outline (Shapes) from "evidence" (band-passed, rounded) or "remainder" (smoothed
+    "lc_shape": "remainder", # Void outline (Shapes) from "evidence" (band-passed, rounded) or "remainder" (smoothed
                             # |remainder|, falls back to the evidence region where it covers < 30 % of it); the box,
-                            # merging and detection use the evidence either way
+                            # merging and detection use the evidence either way. Ragged soft voids: outline IoU with
+                            # the true shape 0.50 -> 0.60 (>= 0.5: 44 -> 55 of 87), detection unchanged
     "lc_region_level": 0.4, # Void extent: connected region of its layer's evidence >= this x its peak; weaker
                             # peaks inside it are the same void (0 = off: radius 1.6 x the filter sigma). Large
                             # voids: size found / true 0.40 -> about 1, split 11 -> 2 of 77
