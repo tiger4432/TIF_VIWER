@@ -74,6 +74,8 @@ DEFAULTS = {
                           # (a weak peak's region runs into the background and stretched the box: boxes > 1.4 x the
                           # void 35 -> 7 of 235)
     "lc_region_union": True, # lc_region_join: the box becomes the union (True) or stays the stronger's (False)
+    "lc_refit_z": 0.0, # Refit each layer without the pixels whose smoothed remainder is >= this (noise units; 0 = off)
+    "lc_shape": "evidence", # Void extent / outline from "evidence" (band-passed) or "remainder" (smoothed |remainder|)
     "lc_region_level": 0.4, # Void extent: connected region of its layer's evidence >= this x its peak; weaker
                             # peaks inside it are the same void (0 = off: radius 1.6 x the filter sigma). Large
                             # voids: size found / true 0.40 -> about 1, split 11 -> 2 of 77
@@ -392,6 +394,7 @@ class _Context:
         regions = _regions(gold, int(p["lc_regions"])) if int(p["lc_regions"]) > 1 else []
         self.regions = regions[1:]
         self.sub = int(p.get("lc_fit_sub", 2)) # Least squares on every sub-th pixel (see _block_fit)
+        self.refit_z = float(p.get("lc_refit_z", 0.0) or 0.0) # Second fit without the clear deviations (0 = off)
         gfeats = [[g - g.mean(), _gauss(g, 1.5) - g] for g in gold]
         fixed = {("bias",): _bias(h, w)}
         if self.regions:
@@ -455,12 +458,18 @@ class _Context:
                 SF = np.concatenate([cross[j][:, idx] for j in srcs])
                 G = np.block([[G, SF.T], [SF, np.block([[SS(i, j) for j in srcs] for i in srcs])]])
             y = chip[k].ravel().astype(np.float64)
-            out[k] = _block_fit(y, self.sub, self.Ff, self.Fs, idx, [Sf[j] for j in srcs], [Ss[j] for j in srcs],
-                                G).reshape(h, w).astype(np.float32)
+            args = (y, self.sub, self.Ff, self.Fs, idx, [Sf[j] for j in srcs], [Ss[j] for j in srcs], G)
+            r = _block_fit(*args).reshape(h, w)
+            if self.refit_z > 0: # A large soft void is partly explained by the smooth terms: refit without it
+                mad = float(np.median(np.abs(r))) * 1.4826 + 1e-9
+                m = np.abs(_gauss((r / mad).astype(np.float32), 2.0)) >= self.refit_z
+                if 0.002 < float(m.mean()) < 0.7:
+                    r = _block_fit(*args, pre_out=m.ravel()[::self.sub]).reshape(h, w)
+            out[k] = r.astype(np.float32)
         return out
 
 
-def _block_fit(y, step, Ff, Fs, idx, src_full, src_sub, G, iters=4, clip=3.0):
+def _block_fit(y, step, Ff, Fs, idx, src_full, src_sub, G, iters=4, clip=3.0, pre_out=None):
     """
     _robust_fit with the columns as the chip-independent ones (all of them Ff / Fs, this target's
     idx) and the source blocks, X'X = G assembled from cached block products: the same remainder
@@ -481,8 +490,10 @@ def _block_fit(y, step, Ff, Fs, idx, src_full, src_sub, G, iters=4, clip=3.0):
             v += B @ coef[edges[i]:edges[i + 1]]
         return v
 
-    out = None
+    out = pre_out # Rows kept out of the fit from the start (a void found by a first fit, see remainders)
     for _ in range(iters):
+        if pre_out is not None and out is not pre_out:
+            out = out | pre_out
         if out is None or not out.any():
             A, r = G, g
         else:
@@ -559,8 +570,14 @@ def find(X, searched, p, rule="first", progress=None):
     S = np.zeros((nl, n, h, w), np.float16)
     SIG = np.zeros((nl, n, h, w), np.uint8)
     zb = int(p.get("lc_border_zero", 0) or 0) # Remainder zeroed this far in before filtering
+    shape_rem = p.get("lc_shape", "evidence") == "remainder"
+    ZS = np.zeros((nl, n, h, w), np.float16) if shape_rem else None
     for k in targets:
         Z = _normalise(rem.pop(k))
+        if shape_rem: # Unfiltered: follows the void's outline (the band-pass rounds it into a blob)
+            zs = np.abs(_gauss(Z, 2.0))
+            zs /= float(np.median(zs[:, b:-b, b:-b])) * 1.4826 + 1e-9
+            ZS[k] = zs
         if zb > 0: # The chip edge (not searched) must not leak into the searched part through the filter
             Z[:, :zb] = 0; Z[:, -zb:] = 0; Z[:, :, :zb] = 0; Z[:, :, -zb:] = 0
         best = arg = None
@@ -649,6 +666,12 @@ def find(X, searched, p, rule="first", progress=None):
                 E = A[i]                                       # one layer's background; floor = the candidate level
                 ey, ex = (yy, xx) if E[yy, xx] >= E[y, x] else (y, x)
                 lev = max(float(p["lc_cand_threshold"]), rlev * float(E[ey, ex]))
+            elif shape_rem:
+                E = ZS[first, i].astype(np.float32)
+                win2 = E[max(0, yy - 3):yy + 4, max(0, xx - 3):xx + 4]
+                ky = int(win2.argmax())
+                ey, ex = max(0, yy - 3) + ky // win2.shape[1], max(0, xx - 3) + ky % win2.shape[1]
+                lev = max(2.0, rlev * float(E[ey, ex]))
             else:
                 E = S[first, i].astype(np.float32)
                 ey, ex, lev = yy, xx, max(tlo, rlev * float(S[first, i, yy, xx]))
