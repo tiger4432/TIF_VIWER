@@ -976,6 +976,8 @@ class VoidManager:
                     "layer0": bool(v.get("layer0")), # Layer change: already visible on layer 0 (bubble?)
                     "auto_state": v.get("auto") or None, # "detected" / "estimated" until reviewed
                     "snr": self.snr_of(v),
+                    "outline": v.get("outline"), # Detected shape (debug), raw px from the centre
+                    "outline_r": v.get("outline_r"),
                 })
                 rec = records[-1]
                 for key in ("center_x", "center_y", "radius_x", "radius_y", "bbox_rel_x", "bbox_rel_y"):
@@ -1189,6 +1191,9 @@ class VoidManager:
             auto = self._field(item, "auto_state")
             if isinstance(auto, str) and auto:
                 v_obj["auto"] = auto
+            outline, outline_r = self._field(item, "outline"), self._field(item, "outline_r")
+            if isinstance(outline, list) and outline and isinstance(outline_r, list) and len(outline_r) == 2:
+                v_obj["outline"], v_obj["outline_r"] = outline, outline_r
             snr = self._field(item, "snr")
             if snr not in (None, ""):
                 try:

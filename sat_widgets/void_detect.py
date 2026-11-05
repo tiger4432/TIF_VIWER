@@ -689,6 +689,10 @@ def place_found(vm, found, rects, grid_cfg, coord_transform):
         v["snr"] = round(float(score if snr is None else snr), 1)
         if c.get("layer0"):
             v["layer0"] = True # Already visible on layer 0 (bubble?): see void_layer_change.presence
+        if c.get("outline"): # Shape (debug): raw px offsets from the centre, scaled with the radii when drawn
+            cx, cy = v["globalCX"], v["globalCY"]
+            v["outline"] = [[round(px - cx, 1), round(py - cy, 1)] for px, py in (to_raw(x, y) for x, y in c["outline"])]
+            v["outline_r"] = [round(v["radiusX"], 2), round(v["radiusY"], 2)]
         types[vtype] = types.get(vtype, 0) + 1
     return types
 
@@ -758,6 +762,7 @@ def _layer_change(read_layer, layer_numbers, skip, order, rects, size, p, progre
         box = (max(0, int(d["y"] - dry)), min(H - 1, int(math.ceil(d["y"] + dry)) - 1),
                max(0, int(d["x"] - drx)), min(W, int(math.ceil(d["x"] + drx))))
         c = {"box": box, "area": int(math.pi * d["r"] ** 2), "merged": 1, "score": d["score"], "snr": d.get("snr"),
+             "outline": [(x0 + (px + 0.5) * sx, y0 + (py + 0.5) * sy) for py, px in d.get("outline", ())] or None,
              "status": "kept", "extent": extent}
         if "learned" in d:
             c["learned"] = d["learned"]

@@ -311,6 +311,36 @@ def _region(E, y, x, level, reach):
         m = g
 
 
+def _contour(m, max_points=96):
+    """Outline of a connected mask (Moore-neighbour boundary tracing): [(y, x)] in its window, at most
+    max_points (evenly thinned), or [] for an empty mask."""
+    ys, xs = np.nonzero(m)
+    if len(ys) == 0:
+        return []
+    h, w = m.shape
+    inside = lambda y, x: 0 <= y < h and 0 <= x < w and m[y, x]
+    k = int(np.argmin(ys * w + xs)) # Topmost, then leftmost pixel: its west neighbour is outside
+    start = (int(ys[k]), int(xs[k]))
+    nb = [(-1, -1), (-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1)] # Clockwise from NW
+    pts, cur, back = [start], start, 7 # Came from the west
+    for _ in range(4 * (h + w) * 4):
+        for t in range(8):
+            d = (back + 1 + t) % 8
+            ny, nx = cur[0] + nb[d][0], cur[1] + nb[d][1]
+            if inside(ny, nx):
+                back = (d + 4) % 8 # Direction pointing back to cur from the new pixel
+                cur = (ny, nx)
+                break
+        else:
+            break # Single pixel
+        if cur == start:
+            break
+        pts.append(cur)
+    if len(pts) > max_points:
+        pts = [pts[int(i * len(pts) / max_points)] for i in range(max_points)]
+    return pts
+
+
 def _feats(L, blurs=()):
     c = L - L.mean()
     gy, gx = np.gradient(L)
@@ -652,6 +682,9 @@ def find(X, searched, p, rule="first", progress=None):
     for d in dets: # In score order
         i, (y, x) = d["i"], d.pop("_peak")
         reg = d.pop("_reg", None)
+        if reg is not None and not collect: # Shape (debug): the outline of the region its box comes from
+            ry0, rx0, m, _ = reg
+            d["outline"] = [(ry0 + py, rx0 + px) for py, px in _contour(m)]
         if rlev > 0 and not collect:
             if inside(i, y, x):
                 continue

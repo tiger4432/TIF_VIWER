@@ -25,6 +25,8 @@ auto_state: "detected" (detected void) / "estimated" (Detect BBOX) while not rev
 yet, else empty. Read back so the review can continue after loading.
 snr: signal-to-noise of a detected void on its layer (Detect Voids); hand markings 100; empty for
 bboxes. Voids below the SNR filter (Void Detection panel, meta.json "snr_min") are not written.
+outline / outline_r (voids.json only, debug): the detected shape of a Layer change void, raw image px
+offsets from its centre, made at the radii outline_r (drawn scaled to the current radii).
 
 Pixel values (positions and sizes: PIXEL_KEYS) are written scaled as if the grid's x pitch were
 NORM_PITCH_X (value x 300 / pitch_x), so files of scans with another resolution compare
@@ -76,6 +78,8 @@ JSON_FIELDS = {
     "layer0": "layer0",
     "auto_state": "autoState",
     "snr": "snr",
+    "outline": "outline",
+    "outline_r": "outlineR",
 }
 
 # voids.csv

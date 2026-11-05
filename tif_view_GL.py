@@ -615,7 +615,17 @@ class MainWindow(QMainWindow):
         self.chk_detect_state.setToolTip("Detect Voids progress per cell: a circle at the top-right corner of each inspected cell\n"
                                          "(empty: pending, filling: in progress, check: done); shown with the grid")
         self.chk_detect_state.toggled.connect(self._toggle_detect_state)
-        v_adv.addWidget(self.chk_detect_state)
+        self.chk_outlines = QCheckBox("Shapes (debug)")
+        self.chk_outlines.setToolTip("Draw the shape Layer change found for each void (magenta): the region of strong\n"
+                                     "evidence its box comes from. For checking the detection; saved in voids.json\n"
+                                     "(outline), follows the void when it is moved or resized.")
+        self.chk_outlines.toggled.connect(self._toggle_outlines)
+        self.chk_outlines.setChecked(self._ui_state("show_outlines", False))
+        h_dbg = QHBoxLayout()
+        h_dbg.addWidget(self.chk_detect_state)
+        h_dbg.addWidget(self.chk_outlines)
+        h_dbg.addStretch(1)
+        v_adv.addLayout(h_dbg)
         v_det.addWidget(self.detect_adv)
         self.btn_detect_adv.toggled.connect(self._show_detect_advanced)
         self.btn_detect_adv.setChecked(self._ui_state("detect_advanced", False))
@@ -2208,6 +2218,11 @@ class MainWindow(QMainWindow):
             return
         self.glw.detect_cells = dict.fromkeys(self.glw.detect_cells or (), 1.0)
         self._detect_done(result, refs)
+        self.glw.update()
+
+    def _toggle_outlines(self, on):
+        self.glw.show_outlines = bool(on)
+        self._set_ui_state("show_outlines", bool(on))
         self.glw.update()
 
     def _toggle_detect_state(self, on):

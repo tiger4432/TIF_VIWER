@@ -203,6 +203,7 @@ class GLImageWidget(QOpenGLWidget):
         self.show_detect_state = True # Its circles at the top-right of each cell
         self.void_line_width = 2.0 # Void outlines on screen (px; config.json ui_defaults "void_line_width")
         self.void_min_px = 5.0 # Voids drawn at least this radius on screen when zoomed out ("void_min_px")
+        self.show_outlines = False # Detected shapes (debug)
         self._snap_hint = None # Snap types: press point while drawing (bbox corner nearest to it)
         self._snap_drag_point = None # Snap types: last mouse point while drawing (size on release)
         self._free_quadrant = None # Center-anchored snap type being drawn: quadrant press -> mouse
@@ -968,6 +969,25 @@ class GLImageWidget(QOpenGLWidget):
         if self.cursor().shape() != shape:
             self.setCursor(shape)
 
+    def _paint_outline(self, painter, v):
+        """Detected shape (debug, Shapes in Void Detection > Advanced): raw offsets from the centre,
+        scaled with the radii (the void may have been resized or moved since)."""
+        r0x, r0y = v["outline_r"]
+        kx, ky = v["radiusX"] / max(r0x, 1e-6), v["radiusY"] / max(r0y, 1e-6)
+        cx, cy = v["globalCX"], v["globalCY"]
+        pts = []
+        for dx, dy in v["outline"]:
+            px, py = self.deskew_to_screen(*self.raw_to_deskew(cx + dx * kx, cy + dy * ky))
+            pts.append(QPointF(px, py))
+        if len(pts) < 3:
+            return
+        painter.save()
+        for color, width in ((QColor(0, 0, 0, 150), 3.0), (QColor(255, 80, 255, 230), 1.5)):
+            pen = QPen(color); pen.setWidthF(width)
+            painter.setPen(pen); painter.setBrush(Qt.NoBrush)
+            painter.drawPolygon(pts)
+        painter.restore()
+
     def refresh_hover(self):
         """Re-evaluates the hovered void at the mouse position (after undo, load, layer change)."""
         self.hover_void = None
@@ -1092,6 +1112,8 @@ class GLImageWidget(QOpenGLWidget):
                  vm.paint_void(painter, v, sx, sy, self.zoom, style=style, quadrant=quadrant, badges=True,
                                width=1.0 if ghost else self.void_line_width, halo=not ghost,
                                min_radius=0.0 if vm.is_bbox(v) else self.void_min_px)
+                 if self.show_outlines and not ghost and v.get("outline") and v.get("outline_r"):
+                     self._paint_outline(painter, v)
 
              for layer_idx, v_list in vm.voids.items():
                  if layer_idx == self.current_layer:
