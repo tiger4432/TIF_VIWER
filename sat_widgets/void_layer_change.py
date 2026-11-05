@@ -75,7 +75,9 @@ DEFAULTS = {
                           # void 35 -> 7 of 235)
     "lc_region_union": True, # lc_region_join: the box becomes the union (True) or stays the stronger's (False)
     "lc_refit_z": 0.0, # Refit each layer without the pixels whose smoothed remainder is >= this (noise units; 0 = off)
-    "lc_shape": "evidence", # Void extent / outline from "evidence" (band-passed) or "remainder" (smoothed |remainder|)
+    "lc_shape": "evidence", # Void outline (Shapes) from "evidence" (band-passed, rounded) or "remainder" (smoothed
+                            # |remainder|, falls back to the evidence region where it covers < 30 % of it); the box,
+                            # merging and detection use the evidence either way
     "lc_region_level": 0.4, # Void extent: connected region of its layer's evidence >= this x its peak; weaker
                             # peaks inside it are the same void (0 = off: radius 1.6 x the filter sigma). Large
                             # voids: size found / true 0.40 -> about 1, split 11 -> 2 of 77
@@ -666,12 +668,6 @@ def find(X, searched, p, rule="first", progress=None):
                 E = A[i]                                       # one layer's background; floor = the candidate level
                 ey, ex = (yy, xx) if E[yy, xx] >= E[y, x] else (y, x)
                 lev = max(float(p["lc_cand_threshold"]), rlev * float(E[ey, ex]))
-            elif shape_rem:
-                E = ZS[first, i].astype(np.float32)
-                win2 = E[max(0, yy - 3):yy + 4, max(0, xx - 3):xx + 4]
-                ky = int(win2.argmax())
-                ey, ex = max(0, yy - 3) + ky // win2.shape[1], max(0, xx - 3) + ky % win2.shape[1]
-                lev = max(2.0, rlev * float(E[ey, ex]))
             else:
                 E = S[first, i].astype(np.float32)
                 ey, ex, lev = yy, xx, max(tlo, rlev * float(S[first, i, yy, xx]))
@@ -684,6 +680,14 @@ def find(X, searched, p, rule="first", progress=None):
                 det["_reg"] = (ry0, rx0, m, (cy, cx, max(ry, r), max(rx, r)))
                 if max(rx, ry) > r: # Larger than the filter size: the region's box (else the filter's)
                     det.update(x=cx, y=cy, rx=rx, ry=ry, r=max(rx, ry))
+                if shape_rem: # Outline from the unfiltered remainder (follows the void, the evidence is rounded),
+                    Zr = ZS[first, i].astype(np.float32) # where it covers a fair part of the evidence region
+                    ys2, xs2 = np.nonzero(m)
+                    k2 = int(np.argmax(Zr[ry0 + ys2, rx0 + xs2]))
+                    sy2, sx2 = int(ry0 + ys2[k2]), int(rx0 + xs2[k2])
+                    rz = _region(Zr, sy2, sx2, max(2.0, rlev * float(Zr[sy2, sx2])), int(max(3 * r, 0.6 * max(Zr.shape))))
+                    if rz is not None and rz[2].sum() >= 0.3 * m.sum():
+                        det["_shape"] = rz
         dets.append(det)
         if feat is not None:
             dets[-1]["features"] = feat.row(i, y, x, first, float(SIG[first, i, yy, xx]))
@@ -705,8 +709,9 @@ def find(X, searched, p, rule="first", progress=None):
     for d in dets: # In score order
         i, (y, x) = d["i"], d.pop("_peak")
         reg = d.pop("_reg", None)
-        if reg is not None and not collect: # Shape (debug): the outline of the region its box comes from
-            ry0, rx0, m, _ = reg
+        shp = d.pop("_shape", None)
+        if reg is not None and not collect: # Shape (debug): the remainder's region, else the evidence region
+            ry0, rx0, m = shp if shp is not None else reg[:3]
             d["outline"] = [(ry0 + py, rx0 + px) for py, px in _contour(m)]
         if rlev > 0 and not collect:
             if inside(i, y, x):
