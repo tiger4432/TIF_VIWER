@@ -70,6 +70,7 @@ DEFAULTS = {
     "lc_region_join": 1.0, # Detections of one chip whose boxes x this overlap are one void (ragged voids; 0 = off).
                            # Two separate voids whose boxes overlap become one too: lower it if Evaluate shows mg
     "lc_region_map": "evidence", # Extent from "evidence" (the marked layer's) or "place" (the depth-summed place score)
+    "lc_region_union": True, # lc_region_join: the box becomes the union (True) or stays the stronger's (False)
     "lc_region_level": 0.4, # Void extent: connected region of its layer's evidence >= this x its peak; weaker
                             # peaks inside it are the same void (0 = off: radius 1.6 x the filter sigma). Large
                             # voids: size found / true 0.40 -> about 1, split 11 -> 2 of 77
@@ -655,6 +656,7 @@ def find(X, searched, p, rule="first", progress=None):
                 regions.setdefault(i, []).append(reg)
         merged.append(d)
     join = float(p.get("lc_region_join", 0.0) or 0.0)
+    union = bool(p.get("lc_region_union", True)) # Joined: the union box (True) or the stronger's box
     if join > 0 and rlev > 0 and not collect: # Ragged voids: lobes found apart; boxes (x join) that overlap are one void
         changed = True
         while changed:
@@ -667,6 +669,10 @@ def find(X, searched, p, rule="first", progress=None):
                     ax, ay = da.get("rx", da["r"]) * join, da.get("ry", da["r"]) * join
                     bx, by = db.get("rx", db["r"]) * join, db.get("ry", db["r"]) * join
                     if abs(da["x"] - db["x"]) <= ax + bx and abs(da["y"] - db["y"]) <= ay + by:
+                        if not union: # The weaker is a piece of the stronger: dropped, the box stays the stronger's
+                            del merged[b]
+                            changed = True
+                            break
                         x0 = min(da["x"] - da.get("rx", da["r"]), db["x"] - db.get("rx", db["r"]))
                         x1 = max(da["x"] + da.get("rx", da["r"]), db["x"] + db.get("rx", db["r"]))
                         y0 = min(da["y"] - da.get("ry", da["r"]), db["y"] - db.get("ry", db["r"]))
