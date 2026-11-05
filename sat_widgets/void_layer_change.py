@@ -70,6 +70,7 @@ DEFAULTS = {
     "lc_region_join": 1.0, # Detections of one chip whose boxes x this overlap are one void (ragged voids; 0 = off).
                            # Two separate voids whose boxes overlap become one too: lower it if Evaluate shows mg
     "lc_region_map": "evidence", # Extent from "evidence" (the marked layer's) or "place" (the depth-summed place score)
+    "lc_union_frac": 0.0, # lc_region_union: only pieces with a place score >= this x the stronger's widen the box
     "lc_region_union": True, # lc_region_join: the box becomes the union (True) or stays the stronger's (False)
     "lc_region_level": 0.4, # Void extent: connected region of its layer's evidence >= this x its peak; weaker
                             # peaks inside it are the same void (0 = off: radius 1.6 x the filter sigma). Large
@@ -657,6 +658,7 @@ def find(X, searched, p, rule="first", progress=None):
         merged.append(d)
     join = float(p.get("lc_region_join", 0.0) or 0.0)
     union = bool(p.get("lc_region_union", True)) # Joined: the union box (True) or the stronger's box
+    ufrac = float(p.get("lc_union_frac", 0.0) or 0.0) # Union only with pieces scoring >= this x the stronger
     if join > 0 and rlev > 0 and not collect: # Ragged voids: lobes found apart; boxes (x join) that overlap are one void
         changed = True
         while changed:
@@ -669,7 +671,8 @@ def find(X, searched, p, rule="first", progress=None):
                     ax, ay = da.get("rx", da["r"]) * join, da.get("ry", da["r"]) * join
                     bx, by = db.get("rx", db["r"]) * join, db.get("ry", db["r"]) * join
                     if abs(da["x"] - db["x"]) <= ax + bx and abs(da["y"] - db["y"]) <= ay + by:
-                        if not union: # The weaker is a piece of the stronger: dropped, the box stays the stronger's
+                        if not union or db["score"] < ufrac * da["score"]: # A weak piece (background beside the
+                            # void, or not wanted): dropped, the box stays the stronger's
                             del merged[b]
                             changed = True
                             break
