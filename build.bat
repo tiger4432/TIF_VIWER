@@ -14,6 +14,10 @@ call %VENV%\Scripts\activate.bat || goto :error
 
 pyinstaller --noconfirm --clean TIF_Viewer.spec || goto :error
 
+REM A release bundle keeps the site's files in defaults\: use them when missing here
+for %%F in (config.json products.json deploy.json) do if not exist "%%F" if exist "defaults\%%F" copy /Y "defaults\%%F" "%%F" >nul
+if not exist plugins if exist defaults\plugins xcopy /E /I /Y /Q defaults\plugins plugins >nul
+
 REM Editable deployment files live next to the exe
 copy /Y config.json dist\TIF_Viewer\ >nul || goto :error
 copy /Y products.json dist\TIF_Viewer\ >nul || goto :error

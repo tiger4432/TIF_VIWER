@@ -13,6 +13,17 @@ SAT 멀티게이트 TIF를 레이어별로 보면서 디펙을 타원/사각형/
 
 `tifffile`이 없으면 PIL로 대체해서 읽지만, 이 경우 레이어마다 프레임 전체를 디코딩하므로 메모리를 많이 씁니다. 반드시 설치해서 사용하세요.
 
+## 릴리즈 번들로 설치·업데이트 (git 없이)
+
+현장 PC에서 git pull을 쓰지 않을 때는 릴리즈 zip(`TIF_Viewer-<버전>.zip`)을 받아 씁니다.
+
+1. **처음 설치:** zip을 원하는 폴더에 풀고 `run.bat`을 실행합니다. 처음 한 번 가상환경 `.venv`를 만들고 `requirements.txt`를 설치합니다(pip가 PyPI에 접속할 수 있어야 함). `defaults\`의 `config.json`, `products.json`, `deploy.json`, `plugins\`가 없을 때만 복사되니, 그다음부터는 그 파일들을 현장에 맞게 고칩니다.
+2. **업데이트:** 새 zip을 **같은 폴더에 덮어 풀고** `run.bat`을 실행합니다. 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\`는 zip의 제자리에 들어 있지 않으므로 바뀌지 않습니다(새 기본값은 `defaults\`에서 비교해 볼 수 있음). 받은 zip이 맞는지는 함께 받은 `.sha256`과 `certutil -hashfile TIF_Viewer-<버전>.zip SHA256`으로 비교합니다.
+3. **exe로 쓰려면:** 풀린 폴더에서 `build.bat`(PyInstaller)으로 만듭니다. 버전은 창 제목과 `VERSION.txt`(커밋 포함)에 있습니다. 바뀐 내용은 `docs\RELEASE_NOTES.md`.
+4. 선택 기능인 PatchCore 모델(`models\`, 35 MB)은 번들에 없습니다. 필요하면 따로 복사합니다.
+
+릴리즈 만들기(개발 쪽): `sat_widgets/version.py`의 `APP_VERSION`을 올리고 `docs/RELEASE_NOTES.md`를 적은 뒤 커밋하고 `python tools/make_release.py` → `release/TIF_Viewer-<버전>.zip`(+ `.sha256`).
+
 ## 소스에서 실행
 
 ```bat
@@ -25,12 +36,12 @@ python tif_view_GL.py
 ## 개발 실행 (최신 코드 + 실시간 반영)
 
 ```bat
-dev.bat              REM git pull 후 소스로 실행
-dev.bat watch        REM 위 + 30초마다 자동 pull (최소화된 "TIF_Viewer auto-pull" 창, 닫으면 중지)
-dev.bat watch 10     REM 10초마다
+dev.bat              REM 소스로 실행 (set DEV_PULL=1 이면 먼저 git pull)
+set DEV_PULL=1 & dev.bat watch     REM 위 + 30초마다 자동 pull (최소화된 "TIF_Viewer auto-pull" 창, 닫으면 중지)
+set DEV_PULL=1 & dev.bat watch 10  REM 10초마다
 ```
 
-- **동작:** `git pull` → 개발용 가상환경 `.venv-dev` 준비(`requirements.txt` + `requirements-dev.txt`) → `python -m jurigged -v tif_view_GL.py`로 실행합니다.
+- **동작:** (`DEV_PULL=1`일 때만 `git pull`) → 개발용 가상환경 `.venv-dev` 준비(`requirements.txt` + `requirements-dev.txt`) → `python -m jurigged -v tif_view_GL.py`로 실행합니다.
 - **실시간 반영:** jurigged가 소스 파일을 감시합니다. 저장하거나 pull로 바뀐 함수/메서드는 실행 중인 프로그램에 바로 적용되고, 콘솔에 `Update ...`로 표시됩니다.
 - **재시작이 필요한 변경:** `__init__`에서 만드는 위젯(새 버튼 등), 클래스 구조 변경이 해당합니다. `config.json`/`products.json` 변경은 "Reload Declarations"로 반영합니다.
 - **Python 선택:** `build.bat`와 같은 규칙(`tools\setup_venv.bat`)을 씁니다.
