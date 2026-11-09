@@ -5,6 +5,10 @@
 - **git checkout(git bundle로 업데이트):** `defaults\` 폴더는 없습니다. `plugins\results_api.py`도 업데이트(merge)로 새 버전이 되고, 현장에서 고친 내용은 `--autostash`가 그 위에 다시 얹습니다(같은 줄을 고쳤으면 git이 충돌로 알림). 아래 노트의 "`defaults\`에서 옮겨 붙이세요"는 zip 설치에만 해당합니다.
 - **zip 설치:** 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다(새 기본값은 zip 안의 `defaults\`).
 
+## 1.1.11
+
+- **출력에 리스트 없음:** voids.json의 `outline` / `outlineR`(Shapes 디버그용 윤곽 좌표 목록)을 기본으로 쓰지 않습니다. 이제 voids.json·voids.csv·Results API의 모든 필드가 값 하나입니다. 필요하면 config.json `"output_columns": {"json": {"outline": "outline", "outline_r": "outlineR"}}`. 윤곽이 든 예전 파일도 그대로 읽습니다(화면의 Shapes는 지금 세션의 검출 결과로 계속 보임).
+
 ## 1.1.10
 
 - **크기 조절은 한쪽으로:** 마킹 가장자리를 끌면 반대쪽 변(점)은 그대로 있고 잡은 쪽만 움직입니다(예전: 중심 고정, 양쪽이 같이 움직임). 타원의 둥근 부분을 잡으면 반대편 점이 고정됩니다. Alt를 누른 채 잡으면 예전처럼 중심 고정.

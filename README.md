@@ -377,7 +377,7 @@ Grid Configuration 묶음 아래쪽의 작은 Angle Preview(항상 표시)가 �
 
 - **평소에 쓰는 것:** 첫 줄 **Detect Voids**와 **Thr**(낮을수록 많이 찾음), 둘째 줄 검토 이동 **◀ / Next Detected ▶**(검토 전 검출로 이동, 옆에 남은 개수 또는 지금 위치 `3/36`), **Layer-0 (개수)**(레이어 0에서도 보이는 보이드로 이동).
 - **SNR ≥ 슬라이더**(0~100, 0 = 끔): 검출 보이드마다 **SNR**(그 레이어에서 보이드 신호 / 배경 잡음; Layer change는 마킹 레이어의 증거, Die-to-die는 칩 간 흩어짐 단위의 편차, PatchCore·U-Net은 각자의 점수)이 붙고, **손으로 그린 마킹은 100**입니다. 슬라이더 값보다 낮은 검출은 화면에서 숨고, 수정·Next·개수에서 빠지며, **Save JSON·Export·Results API에서도 빠집니다**(meta.json에 `snr_min`과 뺀 개수 `snr_filtered`). bbox는 거르지 않습니다. 슬라이더를 내리면 다시 보입니다(지워지지 않음). voids.json에 `snr`, voids.csv에 `SNR` 컬럼. 시작 값은 `ui_defaults`의 `"snr_min"`, Auto Run은 `"auto_run": {"snr_min": ...}`.
-- **Shapes (debug)**(Advanced): Layer change가 찾은 보이드마다 **검출한 모양**(상자를 정한, 그 레이어에서 증거가 강한 영역의 윤곽)을 자홍색으로 겹쳐 그립니다. 검출이 실제 보이드의 어디를 보고 있는지 확인하는 디버그용입니다. voids.json에 `outline`(중심에서의 원본 px 좌표)과 `outlineR`(그때의 반지름)로 저장되고, 보이드를 옮기거나 크기를 바꾸면 따라 움직이고 늘어납니다. CSV에는 넣지 않습니다.
+- **Shapes (debug)**(Advanced): Layer change가 찾은 보이드마다 **검출한 모양**(상자를 정한, 그 레이어에서 증거가 강한 영역의 윤곽)을 자홍색으로 겹쳐 그립니다. 검출이 실제 보이드의 어디를 보고 있는지 확인하는 디버그용입니다. 보이드를 옮기거나 크기를 바꾸면 따라 움직이고 늘어납니다. 좌표 목록(리스트)이라 voids.json·CSV에는 **기본으로 쓰지 않습니다**(모든 필드가 값 하나). 필요하면 config.json `"output_columns": {"json": {"outline": "outline", "outline_r": "outlineR"}}`로 voids.json에 쓰고, 그런 파일은 다시 읽을 때 윤곽도 읽습니다.
 - **Advanced**(눌러서 펼침, 열림 상태는 기억): 방법(Method), Mark on layer, Skip layers, Learned filter·Train·Evaluate·Seg Data, Cell status. 방법은 제품의 `detect_method` → `config.json` `"void_detect": {"method"}` → Layer change 순으로 정해지므로 보통 바꿀 일이 없습니다. **Learned filter**는 그 방법(Layer change는 그 제품)의 학습 모델이 있으면 자동으로 켜집니다(끄면 Thr로 비교).
 
 방법별 동작: 칩 안의 배경은 layout 때문에 균일하지 않지만 칩마다 반복되므로, 평평한 배경 대신 **같은 레이어의 다른 칩들과 비교**합니다(die-to-die).
