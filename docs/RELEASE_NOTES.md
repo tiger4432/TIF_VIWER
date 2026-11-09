@@ -2,6 +2,11 @@
 
 설치·업데이트 방법은 README의 "릴리즈 번들로 설치·업데이트"를 보세요. 업데이트는 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다.
 
+## 1.1.4
+
+- **Results API GET 필터:** GET 요청에 data(dict)로 넣은 필터는 본문으로 가서 서버가 무시했습니다. 기본 플러그인의 `_request`가 이제 GET에서 dict를 URL 쿼리스트링(`?wafer=...&type=...`)으로 붙입니다. config에서 `"bonding_map": {"url": ..., "params": {"wafer": "{wafer_id}", "type": "csv"}}`처럼 `params`로도 줄 수 있습니다(`{wafer_id}` 등은 채워지고 URL 인코딩됨).
+  - 현장 `plugins\results_api.py`는 업데이트로 바뀌지 않습니다. 새 `defaults\plugins\results_api.py`의 `_request` / `_fill`을 옮겨 붙이거나, 필터를 URL에 직접 넣으세요: `"url": "http://.../map?wafer={wafer_id}"`.
+
 ## 1.1.3
 
 - **`update.bat`:** git 없이 업데이트합니다. GitHub의 최신 릴리즈 zip을 받아 sha256을 확인하고 프로그램 폴더에 덮어 풉니다. `config.json` / `products.json` / `deploy.json` / `plugins\`, 데이터, `.venv`는 그대로입니다. 뷰어를 닫고 `update.bat` → `run.bat`.

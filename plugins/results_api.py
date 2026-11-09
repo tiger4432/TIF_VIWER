@@ -12,6 +12,7 @@ Settings: config.json "results_api" (passed as `settings`), e.g.
                     "replace": true},
         "bonding_map": {"url": "http://mapserver/api/bondingmap/{wafer_id}", "timeout": 30,
                         "auto_fetch": true},   # fetch when a file is opened (wafer ID parsed)
+                        # GET filters: "params": {"wafer": "{wafer_id}", "type": "csv"} -> ?wafer=...&type=csv
         "notify":  {"url": "http://mailserver/send?to={to}&title={title}&body={body}",
                     "recipients": ["a@x.com", "b@x.com"], "recipients_sep": ",", "timeout": 30}
     }
@@ -88,13 +89,24 @@ def build_payload(ctx):
     }
 
 
-def _request(url, settings, data=None):
+def _request(url, settings, data=None, ctx=None):
     """
     data: bytes are sent as is; a dict / list is sent as JSON, a str as UTF-8. urlopen itself takes
     only bytes: a dict or list there fails with "can't concat str to bytes", a str with "POST data
     should be bytes". For a form (key=value&...) pass urllib.parse.urlencode(d).encode() and set
     "headers": {"Content-Type": "application/x-www-form-urlencoded"}.
+    A GET has no body (servers ignore one): filters go into the URL. settings "params" (dict, values
+    may hold {wafer_id} etc. when ctx is given) and a dict passed as data with a GET are added as
+    ?key=value&... (URL-encoded).
     """
+    method = (settings.get("method") or ("POST" if data is not None else "GET")).upper()
+    params = {k: (_fill(str(v), ctx, quote=False) if ctx is not None else v)
+              for k, v in (settings.get("params") or {}).items()}
+    if method in ("GET", "HEAD", "DELETE") and isinstance(data, dict):
+        params.update(data)
+        data = None
+    if params:
+        url += ("&" if "?" in url else "?") + urllib.parse.urlencode(params, doseq=True)
     if isinstance(data, (dict, list)):
         data = json.dumps(data, ensure_ascii=False)
     if isinstance(data, str):
@@ -103,8 +115,7 @@ def _request(url, settings, data=None):
     if data is not None:
         headers["Content-Type"] = "application/json; charset=utf-8"
     headers.update(settings.get("headers") or {})
-    req = urllib.request.Request(url, data=data, headers=headers,
-                                 method=settings.get("method") or ("POST" if data is not None else "GET"))
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
     with urllib.request.urlopen(req, timeout=float(settings.get("timeout", 30))) as resp:
         return resp.status, resp.read()
 
@@ -120,10 +131,10 @@ def send(payload, settings):
     return 200 <= status < 300, f"HTTP {status}: {text}"
 
 
-def _fill(url, ctx):
+def _fill(url, ctx, quote=True):
     """{wafer_id}, {source_name}, {product}, {current_layer} in a URL are filled in (URL-encoded)."""
-    return url.format(**{k: urllib.parse.quote(str(ctx[k]))
-                         for k in ("wafer_id", "source_name", "product", "current_layer")})
+    enc = urllib.parse.quote if quote else (lambda v: v)
+    return url.format(**{k: enc(str(ctx[k])) for k in ("wafer_id", "source_name", "product", "current_layer")})
 
 
 def fetch(ctx, settings):
@@ -132,7 +143,7 @@ def fetch(ctx, settings):
     url = cfg.get("url")
     if not url:
         raise ValueError('Set config.json "results_api": {"receive": {"url": ...}}')
-    status, body = _request(_fill(url, ctx), cfg)
+    status, body = _request(_fill(url, ctx), cfg, ctx=ctx)
     if not 200 <= status < 300:
         raise RuntimeError(f"HTTP {status}: {body[:300].decode('utf-8', 'replace')}")
     return json.loads(body.decode("utf-8"))
@@ -145,7 +156,7 @@ def fetch_bonding_map(ctx, settings):
     url = cfg.get("url")
     if not url:
         raise ValueError('Set config.json "results_api": {"bonding_map": {"url": ".../{wafer_id}"}}')
-    status, body = _request(_fill(url, ctx), cfg)
+    status, body = _request(_fill(url, ctx), cfg, ctx=ctx)
     if not 200 <= status < 300:
         raise RuntimeError(f"HTTP {status}: {body[:300].decode('utf-8', 'replace')}")
     try:
