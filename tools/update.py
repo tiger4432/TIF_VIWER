@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -41,11 +42,29 @@ def repo_name():
         return DEFAULT_REPO
 
 
+def retried(fn, tries=4):
+    """Network errors and 5xx (e.g. 504 Gateway Timeout from a proxy) are retried after 2, 4, 8 s."""
+    for i in range(tries):
+        try:
+            return fn()
+        except urllib.error.HTTPError as e:
+            if e.code < 500 or i == tries - 1:
+                raise
+            print(f"  {e} - retrying")
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            if i == tries - 1:
+                raise
+            print(f"  {e} - retrying")
+        time.sleep(2 ** (i + 1))
+
+
 def get(url, timeout=60):
     req = urllib.request.Request(url, headers={"User-Agent": "TIF_Viewer-update",
                                                "Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+    def once():
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read()
+    return retried(once)
 
 
 def release(repo, version=None):
@@ -61,12 +80,14 @@ def release(repo, version=None):
 
 def download(url, path):
     req = urllib.request.Request(url, headers={"User-Agent": "TIF_Viewer-update"})
-    with urllib.request.urlopen(req, timeout=120) as resp, open(path, "wb") as f:
-        while True:
-            chunk = resp.read(1 << 20)
-            if not chunk:
-                break
-            f.write(chunk)
+    def once():
+        with urllib.request.urlopen(req, timeout=120) as resp, open(path, "wb") as f:
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+    retried(once)
 
 
 def unpack(zip_path, top):

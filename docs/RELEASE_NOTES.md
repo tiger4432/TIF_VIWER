@@ -2,6 +2,13 @@
 
 설치·업데이트 방법은 README의 "릴리즈 번들로 설치·업데이트"를 보세요. 업데이트는 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다.
 
+## 1.1.5
+
+- **Results API JSON 필터:** `params` 값이 dict / list이면 compact JSON으로 만들어 URI 인코딩해 넣습니다(JavaScript `encodeURIComponent`와 같음). 안쪽 문자열의 `{wafer_id}` 등도 채워집니다.
+  - 예: `"bonding_map": {"url": "http://서버/api/map", "params": {"filters": {"waferId": "{wafer_id}", "layer": [1, 2]}}}` → `?filters=%7B%22waferId%22%3A%22W07%22%2C%22layer%22%3A%5B1%2C2%5D%7D`
+  - 현장 `plugins\results_api.py`는 업데이트로 바뀌지 않습니다. 새 `defaults\plugins\results_api.py`의 `_request` / `_query` / `_fill_value` / `_fill`을 옮겨 붙이세요.
+- `update.bat`: 다운로드 중 네트워크 오류나 5xx(예: 504)는 2·4·8초 뒤 다시 시도합니다.
+
 ## 1.1.4
 
 - **Results API GET 필터:** GET 요청에 data(dict)로 넣은 필터는 본문으로 가서 서버가 무시했습니다. 기본 플러그인의 `_request`가 이제 GET에서 dict를 URL 쿼리스트링(`?wafer=...&type=...`)으로 붙입니다. config에서 `"bonding_map": {"url": ..., "params": {"wafer": "{wafer_id}", "type": "csv"}}`처럼 `params`로도 줄 수 있습니다(`{wafer_id}` 등은 채워지고 URL 인코딩됨).

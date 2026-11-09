@@ -13,6 +13,8 @@ Settings: config.json "results_api" (passed as `settings`), e.g.
         "bonding_map": {"url": "http://mapserver/api/bondingmap/{wafer_id}", "timeout": 30,
                         "auto_fetch": true},   # fetch when a file is opened (wafer ID parsed)
                         # GET filters: "params": {"wafer": "{wafer_id}", "type": "csv"} -> ?wafer=...&type=csv
+                        # JSON filter: "params": {"filters": {"waferId": "{wafer_id}", "layer": [1, 2]}}
+                        #   -> ?filters=%7B%22waferId%22%3A%22W07%22%2C%22layer%22%3A%5B1%2C2%5D%7D
         "notify":  {"url": "http://mailserver/send?to={to}&title={title}&body={body}",
                     "recipients": ["a@x.com", "b@x.com"], "recipients_sep": ",", "timeout": 30}
     }
@@ -95,18 +97,18 @@ def _request(url, settings, data=None, ctx=None):
     only bytes: a dict or list there fails with "can't concat str to bytes", a str with "POST data
     should be bytes". For a form (key=value&...) pass urllib.parse.urlencode(d).encode() and set
     "headers": {"Content-Type": "application/x-www-form-urlencoded"}.
-    A GET has no body (servers ignore one): filters go into the URL. settings "params" (dict, values
-    may hold {wafer_id} etc. when ctx is given) and a dict passed as data with a GET are added as
-    ?key=value&... (URL-encoded).
+    A GET has no body (servers ignore one): filters go into the URL. settings "params" (dict; its
+    strings, also nested ones, may hold {wafer_id} etc. when ctx is given) and a dict passed as data
+    with a GET are added as ?key=value&... (see _query: a dict / list value goes as URI-encoded JSON,
+    e.g. "params": {"filters": {"waferId": "{wafer_id}"}} -> ?filters=%7B%22waferId%22%3A%22W07%22%7D).
     """
     method = (settings.get("method") or ("POST" if data is not None else "GET")).upper()
-    params = {k: (_fill(str(v), ctx, quote=False) if ctx is not None else v)
-              for k, v in (settings.get("params") or {}).items()}
+    params = _fill_value(dict(settings.get("params") or {}), ctx)
     if method in ("GET", "HEAD", "DELETE") and isinstance(data, dict):
         params.update(data)
         data = None
     if params:
-        url += ("&" if "?" in url else "?") + urllib.parse.urlencode(params, doseq=True)
+        url += ("&" if "?" in url else "?") + _query(params)
     if isinstance(data, (dict, list)):
         data = json.dumps(data, ensure_ascii=False)
     if isinstance(data, str):
@@ -118,6 +120,29 @@ def _request(url, settings, data=None, ctx=None):
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     with urllib.request.urlopen(req, timeout=float(settings.get("timeout", 30))) as resp:
         return resp.status, resp.read()
+
+
+def _query(params):
+    """
+    Query string, encoded like JavaScript encodeURIComponent (space %20, / %2F). A dict / list value
+    is sent as compact JSON ({"a":1}), true / false / null as in JSON, other values as text.
+    """
+    def text(v):
+        if isinstance(v, (dict, list, bool)) or v is None:
+            return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
+        return str(v)
+    return urllib.parse.urlencode({k: text(v) for k, v in params.items()}, quote_via=urllib.parse.quote)
+
+
+def _fill_value(value, ctx):
+    """{wafer_id} etc. filled into the strings of a value (nested dicts / lists too), not URL-encoded."""
+    if ctx is None:
+        return value
+    if isinstance(value, dict):
+        return {k: _fill_value(v, ctx) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_fill_value(v, ctx) for v in value]
+    return _fill(value, ctx, quote=False) if isinstance(value, str) else value
 
 
 def send(payload, settings):
