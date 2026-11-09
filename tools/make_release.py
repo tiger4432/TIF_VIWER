@@ -7,7 +7,8 @@ Contents: the committed files (the working tree must be clean), top folder TIF_V
 The files a site edits are NOT at their place in the zip, so unpacking a new release over an
 installed one keeps them: config.json, products.json, deploy.json and plugins/ go to defaults/,
 and run.bat / build.bat copy them into place only when missing. Left out: dist/ (old builds) and
-models/ (optional PatchCore models, 35 MB: copy them separately when needed).
+models/ (optional PatchCore models, 35 MB: copy them separately when needed) and .github/.
+On GitHub: push a tag v<version> and .github/workflows/release.yml publishes the bundle as a release.
 Version: sat_widgets/version.py APP_VERSION; notes: docs/RELEASE_NOTES.md.
 """
 import hashlib
@@ -20,7 +21,7 @@ import zipfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SITE_FILES = ("config.json", "products.json", "deploy.json") # Edited per site: to defaults/
 SITE_DIRS = ("plugins/",)
-LEFT_OUT = ("dist/", "models/")
+LEFT_OUT = ("dist/", "models/", ".github/")
 
 
 def git(*args):

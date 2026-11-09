@@ -3,9 +3,11 @@ Host of the Results API plugin (plugins/results_api.py, written by the site deve
 loads it from file every time it is used, builds the context, runs the requests on a background
 thread and reports errors (with the traceback, for the developer).
 """
+import csv
 import datetime
 import getpass
 import importlib.util
+import io
 import json
 import os
 import socket
@@ -103,14 +105,26 @@ def _cells_to_rows(cells, origin=0):
     return rows
 
 
+def decode_text(data):
+    """Response bytes -> text: UTF-8 (BOM or not), else cp949 (a CSV saved by Korean Excel)."""
+    for enc in ("utf-8-sig", "cp949"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            pass
+    return data.decode("latin-1")
+
+
 def normalize_bonding_map(result):
     """
     fetch_bonding_map() result -> (map text as pasted from Excel, reject values or None).
-    Accepted: text (tab / comma separated rows), a list of rows, or a dict with "text", "rows" or
+    Accepted: text or bytes (tab / comma separated rows, CSV quoting), a list of rows, or a dict with "text", "rows" or
     "cells" (coordinate list, see _cells_to_rows; "origin": 0 or 1) and optionally
     "reject_values" (list or comma separated text).
     """
     reject = None
+    if isinstance(result, (bytes, bytearray)):
+        result = decode_text(bytes(result))
     if isinstance(result, dict):
         reject = result.get("reject_values")
         if isinstance(reject, str):
@@ -128,8 +142,11 @@ def normalize_bonding_map(result):
         result = "\n".join("\t".join("" if v is None else str(v) for v in row) for row in result)
     if not isinstance(result, str) or not result.strip():
         raise ValueError(f"no bonding map in the result ({type(result).__name__})")
-    if "\t" not in result and "," in result: # CSV -> tab separated
-        result = "\n".join("\t".join(c.strip() for c in line.split(",")) for line in result.splitlines())
+    if isinstance(result, (bytes, bytearray)):
+        result = decode_text(bytes(result))
+    if "\t" not in result and ("," in result or ";" in result): # CSV -> tab separated (quoted fields kept whole)
+        sep = "," if result.count(",") >= result.count(";") else ";"
+        result = "\n".join("\t".join(c.strip() for c in row) for row in csv.reader(io.StringIO(result), delimiter=sep))
     return result, reject
 
 

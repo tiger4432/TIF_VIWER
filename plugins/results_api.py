@@ -139,7 +139,8 @@ def fetch(ctx, settings):
 
 
 def fetch_bonding_map(ctx, settings):
-    """Bonding map of ctx["wafer_id"]. Default: GET the URL; JSON ({"text" | "rows", "reject_values"}) or text."""
+    """Bonding map of ctx["wafer_id"]. Default: GET the URL; JSON ({"text" | "rows", "reject_values"}) or text
+    (CSV / tab separated, UTF-8 or cp949; the response bytes may also be returned as they are)."""
     cfg = settings.get("bonding_map") or {}
     url = cfg.get("url")
     if not url:
@@ -147,11 +148,14 @@ def fetch_bonding_map(ctx, settings):
     status, body = _request(_fill(url, ctx), cfg)
     if not 200 <= status < 300:
         raise RuntimeError(f"HTTP {status}: {body[:300].decode('utf-8', 'replace')}")
-    text = body.decode("utf-8-sig")
+    try:
+        text = body.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = body.decode("cp949") # CSV saved by Korean Excel
     try:
         return json.loads(text)
     except ValueError:
-        return text # Plain text map
+        return text # Plain text map: CSV (comma / semicolon, quoted fields) or tab separated
 
 
 # Optional: wafer ID from the opened file name (overrides config.json "wafer_id": {"pattern": ...}).

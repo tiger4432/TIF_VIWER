@@ -1,0 +1,47 @@
+# Push a tag v<APP_VERSION> (e.g. git tag v1.1.1 && git push origin v1.1.1): builds the release bundle
+# (tools/make_release.py) and publishes it as a GitHub release, notes from docs/RELEASE_NOTES.md.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tag must match APP_VERSION, notes from RELEASE_NOTES.md
+        run: |
+          python - <<'PY'
+          import os, re, sys
+          tag = os.environ["GITHUB_REF_NAME"]
+          ver = re.search(r'APP_VERSION\s*=\s*"([^"]+)"', open("sat_widgets/version.py").read()).group(1)
+          if tag != "v" + ver:
+              sys.exit(f"tag {tag} != v{ver} (sat_widgets/version.py APP_VERSION)")
+          text = open("docs/RELEASE_NOTES.md", encoding="utf-8").read()
+          intro = text.split("\n## ", 1)[0].split("\n", 1)[1].strip() # Install / update paragraph
+          m = re.search(rf"^## {re.escape(ver)}\n(.*?)(?=^## |\Z)", text, re.S | re.M)
+          if not m:
+              sys.exit(f"docs/RELEASE_NOTES.md has no '## {ver}' section")
+          open(os.environ["RUNNER_TEMP"] + "/notes.md", "w", encoding="utf-8").write(m.group(1).strip() + "\n\n---\n" + intro + "\n")
+          open(os.environ["GITHUB_ENV"], "a").write(f"VERSION={ver}\n")
+          PY
+
+      - name: Build the bundle
+        run: python tools/make_release.py release
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/TIF_Viewer-$VERSION.zip release/TIF_Viewer-$VERSION.zip.sha256 \
+            --title "TIF Viewer $VERSION" --notes-file "$RUNNER_TEMP/notes.md"

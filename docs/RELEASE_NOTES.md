@@ -2,6 +2,12 @@
 
 설치·업데이트 방법은 README의 "릴리즈 번들로 설치·업데이트"를 보세요. 업데이트는 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다.
 
+## 1.1.2
+
+- **본딩맵이 CSV로 올 때:** Excel에서 저장한 한글 CSV(cp949)도 읽고(예전엔 UTF-8만), 따옴표로 묶인 칸·세미콜론 구분도 처리합니다. 현장 플러그인의 `fetch_bonding_map`이 응답 bytes를 그대로 돌려줘도 프로그램이 디코딩합니다.
+  - 기본 플러그인의 `fetch_bonding_map`도 cp949를 받도록 바뀌었지만, 현장 `plugins\results_api.py`는 업데이트로 바뀌지 않습니다. 현장 파일이 `body.decode(...)`에서 막히면 `return body`(bytes 그대로)로 바꾸면 됩니다.
+- GitHub Releases에 릴리즈 zip이 올라갑니다(태그 `v<버전>`).
+
 ## 1.1.1
 
 - **Results API `can't concat str to bytes`:** 플러그인이 `urlopen`에 dict나 list를 그대로 넘기면 나는 오류입니다(urlopen은 bytes만 받음). 기본 플러그인의 `_request`가 이제 dict / list는 JSON으로, str은 UTF-8로 바꿔 보냅니다.
