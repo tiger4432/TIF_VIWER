@@ -1647,9 +1647,13 @@ class MainWindow(QMainWindow):
         progress.setWindowModality(Qt.WindowModal)
         progress.show()
 
-        def step(i):
-            if i % 10 == 0:
-                progress.setValue(i)
+        shown = [0.0]
+
+        def step(i): # Repaint / Cancel at most every 0.1 s, whatever the step numbers
+            now = time.monotonic()
+            if now - shown[0] >= 0.1:
+                shown[0] = now
+                progress.setValue(min(int(i), progress.maximum()))
                 QApplication.processEvents()
             return not progress.wasCanceled()
 
@@ -1751,9 +1755,13 @@ class MainWindow(QMainWindow):
         progress.setWindowModality(Qt.WindowModal)
         progress.show()
 
-        def step(i):
-            if i % 10 == 0:
-                progress.setValue(i)
+        shown = [0.0]
+
+        def step(i): # Repaint / Cancel at most every 0.1 s, whatever the step numbers
+            now = time.monotonic()
+            if now - shown[0] >= 0.1:
+                shown[0] = now
+                progress.setValue(min(int(i), progress.maximum()))
                 QApplication.processEvents()
             return not progress.wasCanceled()
 

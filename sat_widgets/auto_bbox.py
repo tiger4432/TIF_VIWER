@@ -44,8 +44,10 @@ Parameters (config.json "auto_bbox", defaults in DEFAULTS):
                      of the median chip over a window of a whole pitch and move all bboxes by it
     locate_px        longest side of that window's working image
     locate_chips     chips in the median (spread over the wafer)
+    locate_layers    loaded layers summed for it
 """
 import math
+import time
 
 import numpy as np
 
@@ -65,7 +67,8 @@ DEFAULTS = {
     "refine_inner": 0.1,
     "locate": True,
     "locate_px": 400,
-    "locate_chips": 48,
+    "locate_chips": 32,
+    "locate_layers": 2,
 }
 
 
@@ -262,6 +265,42 @@ def _cut(stack, z, to_raw, rect, out_size, factor):
     return _chip(region, quad, out_size, factor)
 
 
+class _ReducedLayer:
+    """
+    One layer box-reduced by `factor`, read once in row bands: with many chips one read of the layer
+    instead of one per chip (the windows of neighbouring chips overlap, compressed strips are decoded
+    once). cut() returns the same deskewed window as _cut.
+    """
+    def __init__(self, stack, z, factor):
+        from PIL import Image
+        from .core_data import to_gray
+        self.factor = factor
+        W, H = stack.width, stack.height
+        band = factor * max(1, 1024 // factor) # Whole blocks per band: the bands join seamlessly
+        rows = []
+        for y in range(0, H, band):
+            a = Image.fromarray(to_gray(stack.read_region(z, 0, y, W, min(band, H - y))).astype(np.float32))
+            rows.append(np.asarray(a.reduce(factor) if factor > 1 else a))
+        self.img = Image.fromarray(np.vstack(rows))
+
+    def cut(self, to_raw, rect, out_size):
+        from PIL import Image
+        x0, y0, w, h = rect
+        f = self.factor
+        corners = [to_raw(x0, y0), to_raw(x0, y0 + h), to_raw(x0 + w, y0 + h), to_raw(x0 + w, y0)] # PIL QUAD order
+        quad = tuple(v / f for q in corners for v in q)
+        return np.asarray(self.img.transform(out_size, Image.QUAD, quad, resample=Image.BILINEAR), dtype=np.float32)
+
+
+def _cutter(stack, z, to_raw, factor, n_windows, window_px):
+    """cut(rect, out_size) for layer z: from a once-reduced layer when the windows together cover more
+    than a third of the image (many chips), else window by window (_cut)."""
+    if n_windows * window_px > stack.width * stack.height / 3.0:
+        layer = _ReducedLayer(stack, z, factor)
+        return lambda rect, out_size: layer.cut(to_raw, rect, out_size)
+    return lambda rect, out_size: _cut(stack, z, to_raw, rect, out_size, factor)
+
+
 def _parabola(lo, mid, hi):
     den = lo - 2 * mid + hi
     return float(np.clip(0.5 * (lo - hi) / den, -0.5, 0.5)) if den < 0 else 0.0
@@ -334,20 +373,23 @@ def refine_bboxes(stack, zs, layer_number, grid_cfg, coord_transform, void_manag
     ok = np.zeros(n, bool)
     step = 0
     for z in use:
+        if progress is not None and not progress(step):
+            return None
+        cut = _cutter(stack, z, to_raw, factor, n, (Ww * factor) * (Hw * factor))
         for i, k in enumerate(order):
             if progress is not None and not progress(step):
                 stack.release_cache()
                 return None
             step += 1
             cx, cy = centers[k]
-            a = _cut(stack, z, to_raw, (cx - w / 2 - mw * factor, cy - h / 2 - mw * factor, Ww * factor, Hw * factor),
-                     (Ww, Hw), factor)
+            a = cut((cx - w / 2 - mw * factor, cy - h / 2 - mw * factor, Ww * factor, Hw * factor), (Ww, Hw))
             if a is None:
                 continue
             g = _gradmag(a)
             G[i] += g / (float(np.abs(g).mean()) + 1e-9)
-            med_a = float(np.median(a))
-            I[i] += (a - med_a) / (float(np.median(np.abs(a - med_a))) + 1e-6)
+            sub = a[::3, ::3] # Robust level / spread from every 9th pixel: the same, 9x cheaper
+            med_a = float(np.median(sub))
+            I[i] += (a - med_a) / (float(np.median(np.abs(sub - med_a))) + 1e-6)
             ok[i] = True
         stack.release_cache()
 
@@ -497,13 +539,13 @@ def _edge_pair(profile, width, expected, k=3):
     return pick, float(score[pick - m])
 
 
-def locate_chip(stack, zs, to_raw, centers, size, pitch, params=None):
+def locate_chip(stack, zs, to_raw, centers, size, pitch, params=None, progress=None):
     """
     Absolute place of the chips after they are aligned with each other: the median of the chips over a
     window of a whole pitch more than the bbox (so a chip is inside whatever the start offset), its
     package edges found as a pair of steps the declared size apart. centers: aligned bbox centres
     (deskewed); size (w, h); pitch (px, py). Returns (dx, dy, strength) to add to every centre, or None
-    when the edges are not clear (strength below min_edge_ratio).
+    when the edges are not clear (strength below min_edge_ratio) or when cancelled (progress(i) False).
     """
     p = dict(DEFAULTS)
     p.update(params or {})
@@ -515,21 +557,26 @@ def locate_chip(stack, zs, to_raw, centers, size, pitch, params=None):
     if len(pts) > p.get("locate_chips", 48): # A spread subset is enough for the median
         pts = [pts[i] for i in np.unique(np.linspace(0, len(pts) - 1, int(p.get("locate_chips", 48))).astype(int))]
     zs = list(zs)
-    use = [zs[i] for i in np.unique(np.linspace(0, len(zs) - 1, min(len(zs), int(p["refine_layers"]))).astype(int))]
-    acc = []
-    for cx, cy in pts:
-        img = np.zeros((Hw, Ww), np.float32)
-        got = False
-        for z in use:
-            a = _cut(stack, z, to_raw, (cx - Wd / 2, cy - Hd / 2, Ww * factor, Hw * factor), (Ww, Hw), factor)
+    use = [zs[i] for i in np.unique(np.linspace(0, len(zs) - 1, min(len(zs), int(p.get("locate_layers", 2)))).astype(int))]
+    acc = np.zeros((len(pts), Hw, Ww), np.float32)
+    got = np.zeros(len(pts), bool)
+    j = 0
+    for z in use:
+        cut = _cutter(stack, z, to_raw, factor, len(pts), (Ww * factor) * (Hw * factor))
+        for i, (cx, cy) in enumerate(pts):
+            if progress is not None and not progress((j * len(pts) + i) / len(use)): # 0 .. len(pts)
+                stack.release_cache()
+                return None
+            a = cut((cx - Wd / 2, cy - Hd / 2, Ww * factor, Hw * factor), (Ww, Hw))
             if a is None or a.shape != (Hw, Ww):
                 continue
-            med = float(np.median(a))
-            img += (a - med) / (float(np.median(np.abs(a - med))) + 1e-6)
-            got = True
-        if got:
-            acc.append(img)
-    stack.release_cache()
+            sub = a[::3, ::3]
+            med = float(np.median(sub))
+            acc[i] += (a - med) / (float(np.median(np.abs(sub - med))) + 1e-6)
+            got[i] = True
+        j += 1
+        stack.release_cache()
+    acc = acc[got]
     if len(acc) < 3:
         return None
     gold = np.median(np.stack(acc), axis=0)
@@ -590,9 +637,13 @@ def detect_layout(stack, zs, layer_number, grid_cfg, coord_transform, void_manag
         # Coarse: the whole chip (its package edges fix which period of a repeating layout it is);
         # fine: the inner part only, within less than half a period (noisy edges do not pull)
         coarse = dict(p, refine_margin=p["coarse_margin"], refine_px=max(96, p["refine_px"] * 2 // 3), refine_inner=0.0)
+        # Progress over n * layers steps (the caller's range): coarse 0-45 %, locate 45-55 %, fine 55-100 %
         layers = min(len(list(zs)), int(p["refine_layers"]))
+        total = n * layers
+        t0 = time.monotonic()
         res = refine_bboxes(stack, zs, layer_number, grid_cfg, coord_transform, vm, bbox_type, size, cells, coarse,
-                            (lambda i: progress(i // 2)) if progress else None)
+                            (lambda i: progress(0.45 * i)) if progress else None)
+        t1 = time.monotonic()
         located = None
         if res is not None and p.get("locate", True):
             # The coarse pass aligns the chips with each other but reaches only coarse_margin: with the
@@ -601,7 +652,11 @@ def detect_layout(stack, zs, layer_number, grid_cfg, coord_transform, void_manag
             boxes = [(layer, v) for layer, vs in vm.voids.items() for v in vs if vm.is_bbox(v)]
             want = set(cells)
             cen = [to_deskew(v["globalCX"], v["globalCY"]) for _, v in boxes if v.get("auto") != "estimated"]
-            located = locate_chip(stack, zs, to_raw, cen, size, (grid_cfg.pitch_x, grid_cfg.pitch_y), p)
+            nloc = max(1, min(len(cen), int(p["locate_chips"])))
+            located = locate_chip(stack, zs, to_raw, cen, size, (grid_cfg.pitch_x, grid_cfg.pitch_y), p,
+                                  (lambda j: progress(total * (0.45 + 0.1 * j / nloc))) if progress else None)
+            if progress is not None and not progress(0.55 * total): # Cancelled during the locate step
+                res = None
             if located is not None and math.hypot(located[0], located[1]) > 0.02 * max(size):
                 # Every bbox moves by the same amount; one per cell (near half a pitch two can land in a
                 # cell: the one nearest the common place in the cell stays, the fine pass fills gaps)
@@ -618,9 +673,11 @@ def detect_layout(stack, zs, layer_number, grid_cfg, coord_transform, void_manag
                     layer, v, nx, ny = min(es, key=lambda e: math.hypot(e[2] - cell_c(*k)[0] - ref[0], e[3] - cell_c(*k)[1] - ref[1]))
                     nv = vm.add_void(layer, *to_raw(nx, ny), size[0] / 2.0, size[1] / 2.0, bbox_type)
                     nv.update({key: v[key] for key in ("placed", "auto") if key in v})
+        t2 = time.monotonic()
         if res is not None:
             res = refine_bboxes(stack, zs, layer_number, grid_cfg, coord_transform, vm, bbox_type, size, cells, p,
-                                (lambda i: progress((n * layers + i) // 2)) if progress else None)
+                                (lambda i: progress(total * 0.55 + 0.45 * i)) if progress else None)
+        print(f"[Detect BBOX] {n} cells: coarse {t1 - t0:.1f} s, locate {t2 - t1:.1f} s, fine {time.monotonic() - t2:.1f} s")
     finally:
         vm.end_change()
     if res is not None:
