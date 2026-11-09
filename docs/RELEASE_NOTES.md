@@ -2,6 +2,13 @@
 
 설치·업데이트 방법은 README의 "릴리즈 번들로 설치·업데이트"를 보세요. 업데이트는 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다.
 
+## 1.1.6
+
+- **git bundle로 업데이트(압축 풀기 없음):** 릴리즈마다 `TIF_Viewer-<버전>.bundle`(전체 이력)과 `TIF_Viewer-<버전>-since-<이전 버전>.bundle`(바로 앞 릴리즈 이후 변경분, 작음)이 함께 올라갑니다. git checkout에서 받은 파일로 업데이트합니다(네트워크 pull 없음):
+  - `bundle_update.bat D:\down\TIF_Viewer-1.1.6.bundle`
+  - 또는 직접: `git fetch D:\down\TIF_Viewer-1.1.6.bundle main` → `git merge --ff-only --autostash FETCH_HEAD`
+  - 현장에서 고친 `config.json`, `plugins\results_api.py` 등은 `--autostash`로 잠시 치웠다가 다시 얹습니다. 겹치는 줄이 있으면 git이 알려 주고 `git stash list`에 남겨 둡니다.
+
 ## 1.1.5
 
 - **Results API JSON 필터:** `params` 값이 dict / list이면 compact JSON으로 만들어 URI 인코딩해 넣습니다(JavaScript `encodeURIComponent`와 같음). 안쪽 문자열의 `{wafer_id}` 등도 채워집니다.

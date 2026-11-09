@@ -1,5 +1,5 @@
 # On a push to main whose sat_widgets/version.py APP_VERSION has no release yet: builds the release
-# bundle (tools/make_release.py) and publishes it as GitHub release v<APP_VERSION> (the tag is made
+# bundle (tools/make_release.py) and git bundles and publishes them as GitHub release v<APP_VERSION> (the tag is made
 # on that commit), notes from the "## <version>" section of docs/RELEASE_NOTES.md.
 # So a release = bump APP_VERSION + write its notes + push to main. Also runnable by hand (Actions tab).
 name: Release
@@ -17,6 +17,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Whole history and tags: the git bundles
 
       - uses: actions/setup-python@v5
         with:
@@ -48,12 +50,22 @@ jobs:
 
       - name: Build the bundle
         if: steps.check.outputs.skip != '1'
-        run: python tools/make_release.py release
+        run: |
+          python tools/make_release.py release
+          # git bundles: "git fetch <file> main" without network (bundle_update.bat). Whole history, and
+          # the commits since the previous release (small; needs that release in the checkout)
+          [ "$(git rev-parse --abbrev-ref HEAD)" = main ] || git branch -f main HEAD
+          git bundle create "release/TIF_Viewer-$VERSION.bundle" HEAD main
+          PREV=$(git tag --list 'v*' --sort=-v:refname | head -n 1)
+          if [ -n "$PREV" ] && [ "$(git rev-parse "$PREV^{commit}")" != "$(git rev-parse HEAD)" ]; then
+            git bundle create "release/TIF_Viewer-$VERSION-since-${PREV#v}.bundle" HEAD main "^$PREV"
+          fi
+          ls -la release
 
       - name: Publish
         if: steps.check.outputs.skip != '1'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "v$VERSION" --target "$GITHUB_SHA" release/TIF_Viewer-$VERSION.zip release/TIF_Viewer-$VERSION.zip.sha256 \
+          gh release create "v$VERSION" --target "$GITHUB_SHA" release/TIF_Viewer-$VERSION.zip release/TIF_Viewer-$VERSION.zip.sha256 release/*.bundle \
             --title "TIF Viewer $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
