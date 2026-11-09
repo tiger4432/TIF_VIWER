@@ -2,6 +2,12 @@
 
 설치·업데이트 방법은 README의 "릴리즈 번들로 설치·업데이트"를 보세요. 업데이트는 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다.
 
+## 1.1.3
+
+- **`update.bat`:** git 없이 업데이트합니다. GitHub의 최신 릴리즈 zip을 받아 sha256을 확인하고 프로그램 폴더에 덮어 풉니다. `config.json` / `products.json` / `deploy.json` / `plugins\`, 데이터, `.venv`는 그대로입니다. 뷰어를 닫고 `update.bat` → `run.bat`.
+  - `update.bat --check`: 설치된 버전과 최신 버전만 표시. `update.bat 1.1.2`: 그 버전으로(되돌리기).
+  - 이번 한 번은 zip을 직접 받아 덮어 풀어야 합니다(이전 버전엔 `update.bat`이 없음). 다음부터는 `update.bat`.
+
 ## 1.1.2
 
 - **본딩맵이 CSV로 올 때:** Excel에서 저장한 한글 CSV(cp949)도 읽고(예전엔 UTF-8만), 따옴표로 묶인 칸·세미콜론 구분도 처리합니다. 현장 플러그인의 `fetch_bonding_map`이 응답 bytes를 그대로 돌려줘도 프로그램이 디코딩합니다.
