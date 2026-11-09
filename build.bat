@@ -1,13 +1,15 @@
 @echo off
 REM Builds dist\TIF_Viewer\TIF_Viewer.exe with PyInstaller (Windows x64, Python 3.10 - 3.13).
-REM The build uses its own virtual environment (.venv-build), separate from a .venv an IDE may
-REM keep open; see tools\setup_venv.bat for how Python is chosen.
+REM The build uses the development environment of dev.bat (.venv-dev: the packages the viewer runs
+REM with from source) plus PyInstaller, so the exe gets exactly those. set BUILD_VENV=<dir> for another
+REM one; see tools\setup_venv.bat for how Python is chosen.
 setlocal
 cd /d "%~dp0"
-set "VENV=.venv-build"
+set "VENV=.venv-dev"
+if not "%BUILD_VENV%"=="" set "VENV=%BUILD_VENV%"
 
 REM set WITH_PATCHCORE=1 before build.bat to include the optional PatchCore scorer (onnxruntime)
-set "REQS=requirements.txt requirements-build.txt"
+set "REQS=requirements.txt requirements-dev.txt requirements-build.txt"
 if "%WITH_PATCHCORE%"=="1" set "REQS=%REQS% requirements-patchcore.txt"
 call tools\setup_venv.bat %VENV% %REQS% || goto :error
 call %VENV%\Scripts\activate.bat || goto :error

@@ -60,7 +60,7 @@ build.bat
 
 `build.bat`는 아래 순서로 동작합니다.
 
-1. 빌드 전용 가상환경 `.venv-build`를 준비합니다(IDE가 쓰는 `.venv`와 분리). Python은 다음 순서로 찾습니다(dev.bat도 같음). **conda를 활성화하지 않아도 됩니다.**
+1. **개발 환경 `.venv-dev`(dev.bat이 쓰는 것)** 에 PyInstaller를 더 설치해 그 환경으로 빌드합니다. 소스로 잘 돌던 패키지 그대로 exe에 들어갑니다(다른 가상환경은 `set BUILD_VENV=폴더`). Python은 다음 순서로 찾습니다(dev.bat도 같음). **conda를 활성화하지 않아도 됩니다.**
    - `PYTHON` 환경변수 (예: `set PYTHON=C:\Python310\python.exe`)
    - 저장소 루트의 `python.local` 파일: python.exe 경로 한 줄 (git에 올라가지 않음)
    - 활성화된 conda 환경(base 제외)
@@ -104,13 +104,14 @@ copy /Y products.json dist\TIF_Viewer\
 ### 빌드 문제 해결
 
 - **Python을 찾지 못함 / VS Code 터미널에서 conda가 안 불러짐:** conda 활성화 없이 됩니다. `conda create -n tifviewer ...`로 만든 환경은 자동으로 찾고, 다른 위치라면 저장소 루트에 `python.local` 파일을 만들어 python.exe 경로를 한 줄 적습니다(예: `C:\Users\me\miniconda3\envs\tifviewer\python.exe`). VS Code 터미널에서도 conda를 쓰려면 한 번 `conda init powershell`(또는 `cmd.exe`) 후 VS Code를 다시 시작합니다.
-- **`AttributeError: module 'pkgutil' has no attribute 'ImpImporter'`:** 가상환경에 남아 있던 오래된 pip가 새 Python(3.12 이상)에서 실행될 때 생깁니다(같은 경로의 Python이 업그레이드된 경우 등). 이제 `dev.bat` / `build.bat`가 Python 버전을 비교해 가상환경을 다시 만들고, pip를 고칩니다. 그래도 나오면 `.venv-dev`(또는 `.venv-build`) 폴더를 지우고 다시 실행합니다.
+- **`AttributeError: module 'pkgutil' has no attribute 'ImpImporter'`:** 가상환경에 남아 있던 오래된 pip가 새 Python(3.12 이상)에서 실행될 때 생깁니다(같은 경로의 Python이 업그레이드된 경우 등). 이제 `dev.bat` / `build.bat`가 Python 버전을 비교해 가상환경을 다시 만들고, pip를 고칩니다. 그래도 나오면 `.venv-dev` 폴더를 지우고 다시 실행합니다.
 - **`ImportError: DLL load failed while importing QtCore: 지정된 프로시저를 찾을 수 없습니다`:** Anaconda **base** Python으로 가상환경을 만든 경우입니다. Anaconda 폴더의 오래된 VC++ 런타임(`msvcp140.dll`)이 Qt 6보다 먼저 로드되어 생깁니다. 해결 방법은 둘 중 하나입니다.
   1. python.org에서 Python 3.10 x64를 설치하고, conda를 활성화하지 않은 새 콘솔에서 빌드합니다.
   2. `conda create -n tifviewer -c conda-forge python=3.10` 후 `conda activate tifviewer`로 전용 환경을 씁니다.
 
-  그다음 `build.bat`를 다시 실행합니다. 빌드 전용 `.venv-build`가 다른 Python으로 만들어졌으면 `build.bat`가 자동으로 다시 만듭니다. PyInstaller 실행 전에 Qt가 로드되는지도 검사해서 안내합니다.
-- **`.venv-build ... Permission denied` / `is in use`:** 그 가상환경의 python.exe가 실행 중이거나 에디터가 인터프리터로 잡고 있습니다. 해당 프로그램을 닫고 다시 실행합니다.
+  그다음 `build.bat`를 다시 실행합니다. `.venv-dev`가 다른 Python으로 만들어졌으면 `build.bat`가 자동으로 다시 만듭니다. PyInstaller 실행 전에 Qt가 로드되는지도 검사해서 안내합니다.
+- **`.venv-dev ... Permission denied` / `is in use`:** 그 가상환경의 python.exe가 실행 중이거나 에디터가 인터프리터로 잡고 있습니다. 해당 프로그램을 닫고 다시 실행합니다.
+- **빌드한 exe 실행 시 `DLL load failed` / DLL을 찾을 수 없음:** 1.1.12부터 빌드는 개발 환경(`.venv-dev`)에서 하고, PyInstaller 훅(`pyinstaller-hooks-contrib`)을 최신으로 올립니다. 예전 `.venv-build`는 지워도 됩니다. 그래도 나오면 오류 창의 모듈 이름(`while importing ...`)을 알려 주세요.
 - **실행 시 OpenGL 오류:** GPU 드라이버를 업데이트합니다. 원격 데스크톱처럼 OpenGL 3.3을 지원하지 않는 환경에서는 실행되지 않습니다.
 - **압축 TIF를 열지 못함:** `imagecodecs`가 설치되어 있는지 확인한 뒤 다시 빌드합니다.
 

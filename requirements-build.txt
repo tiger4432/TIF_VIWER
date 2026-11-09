@@ -1,1 +1,2 @@
 pyinstaller==6.16.0
+pyinstaller-hooks-contrib>=2026.9   # hooks of the newer packages (e.g. compiled charset_normalizer of requests)

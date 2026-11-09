@@ -5,6 +5,10 @@
 - **git checkout(git bundle로 업데이트):** `defaults\` 폴더는 없습니다. `plugins\results_api.py`도 업데이트(merge)로 새 버전이 되고, 현장에서 고친 내용은 `--autostash`가 그 위에 다시 얹습니다(같은 줄을 고쳤으면 git이 충돌로 알림). 아래 노트의 "`defaults\`에서 옮겨 붙이세요"는 zip 설치에만 해당합니다.
 - **zip 설치:** 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다(새 기본값은 zip 안의 `defaults\`).
 
+## 1.1.12
+
+- **빌드는 개발 환경에서:** `build.bat`이 별도의 `.venv-build` 대신 `dev.bat`과 같은 `.venv-dev`에 PyInstaller를 더 설치해 빌드합니다. 소스로 잘 돌던 패키지가 그대로 exe에 들어갑니다(다른 환경: `set BUILD_VENV=폴더`). PyInstaller 훅(`pyinstaller-hooks-contrib`)도 최신으로 올려, 1.1.7에 들어간 requests 쪽 컴파일 모듈이 빠져 exe에서 `DLL load failed`가 나던 경우를 막습니다. 예전 `.venv-build` 폴더는 지워도 됩니다.
+
 ## 1.1.11
 
 - **출력에 리스트 없음:** voids.json의 `outline` / `outlineR`(Shapes 디버그용 윤곽 좌표 목록)을 기본으로 쓰지 않습니다. 이제 voids.json·voids.csv·Results API의 모든 필드가 값 하나입니다. 필요하면 config.json `"output_columns": {"json": {"outline": "outline", "outline_r": "outlineR"}}`. 윤곽이 든 예전 파일도 그대로 읽습니다(화면의 Shapes는 지금 세션의 검출 결과로 계속 보임).
