@@ -1704,11 +1704,18 @@ class MainWindow(QMainWindow):
 
     def _report_layout_bbox(self, title, result, n_cells):
         est = len(result["estimated"])
+        loc = result.get("located")
         msg = (f"{title}: {result['refined']} aligned on the layout, {est} estimated (dashed, 'Next Estimated'), "
                f"{result['hand']} kept (by hand); place from {result['absolute']}; match {result['ncc']:.2f}; "
                f"moved {result['moved_px']:.1f} px (median)")
+        if loc:
+            msg += f"; chip outline over a whole pitch: shifted ({loc['dx']:.0f}, {loc['dy']:.0f}) px"
         self.statusBar().showMessage(msg)
         print(msg)
+        if "located" in result and not loc and result["absolute"] == "mean place" and not result["hand"]:
+            QMessageBox.warning(self, title, "The chip outline was not found: the bboxes are aligned with each other, "
+                                "but all of them may be shifted by the same amount.\nIf so, move one bbox onto its chip "
+                                "by hand and press Refine BBOX: the others follow it.")
         if n_cells and est > 0.3 * n_cells:
             QMessageBox.warning(self, title, f"{est} of {n_cells} bonded cells do not match the chip layout.\n"
                                 "Check the grid origin (a shift by a cell puts the bonding map on other chips), "

@@ -2,6 +2,13 @@
 
 설치·업데이트 방법은 README의 "릴리즈 번들로 설치·업데이트"를 보세요. 업데이트는 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다.
 
+## 1.1.8
+
+- **Detect BBOX가 전부 같은 방향으로 밀리던 문제:** 선언 격자 원점이 bbox 크기의 약 25%보다 틀리면, 칩끼리는 잘 맞았지만 절대 위치를 찾지 못해 모든 bbox가 같은 양만큼 밀렸습니다. 이제 칩끼리 맞춘 뒤 한 피치 전체에서 기준 칩의 외곽(선언 크기만큼 떨어진 경계 한 쌍)을 찾아 전체를 옮깁니다. 합성 웨이퍼에서 원점이 70~140 px(피치 300) 틀려도 bbox 오차 최대 1.9 px(예전 86~140 px).
+  - 상태 표시줄에 `chip outline over a whole pitch: shifted (dx, dy) px`로 얼마나 옮겼는지 나옵니다. 외곽을 못 찾으면 경고합니다: bbox 하나를 손으로 맞추고 **Refine BBOX**.
+  - 반 피치를 넘게 틀리면 이웃 칸의 칩에 붙습니다(칸 번호가 하나 밀림): 원점을 고치세요.
+  - 끄려면 config.json `"auto_bbox": {"locate": false}`.
+
 ## 1.1.7
 
 **업데이트 후 할 일:** `requests`가 requirements에 추가됐습니다. `run.bat` / `dev.bat`이 자동으로 설치하며, exe를 쓰면 `build.bat`으로 다시 빌드하세요.

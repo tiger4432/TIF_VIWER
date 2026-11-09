@@ -40,6 +40,10 @@ Parameters (config.json "auto_bbox", defaults in DEFAULTS):
     refine_inner     the outer band of the chip (this fraction of its size) is left out of the match:
                      noisy package edges (one side sticking out, the chip looking larger) do not
                      pull it; the golden chip's box still sets the absolute place
+    locate           "layout": after the coarse pass, find the package edge pair (declared size apart)
+                     of the median chip over a window of a whole pitch and move all bboxes by it
+    locate_px        longest side of that window's working image
+    locate_chips     chips in the median (spread over the wafer)
 """
 import math
 
@@ -59,6 +63,9 @@ DEFAULTS = {
     "refine_layers": 4,
     "refine_min_ncc": 0.3,
     "refine_inner": 0.1,
+    "locate": True,
+    "locate_px": 400,
+    "locate_chips": 48,
 }
 
 
@@ -462,6 +469,83 @@ def fit_grid(void_manager, grid_cfg, coord_transform, img_w, img_h):
             "rms": float(np.sqrt((res ** 2).mean())), "n": int(keep.sum())}
 
 
+def _edge_pair(profile, width, expected, k=3):
+    """
+    Position x0 of a package edge pair `width` apart in a profile longer than a pitch: the package edges
+    are a step up at x0 and down at x0 + width (or the reverse, darker package). Returns (x0, strength
+    / noise) with x0 the candidate nearest `expected` among those nearly as strong as the best (the
+    neighbouring chips repeat it a pitch away), or None.
+    """
+    g = np.gradient(_smooth(np.asarray(profile, np.float64), k))
+    n, wd = len(g), int(round(width))
+    m = max(2, n // 50)
+    if n - wd - 2 * m < 3:
+        return None
+    noise = float(np.median(np.abs(g))) + 1e-9
+    x0 = np.arange(m, n - wd - m)
+    end = np.maximum.reduce([g[x0 + wd + d] for d in (-1, 0, 1)]), np.minimum.reduce([g[x0 + wd + d] for d in (-1, 0, 1)])
+    score = np.maximum(np.minimum(g[x0], -end[1]), np.minimum(-g[x0], end[0])) / noise
+    best = float(score.max())
+    if best <= 0:
+        return None
+    # Local maxima as strong as the best: the chip and its neighbours (a pitch apart) -> nearest to expected
+    peak = np.r_[False, (score[1:-1] >= score[:-2]) & (score[1:-1] >= score[2:]), False]
+    cand = x0[peak & (score >= 0.8 * best)]
+    if not len(cand):
+        cand = x0[[int(np.argmax(score))]]
+    pick = int(cand[np.argmin(np.abs(cand - expected))])
+    return pick, float(score[pick - m])
+
+
+def locate_chip(stack, zs, to_raw, centers, size, pitch, params=None):
+    """
+    Absolute place of the chips after they are aligned with each other: the median of the chips over a
+    window of a whole pitch more than the bbox (so a chip is inside whatever the start offset), its
+    package edges found as a pair of steps the declared size apart. centers: aligned bbox centres
+    (deskewed); size (w, h); pitch (px, py). Returns (dx, dy, strength) to add to every centre, or None
+    when the edges are not clear (strength below min_edge_ratio).
+    """
+    p = dict(DEFAULTS)
+    p.update(params or {})
+    w, h = size
+    Wd, Hd = w + pitch[0] * 1.1, h + pitch[1] * 1.1 # Deskewed window
+    factor = max(1, int(math.ceil(max(Wd, Hd) / p.get("locate_px", 400))))
+    Ww, Hw = int(round(Wd / factor)), int(round(Hd / factor))
+    pts = list(centers)
+    if len(pts) > p.get("locate_chips", 48): # A spread subset is enough for the median
+        pts = [pts[i] for i in np.unique(np.linspace(0, len(pts) - 1, int(p.get("locate_chips", 48))).astype(int))]
+    zs = list(zs)
+    use = [zs[i] for i in np.unique(np.linspace(0, len(zs) - 1, min(len(zs), int(p["refine_layers"]))).astype(int))]
+    acc = []
+    for cx, cy in pts:
+        img = np.zeros((Hw, Ww), np.float32)
+        got = False
+        for z in use:
+            a = _cut(stack, z, to_raw, (cx - Wd / 2, cy - Hd / 2, Ww * factor, Hw * factor), (Ww, Hw), factor)
+            if a is None or a.shape != (Hw, Ww):
+                continue
+            med = float(np.median(a))
+            img += (a - med) / (float(np.median(np.abs(a - med))) + 1e-6)
+            got = True
+        if got:
+            acc.append(img)
+    stack.release_cache()
+    if len(acc) < 3:
+        return None
+    gold = np.median(np.stack(acc), axis=0)
+    wb, hb = w / factor, h / factor
+    ex = _edge_pair(gold.mean(axis=0), wb, (Ww - wb) / 2.0)
+    ey = _edge_pair(gold.mean(axis=1), hb, (Hw - hb) / 2.0)
+    if ex is None or ey is None:
+        return None
+    strength = min(ex[1], ey[1])
+    if strength < p["min_edge_ratio"]:
+        return None
+    dx = (ex[0] + wb / 2.0 - Ww / 2.0) * factor
+    dy = (ey[0] + hb / 2.0 - Hw / 2.0) * factor
+    return float(dx), float(dy), strength
+
+
 def detect_layout(stack, zs, layer_number, grid_cfg, coord_transform, void_manager, bbox_type, size, cells,
                   params=None, progress=None):
     """
@@ -469,6 +553,10 @@ def detect_layout(stack, zs, layer_number, grid_cfg, coord_transform, void_manag
     cell (the existing bboxes' median offset in the cell, else centred), then aligned on the layout
     twice: coarse (coarse_margin, low resolution: the declared origin / angle may be a little off;
     chips beyond reach are taken from the lattice of the others, which follows the angle) and fine.
+    Between the two, locate_chip (locate) finds the package of the median chip over a whole pitch and
+    moves every bbox by the same amount: a declared origin off by up to almost half a pitch (beyond
+    coarse_margin) no longer leaves all bboxes shifted alike. Off by more than half a pitch, the chips
+    are taken for the neighbouring cells' (the cell numbering shifts by one: set the origin).
     Every existing bbox is replaced (hand ones too). One undo step. Returns refine_bboxes' result.
     """
     p = dict(DEFAULTS)
@@ -505,9 +593,36 @@ def detect_layout(stack, zs, layer_number, grid_cfg, coord_transform, void_manag
         layers = min(len(list(zs)), int(p["refine_layers"]))
         res = refine_bboxes(stack, zs, layer_number, grid_cfg, coord_transform, vm, bbox_type, size, cells, coarse,
                             (lambda i: progress(i // 2)) if progress else None)
+        located = None
+        if res is not None and p.get("locate", True):
+            # The coarse pass aligns the chips with each other but reaches only coarse_margin: with the
+            # declared origin farther off they would all keep the same shift. The package edges of the
+            # median chip over a whole pitch set the absolute place
+            boxes = [(layer, v) for layer, vs in vm.voids.items() for v in vs if vm.is_bbox(v)]
+            want = set(cells)
+            cen = [to_deskew(v["globalCX"], v["globalCY"]) for _, v in boxes if v.get("auto") != "estimated"]
+            located = locate_chip(stack, zs, to_raw, cen, size, (grid_cfg.pitch_x, grid_cfg.pitch_y), p)
+            if located is not None and math.hypot(located[0], located[1]) > 0.02 * max(size):
+                # Every bbox moves by the same amount; one per cell (near half a pitch two can land in a
+                # cell: the one nearest the common place in the cell stays, the fine pass fills gaps)
+                moved = {}
+                for layer, v in boxes:
+                    gx, gy = to_deskew(v["globalCX"], v["globalCY"])
+                    vm.remove_void(layer, v)
+                    nx, ny = gx + located[0], gy + located[1]
+                    k = grid_cfg.cell_at(nx, ny)
+                    if k in want: # Off the wanted cells (beyond the bonded ones): dropped
+                        moved.setdefault(k, []).append((layer, v, nx, ny))
+                ref = np.median([(e[2] - cell_c(*k)[0], e[3] - cell_c(*k)[1]) for k, es in moved.items() for e in es], axis=0)
+                for k, es in moved.items():
+                    layer, v, nx, ny = min(es, key=lambda e: math.hypot(e[2] - cell_c(*k)[0] - ref[0], e[3] - cell_c(*k)[1] - ref[1]))
+                    nv = vm.add_void(layer, *to_raw(nx, ny), size[0] / 2.0, size[1] / 2.0, bbox_type)
+                    nv.update({key: v[key] for key in ("placed", "auto") if key in v})
         if res is not None:
             res = refine_bboxes(stack, zs, layer_number, grid_cfg, coord_transform, vm, bbox_type, size, cells, p,
                                 (lambda i: progress((n * layers + i) // 2)) if progress else None)
     finally:
         vm.end_change()
+    if res is not None:
+        res["located"] = None if located is None else {"dx": located[0], "dy": located[1], "strength": located[2]}
     return res
