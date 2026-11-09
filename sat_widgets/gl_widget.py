@@ -1340,7 +1340,8 @@ class GLImageWidget(QOpenGLWidget):
                         if action == 'center' and self.void_manager.is_bbox(v):
                             self._bbox_followers = self.void_manager.snapped_to(v, self.grid_cfg, self.coord_transform)
                         if action == 'edge':
-                            self._resize_plan = self._make_resize_plan(v, gx, gy)
+                            # Alt held: from the centre (both sides); else the opposite side stays
+                            self._resize_plan = self._make_resize_plan(v, gx, gy, centered=bool(e.modifiers() & Qt.AltModifier))
                         self.update()
                         return
 
@@ -1471,14 +1472,15 @@ class GLImageWidget(QOpenGLWidget):
         self._last_mouse = e.position()
         self.update()
 
-    def _make_resize_plan(self, v, gx, gy):
+    def _make_resize_plan(self, v, gx, gy, centered=False):
         """
         How a drag from the grab point (Deskewed gx, gy) on the outline resizes the void, so the
-        grabbed outline point follows the mouse. The center stays (the void does not shift
-        towards the drag; the opposite side moves symmetrically):
-        - rectangle: grabbed side(s) ("axes");
-        - ellipse / curve near the end of an axis: only that axis ("axes");
-        - ellipse / curve on the curved part: uniform scaling ("uniform");
+        grabbed outline point follows the mouse. The opposite side / point stays and only the
+        grabbed side moves (centered=True, Alt held: the center stays and both sides move):
+        - rectangle: grabbed side(s) ("anchored" / "axes");
+        - ellipse / curve near the end of an axis: only that axis ("anchored" / "axes");
+        - ellipse / curve on the curved part: uniform scaling about the opposite outline point
+          ("uniform", "a") / the center;
         - quadrant voids (center on a bbox corner): the corner stays; x end / y end / arc
           ("quadrant");
         - corner-snap types anchored by their edge: the anchored corner stays ("anchored").
@@ -1510,11 +1512,16 @@ class GLImageWidget(QOpenGLWidget):
                 fixed = min(((cx + a * rx, cy + b * ry) for a in (-1, 1) for b in (-1, 1)),
                             key=lambda c: math.hypot(c[0] - k[0], c[1] - k[1]))
                 return {"kind": "anchored", "fixed": fixed, "x": axis in (None, "x"), "y": axis in (None, "y")}
-        if shape == "rectangle" or axis is not None:
-            return {"kind": "axes", "c": (cx, cy), "x": axis in (None, "x"), "y": axis in (None, "y")}
         sx = 1.0 if dx >= 0 else -1.0
         sy = 1.0 if dy >= 0 else -1.0
-        return {"kind": "uniform", "c": (cx, cy), "r0": (rx, ry), "B": (sx * rx * bx, sy * ry * by)}
+        if shape == "rectangle" or axis is not None:
+            if not centered: # The opposite side(s) stay
+                return {"kind": "anchored", "fixed": (cx - sx * rx, cy - sy * ry),
+                        "x": axis in (None, "x"), "y": axis in (None, "y")}
+            return {"kind": "axes", "c": (cx, cy), "x": axis in (None, "x"), "y": axis in (None, "y")}
+        B = (sx * rx * bx, sy * ry * by) # Center -> grabbed outline point
+        return {"kind": "uniform", "c": (cx, cy), "r0": (rx, ry), "B": B,
+                "a": None if centered else (cx - B[0], cy - B[1])} # Opposite outline point stays
 
     def _apply_resize(self, v, gx, gy):
         """Resizes v following the mouse (Deskewed gx, gy) according to the plan from the press."""
@@ -1538,11 +1545,17 @@ class GLImageWidget(QOpenGLWidget):
                 v["radiusY"] = max(1.0, abs(gy - fy) / 2.0)
                 cy = fy + math.copysign(v["radiusY"], gy - fy)
             v["globalCX"], v["globalCY"] = self.deskew_to_raw(cx, cy)
-        elif kind == "uniform": # Center fixed: scale so the grabbed point follows the mouse
+        elif kind == "uniform": # Scale so the grabbed point follows the mouse
             (cx, cy), (bx, by), (r0x, r0y) = plan["c"], plan["B"], plan["r0"]
-            s = ((gx - cx) * bx + (gy - cy) * by) / max(bx * bx + by * by, 1e-9)
-            s = max(s, 1.0 / max(min(r0x, r0y), 1e-9))
-            v["radiusX"], v["radiusY"] = r0x * s, r0y * s
+            s_min = 1.0 / max(min(r0x, r0y), 1e-9)
+            if plan.get("a") is None: # About the center
+                s = ((gx - cx) * bx + (gy - cy) * by) / max(bx * bx + by * by, 1e-9)
+                v["radiusX"], v["radiusY"] = r0x * max(s, s_min), r0y * max(s, s_min)
+            else: # About the opposite outline point a: grabbed point a + 2B -> a + 2sB, center a + sB
+                ax, ay = plan["a"]
+                s = max(((gx - ax) * bx + (gy - ay) * by) / max(2.0 * (bx * bx + by * by), 1e-9), s_min)
+                v["radiusX"], v["radiusY"] = r0x * s, r0y * s
+                v["globalCX"], v["globalCY"] = self.deskew_to_raw(ax + s * bx, ay + s * by)
         else: # quadrant: the corner (center) stays
             (cx, cy), (qx, qy), (r0x, r0y) = plan["c"], plan["q"], plan["r0"]
             mx = max(0.0, (gx - cx) * qx)
