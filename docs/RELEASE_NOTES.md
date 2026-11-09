@@ -2,6 +2,11 @@
 
 설치·업데이트 방법은 README의 "릴리즈 번들로 설치·업데이트"를 보세요. 업데이트는 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다.
 
+## 1.1.1
+
+- **Results API `can't concat str to bytes`:** 플러그인이 `urlopen`에 dict나 list를 그대로 넘기면 나는 오류입니다(urlopen은 bytes만 받음). 기본 플러그인의 `_request`가 이제 dict / list는 JSON으로, str은 UTF-8로 바꿔 보냅니다.
+  - **현장 `plugins\results_api.py`는 업데이트로 바뀌지 않습니다.** 새 `defaults\plugins\results_api.py`의 `_request` 함수를 현장 파일에 옮겨 붙이거나, 직접 `json.dumps(d, ensure_ascii=False).encode("utf-8")`로 bytes를 만들어 넘기세요.
+
 ## 1.1.0
 
 **업데이트 후 할 일:** Layer change 탐지 방식이 여러 군데 바뀌었으므로, 예전에 Train한 Layer change 학습 필터는 Advanced → **Reset** 후 다시 Train하세요(이전 모델은 `.bak`으로 남음).

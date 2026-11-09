@@ -89,6 +89,16 @@ def build_payload(ctx):
 
 
 def _request(url, settings, data=None):
+    """
+    data: bytes are sent as is; a dict / list is sent as JSON, a str as UTF-8. urlopen itself takes
+    only bytes: a dict or list there fails with "can't concat str to bytes", a str with "POST data
+    should be bytes". For a form (key=value&...) pass urllib.parse.urlencode(d).encode() and set
+    "headers": {"Content-Type": "application/x-www-form-urlencoded"}.
+    """
+    if isinstance(data, (dict, list)):
+        data = json.dumps(data, ensure_ascii=False)
+    if isinstance(data, str):
+        data = data.encode("utf-8")
     headers = {"Accept": "application/json"}
     if data is not None:
         headers["Content-Type"] = "application/json; charset=utf-8"
