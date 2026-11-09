@@ -1,6 +1,9 @@
 # 릴리즈 노트
 
-설치·업데이트 방법은 README의 "릴리즈 번들로 설치·업데이트"를 보세요. 업데이트는 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다.
+설치·업데이트 방법은 README의 "릴리즈 번들로 설치·업데이트"를 보세요.
+
+- **git checkout(git bundle로 업데이트):** `defaults\` 폴더는 없습니다. `plugins\results_api.py`도 업데이트(merge)로 새 버전이 되고, 현장에서 고친 내용은 `--autostash`가 그 위에 다시 얹습니다(같은 줄을 고쳤으면 git이 충돌로 알림). 아래 노트의 "`defaults\`에서 옮겨 붙이세요"는 zip 설치에만 해당합니다.
+- **zip 설치:** 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다(새 기본값은 zip 안의 `defaults\`).
 
 ## 1.1.8
 
@@ -15,7 +18,7 @@
 
 - **본딩맵 표 형식:** 칸마다 한 줄인 표(`base,x,y,leg,...`, CSV / 탭 / JSON 레코드)를 자동으로 격자로 바꿉니다. 웨이퍼 중심 기준 음수 좌표도 됩니다. 위아래가 뒤집히면 `"bonding_map": {"table": {"y_up": true}}`, 한 표에 맵이 여럿이면 `"table": {"where": {"base": "..."}}` (docs/RESULTS_API.md).
 - **플러그인 HTTP를 requests로:** 기본 플러그인이 `requests`로 요청합니다. `params`(dict / list 값은 JSON 문자열), `headers`, `timeout`, `verify`. 요청마다 실제 URL이 콘솔에 찍히고, 실패하면 오류 창에도 URL이 나와 필터가 어떻게 나갔는지 바로 확인할 수 있습니다.
-  - 현장 `plugins\results_api.py`는 업데이트로 바뀌지 않습니다. 새 `defaults\plugins\results_api.py`로 바꾸거나 필요한 함수를 옮겨 붙이세요.
+  - zip 설치: 현장 `plugins\results_api.py`는 업데이트로 바뀌지 않습니다. 새 `defaults\plugins\results_api.py`로 바꾸거나 필요한 함수를 옮겨 붙이세요.
 
 ## 1.1.6
 
@@ -28,13 +31,13 @@
 
 - **Results API JSON 필터:** `params` 값이 dict / list이면 compact JSON으로 만들어 URI 인코딩해 넣습니다(JavaScript `encodeURIComponent`와 같음). 안쪽 문자열의 `{wafer_id}` 등도 채워집니다.
   - 예: `"bonding_map": {"url": "http://서버/api/map", "params": {"filters": {"waferId": "{wafer_id}", "layer": [1, 2]}}}` → `?filters=%7B%22waferId%22%3A%22W07%22%2C%22layer%22%3A%5B1%2C2%5D%7D`
-  - 현장 `plugins\results_api.py`는 업데이트로 바뀌지 않습니다. 새 `defaults\plugins\results_api.py`의 `_request` / `_query` / `_fill_value` / `_fill`을 옮겨 붙이세요.
+  - zip 설치: 현장 `plugins\results_api.py`는 업데이트로 바뀌지 않습니다. 새 `defaults\plugins\results_api.py`의 `_request` / `_query` / `_fill_value` / `_fill`을 옮겨 붙이세요.
 - `update.bat`: 다운로드 중 네트워크 오류나 5xx(예: 504)는 2·4·8초 뒤 다시 시도합니다.
 
 ## 1.1.4
 
 - **Results API GET 필터:** GET 요청에 data(dict)로 넣은 필터는 본문으로 가서 서버가 무시했습니다. 기본 플러그인의 `_request`가 이제 GET에서 dict를 URL 쿼리스트링(`?wafer=...&type=...`)으로 붙입니다. config에서 `"bonding_map": {"url": ..., "params": {"wafer": "{wafer_id}", "type": "csv"}}`처럼 `params`로도 줄 수 있습니다(`{wafer_id}` 등은 채워지고 URL 인코딩됨).
-  - 현장 `plugins\results_api.py`는 업데이트로 바뀌지 않습니다. 새 `defaults\plugins\results_api.py`의 `_request` / `_fill`을 옮겨 붙이거나, 필터를 URL에 직접 넣으세요: `"url": "http://.../map?wafer={wafer_id}"`.
+  - zip 설치: 현장 `plugins\results_api.py`는 업데이트로 바뀌지 않습니다. 새 `defaults\plugins\results_api.py`의 `_request` / `_fill`을 옮겨 붙이거나, 필터를 URL에 직접 넣으세요: `"url": "http://.../map?wafer={wafer_id}"`.
 
 ## 1.1.3
 
@@ -51,7 +54,7 @@
 ## 1.1.1
 
 - **Results API `can't concat str to bytes`:** 플러그인이 `urlopen`에 dict나 list를 그대로 넘기면 나는 오류입니다(urlopen은 bytes만 받음). 기본 플러그인의 `_request`가 이제 dict / list는 JSON으로, str은 UTF-8로 바꿔 보냅니다.
-  - **현장 `plugins\results_api.py`는 업데이트로 바뀌지 않습니다.** 새 `defaults\plugins\results_api.py`의 `_request` 함수를 현장 파일에 옮겨 붙이거나, 직접 `json.dumps(d, ensure_ascii=False).encode("utf-8")`로 bytes를 만들어 넘기세요.
+  - **zip 설치: 현장 `plugins\results_api.py`는 업데이트로 바뀌지 않습니다.** 새 `defaults\plugins\results_api.py`의 `_request` 함수를 현장 파일에 옮겨 붙이거나, 직접 `json.dumps(d, ensure_ascii=False).encode("utf-8")`로 bytes를 만들어 넘기세요.
 
 ## 1.1.0
 
