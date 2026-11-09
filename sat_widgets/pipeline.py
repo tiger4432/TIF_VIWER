@@ -390,7 +390,7 @@ class WaferRun:
             self.warn("no bonding map: every grid cell is inspected")
             info["from"] = None
         else:
-            text, reject = results_api.normalize_bonding_map(result)
+            text, reject = results_api.normalize_bonding_map(result, self.results_settings.get("bonding_map"))
             if reject is None:
                 ui = (self.config.get("ui_defaults") or {}).get("reject_values") or []
                 reject = [v.strip() for v in ui.split(",")] if isinstance(ui, str) else [str(v) for v in ui]

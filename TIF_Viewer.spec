@@ -9,6 +9,7 @@ hiddenimports = collect_submodules("imagecodecs") # tifffile imports codecs lazi
 hiddenimports += ["urllib.request", "urllib.parse", "urllib.error", "http.client", "ssl", "json", "base64",
                   "hashlib", "hmac", "uuid", "csv", "socket", "getpass", "email", "zipfile", "gzip"]
 hiddenimports.append("threadpoolctl") # Imported lazily by sat_widgets/void_layer_change.py
+hiddenimports += collect_submodules("requests") + ["urllib3", "idna", "charset_normalizer", "certifi"] # plugins/results_api.py
 try: # Optional PatchCore scorer (build with WITH_PATCHCORE=1, see docs/PATCHCORE.md)
     import onnxruntime # noqa: F401
     hiddenimports.append("onnxruntime")

@@ -11,10 +11,10 @@ Settings: config.json "results_api" (passed as `settings`), e.g.
         "receive": {"url": "http://server/api/voids?wafer={wafer_id}", "timeout": 30,
                     "replace": true},
         "bonding_map": {"url": "http://mapserver/api/bondingmap/{wafer_id}", "timeout": 30,
-                        "auto_fetch": true},   # fetch when a file is opened (wafer ID parsed)
-                        # GET filters: "params": {"wafer": "{wafer_id}", "type": "csv"} -> ?wafer=...&type=csv
-                        # JSON filter: "params": {"filters": {"waferId": "{wafer_id}", "layer": [1, 2]}}
-                        #   -> ?filters=%7B%22waferId%22%3A%22W07%22%2C%22layer%22%3A%5B1%2C2%5D%7D
+                        "auto_fetch": true,   # fetch when a file is opened (wafer ID parsed)
+                        "params": {"filters": {"waferId": "{wafer_id}"}}},
+                        # params -> requests.get(url, params=...): a dict / list value goes as JSON text,
+                        # here ?filters={"waferId": "W07"} (URL-encoded); plain values as they are
         "notify":  {"url": "http://mailserver/send?to={to}&title={title}&body={body}",
                     "recipients": ["a@x.com", "b@x.com"], "recipients_sep": ",", "timeout": 30}
     }
@@ -63,13 +63,16 @@ pixels, as "globalCX" / "globalCY") or col / row + center_x / center_y (relative
 plus layer, type, radius_x / radius_y; names as in voids.json. Loading is one undo step
 (Ctrl+Z); "replace": false adds to the current markings.
 
-Only the Python standard library is available in the built exe (json, urllib, http.client, ssl,
-base64, hashlib, csv, ...). Another package (e.g. requests) must be added to requirements.txt and
-TIF_Viewer.spec (hiddenimports) and the exe rebuilt.
+HTTP goes through requests (requirements.txt; in the exe since 1.1.7). Every setting block (send,
+receive, bonding_map, notify) takes "method", "params", "headers", "timeout" and "verify" (false, or a
+CA file for a company HTTPS certificate). Each request is printed to the console with its full URL.
+Besides requests only the Python standard library is in the exe; another package must be added to
+requirements.txt and TIF_Viewer.spec (hiddenimports) and the exe rebuilt.
 """
 import json
 import urllib.parse
-import urllib.request
+
+import requests
 
 
 def build_payload(ctx):
@@ -91,47 +94,33 @@ def build_payload(ctx):
     }
 
 
-def _request(url, settings, data=None, ctx=None):
+def _params(params, ctx=None):
     """
-    data: bytes are sent as is; a dict / list is sent as JSON, a str as UTF-8. urlopen itself takes
-    only bytes: a dict or list there fails with "can't concat str to bytes", a str with "POST data
-    should be bytes". For a form (key=value&...) pass urllib.parse.urlencode(d).encode() and set
-    "headers": {"Content-Type": "application/x-www-form-urlencoded"}.
-    A GET has no body (servers ignore one): filters go into the URL. settings "params" (dict; its
-    strings, also nested ones, may hold {wafer_id} etc. when ctx is given) and a dict passed as data
-    with a GET are added as ?key=value&... (see _query: a dict / list value goes as URI-encoded JSON,
-    e.g. "params": {"filters": {"waferId": "{wafer_id}"}} -> ?filters=%7B%22waferId%22%3A%22W07%22%7D).
+    Query parameters for requests (params=...). {wafer_id} etc. are filled into the strings (nested
+    ones too); a dict / list value is sent as JSON text:
+        {"filters": {"waferId": "{wafer_id}", "layer": [1, 2]}}
+        -> requests.get(url, params={"filters": '{"waferId": "W07", "layer": [1, 2]}'})
     """
-    method = (settings.get("method") or ("POST" if data is not None else "GET")).upper()
-    params = _fill_value(dict(settings.get("params") or {}), ctx)
-    if method in ("GET", "HEAD", "DELETE") and isinstance(data, dict):
-        params.update(data)
-        data = None
-    if params:
-        url += ("&" if "?" in url else "?") + _query(params)
-    if isinstance(data, (dict, list)):
-        data = json.dumps(data, ensure_ascii=False)
-    if isinstance(data, str):
-        data = data.encode("utf-8")
-    headers = {"Accept": "application/json"}
-    if data is not None:
-        headers["Content-Type"] = "application/json; charset=utf-8"
-    headers.update(settings.get("headers") or {})
-    req = urllib.request.Request(url, data=data, headers=headers, method=method)
-    with urllib.request.urlopen(req, timeout=float(settings.get("timeout", 30))) as resp:
-        return resp.status, resp.read()
+    out = {}
+    for k, v in _fill_value(dict(params or {}), ctx).items():
+        out[k] = json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list, bool)) or v is None else v
+    return out
 
 
-def _query(params):
-    """
-    Query string, encoded like JavaScript encodeURIComponent (space %20, / %2F). A dict / list value
-    is sent as compact JSON ({"a":1}), true / false / null as in JSON, other values as text.
-    """
-    def text(v):
-        if isinstance(v, (dict, list, bool)) or v is None:
-            return json.dumps(v, ensure_ascii=False, separators=(",", ":"))
-        return str(v)
-    return urllib.parse.urlencode({k: text(v) for k, v in params.items()}, quote_via=urllib.parse.quote)
+def _call(method, url, cfg, ctx=None, params=None, **kw):
+    """requests.request with the settings of cfg ("method", "params", "headers", "timeout", "verify")."""
+    query = _params(cfg.get("params"), ctx)
+    query.update(_params(params))
+    resp = requests.request(cfg.get("method") or method, url, params=query or None, headers=cfg.get("headers"),
+                            timeout=float(cfg.get("timeout", 30)), verify=cfg.get("verify", True), **kw)
+    print(f"[results_api] {resp.request.method} {resp.url} -> HTTP {resp.status_code}")
+    return resp
+
+
+def _check(resp):
+    if not resp.ok:
+        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}\n{resp.request.method} {resp.url}")
+    return resp
 
 
 def _fill_value(value, ctx):
@@ -151,9 +140,8 @@ def send(payload, settings):
     url = cfg.get("url")
     if not url:
         return False, 'Set config.json "results_api": {"send": {"url": ...}}'
-    status, body = _request(url, cfg, json.dumps(payload, ensure_ascii=False).encode("utf-8"))
-    text = body[:300].decode("utf-8", "replace")
-    return 200 <= status < 300, f"HTTP {status}: {text}"
+    resp = _call("POST", url, cfg, json=payload)
+    return resp.ok, f"HTTP {resp.status_code}: {resp.text[:300]}"
 
 
 def _fill(url, ctx, quote=True):
@@ -168,22 +156,20 @@ def fetch(ctx, settings):
     url = cfg.get("url")
     if not url:
         raise ValueError('Set config.json "results_api": {"receive": {"url": ...}}')
-    status, body = _request(_fill(url, ctx), cfg, ctx=ctx)
-    if not 200 <= status < 300:
-        raise RuntimeError(f"HTTP {status}: {body[:300].decode('utf-8', 'replace')}")
-    return json.loads(body.decode("utf-8"))
+    return _check(_call("GET", _fill(url, ctx), cfg, ctx)).json()
 
 
 def fetch_bonding_map(ctx, settings):
-    """Bonding map of ctx["wafer_id"]. Default: GET the URL; JSON ({"text" | "rows", "reject_values"}) or text
-    (CSV / tab separated, UTF-8 or cp949; the response bytes may also be returned as they are)."""
+    """
+    Bonding map of ctx["wafer_id"]. Default: GET the URL (with "params"); JSON or text is returned:
+    a grid (CSV / tab separated, UTF-8 or cp949) or a table with one row per cell (header with x, y and
+    leg, e.g. base,x,y,leg,...: see config "bonding_map": {"table": ...} in docs/RESULTS_API.md).
+    """
     cfg = settings.get("bonding_map") or {}
     url = cfg.get("url")
     if not url:
         raise ValueError('Set config.json "results_api": {"bonding_map": {"url": ".../{wafer_id}"}}')
-    status, body = _request(_fill(url, ctx), cfg, ctx=ctx)
-    if not 200 <= status < 300:
-        raise RuntimeError(f"HTTP {status}: {body[:300].decode('utf-8', 'replace')}")
+    body = _check(_call("GET", _fill(url, ctx), cfg, ctx)).content
     try:
         text = body.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -231,8 +217,8 @@ def notify_review(title, body, recipients, ctx, settings):
         return True, "no notify.url: written to review_queue.jsonl"
     q = lambda v: urllib.parse.quote(str(v), safe="")
     full = url.format(to=q(cfg.get("recipients_sep", ",").join(recipients)), title=q(title), body=q(body))
-    status, resp = _request(full, dict(cfg, method="GET"))
-    return 200 <= status < 300, f"HTTP {status}: {resp[:300].decode('utf-8', 'replace')}"
+    resp = _call("GET", full, cfg)
+    return resp.ok, f"HTTP {resp.status_code}: {resp.text[:300]}"
 
 
 def to_voids(data, ctx):

@@ -80,6 +80,13 @@ def notify_review(title, body, recipients, ctx, settings) -> (bool, str)   # Aut
 - `parse_wafer_id`는 `{"wafer_id": ..., "lot": ...}`도 돌려줄 수 있습니다(뷰어는 `wafer_id`만 씀, Auto Run은 Lot으로 제품을 고름).
 - `notify_review`: 기본은 `"results_api": {"notify": {"url": "http://mailserver/send?to={to}&title={title}&body={body}", "recipients": [...], "recipients_sep": ",", "timeout": 30, "headers": {}}}`로 GET 요청(세 자리표시자는 URL 인코딩), `url`이 없으면 출력하고 `review_queue.jsonl`에 추가합니다. 인자·반환·기본 동작의 자세한 약속은 [AUTO_RUN.md 7절](AUTO_RUN.md#7-검토-요청-알림-notify_review-직접-바꿀-수-있는-곳)에 있습니다.
 
+요청 설정(`send` / `receive` / `bonding_map` / `notify` 각각): `"method"`, `"params"`, `"headers"`, `"timeout"`, `"verify"`(회사 HTTPS 인증서 문제면 `false` 또는 CA 파일 경로). `params`는 `requests.get(url, params=...)`로 들어가고, 값이 dict / list이면 JSON 문자열로 바꿔 넣습니다. 문자열 안의 `{wafer_id}` 등은 채워집니다.
+
+```json
+"bonding_map": {"url": "http://서버/api/map", "params": {"filters": {"waferId": "{wafer_id}", "layer": [1, 2]}, "format": "csv"}}
+```
+→ `GET http://서버/api/map?filters={"waferId": "W07", "layer": [1, 2]}&format=csv`(URL 인코딩됨). 요청마다 실제 URL과 응답 코드가 콘솔에 `[results_api] GET ... -> HTTP 200`으로 찍히고, 실패하면 오류 창에도 URL이 나옵니다.
+
 `fetch_bonding_map`이 돌려줄 수 있는 형식:
 
 - 엑셀에서 복사한 것과 같은 텍스트(탭 구분, 행·열 번호 머리글 허용) 또는 CSV 텍스트
@@ -90,6 +97,10 @@ def notify_review(title, body, recipients, ctx, settings) -> (bool, str)   # Aut
   - `origin`: 첫 칸 번호가 0이면 0(기본), 1이면 1.
   - `value`: 그 칸의 값(LEG 등). 없으면 `"1"`. 목록에 없는 칸은 본딩 안 된 칸(빈 칸)입니다.
   - 맵 크기는 가장 큰 행·열 번호까지입니다(그리드 Rows/Cols가 그 크기로 맞춰짐).
+- **칸마다 한 줄인 표**(CSV / 탭 텍스트, 또는 JSON 레코드 목록): 머리글에 `x`, `y`와 값 열(`leg`, 없으면 `value` / `key` / `label` / `bin`)이 있으면 자동으로 격자로 바꿉니다. 예: `base,x,y,leg,...`. 대소문자 무관, 다른 열은 무시합니다.
+  - 기본: `x` = 열(왼쪽부터), `y` = 행(위에서부터), 가장 작은 x / y가 첫 칸(`"origin": "auto"`, 웨이퍼 중심 기준 음수 좌표도 됨).
+  - `config.json`의 `"bonding_map": {"table": {...}}`로 바꿉니다: `"y_up": true`(y가 위로 커지면: 가장 큰 y가 맨 윗줄), `"origin": 0` 또는 `1`(좌표 고정), `"x"` / `"y"` / `"value"`(열 이름이 다를 때), `"where": {"base": "B1"}`(한 표에 여러 맵이 있을 때 그 값의 줄만).
+  - 같은 칸이 다른 값으로 두 번 나오면 오류로 알립니다(`where`로 하나를 고르세요). 위아래가 뒤집혀 보이면 `"y_up": true`.
 
 ### ctx (읽기 전용)
 
@@ -132,8 +143,8 @@ def to_voids(data, ctx):
 
 ## 4. 쓸 수 있는 모듈
 
-exe에는 플러그인이 쓸 만한 표준 라이브러리를 넣어 두었습니다: `json, urllib.request/parse/error, http.client, ssl, base64, hashlib, hmac, uuid, csv, socket, getpass, email, zipfile, gzip`.
-다른 패키지(예: `requests`)가 필요하면 `requirements.txt`에 추가하고 `TIF_Viewer.spec`의 `hiddenimports`에 넣은 뒤 exe를 다시 빌드해야 합니다. 소스 실행(dev.bat)에서는 가상환경에 설치만 하면 됩니다.
+기본 플러그인은 HTTP를 `requests`로 합니다(1.1.7부터 requirements와 exe에 포함). exe에는 그 밖에 플러그인이 쓸 만한 표준 라이브러리를 넣어 두었습니다: `json, urllib.request/parse/error, http.client, ssl, base64, hashlib, hmac, uuid, csv, socket, getpass, email, zipfile, gzip`.
+다른 패키지가 필요하면 `requirements.txt`에 추가하고 `TIF_Viewer.spec`의 `hiddenimports`에 넣은 뒤 exe를 다시 빌드해야 합니다. 소스 실행(dev.bat)에서는 가상환경에 설치만 하면 됩니다.
 
 ## 5. 개발 팁
 

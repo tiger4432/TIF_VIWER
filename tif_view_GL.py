@@ -1357,7 +1357,7 @@ class MainWindow(QMainWindow):
             self._results_error("fetch_bonding_map() failed.", error)
             return
         try:
-            text, reject = results_api.normalize_bonding_map(result)
+            text, reject = results_api.normalize_bonding_map(result, self._results_settings().get("bonding_map"))
         except Exception:
             self._results_error("fetch_bonding_map() returned an unknown format.", traceback.format_exc())
             return

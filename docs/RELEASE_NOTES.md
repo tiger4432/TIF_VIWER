@@ -2,6 +2,14 @@
 
 설치·업데이트 방법은 README의 "릴리즈 번들로 설치·업데이트"를 보세요. 업데이트는 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다.
 
+## 1.1.7
+
+**업데이트 후 할 일:** `requests`가 requirements에 추가됐습니다. `run.bat` / `dev.bat`이 자동으로 설치하며, exe를 쓰면 `build.bat`으로 다시 빌드하세요.
+
+- **본딩맵 표 형식:** 칸마다 한 줄인 표(`base,x,y,leg,...`, CSV / 탭 / JSON 레코드)를 자동으로 격자로 바꿉니다. 웨이퍼 중심 기준 음수 좌표도 됩니다. 위아래가 뒤집히면 `"bonding_map": {"table": {"y_up": true}}`, 한 표에 맵이 여럿이면 `"table": {"where": {"base": "..."}}` (docs/RESULTS_API.md).
+- **플러그인 HTTP를 requests로:** 기본 플러그인이 `requests`로 요청합니다. `params`(dict / list 값은 JSON 문자열), `headers`, `timeout`, `verify`. 요청마다 실제 URL이 콘솔에 찍히고, 실패하면 오류 창에도 URL이 나와 필터가 어떻게 나갔는지 바로 확인할 수 있습니다.
+  - 현장 `plugins\results_api.py`는 업데이트로 바뀌지 않습니다. 새 `defaults\plugins\results_api.py`로 바꾸거나 필요한 함수를 옮겨 붙이세요.
+
 ## 1.1.6
 
 - **git bundle로 업데이트(압축 풀기 없음):** 릴리즈마다 `TIF_Viewer-<버전>.bundle`(전체 이력)과 `TIF_Viewer-<버전>-since-<이전 버전>.bundle`(바로 앞 릴리즈 이후 변경분, 작음)이 함께 올라갑니다. git checkout에서 받은 파일로 업데이트합니다(네트워크 pull 없음):
