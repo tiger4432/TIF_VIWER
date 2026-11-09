@@ -1,10 +1,13 @@
-# Push a tag v<APP_VERSION> (e.g. git tag v1.1.1 && git push origin v1.1.1): builds the release bundle
-# (tools/make_release.py) and publishes it as a GitHub release, notes from docs/RELEASE_NOTES.md.
+# On a push to main whose sat_widgets/version.py APP_VERSION has no release yet: builds the release
+# bundle (tools/make_release.py) and publishes it as GitHub release v<APP_VERSION> (the tag is made
+# on that commit), notes from the "## <version>" section of docs/RELEASE_NOTES.md.
+# So a release = bump APP_VERSION + write its notes + push to main. Also runnable by hand (Actions tab).
 name: Release
 
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -19,14 +22,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Tag must match APP_VERSION, notes from RELEASE_NOTES.md
+      - name: Version and notes
         run: |
           python - <<'PY'
           import os, re, sys
-          tag = os.environ["GITHUB_REF_NAME"]
           ver = re.search(r'APP_VERSION\s*=\s*"([^"]+)"', open("sat_widgets/version.py").read()).group(1)
-          if tag != "v" + ver:
-              sys.exit(f"tag {tag} != v{ver} (sat_widgets/version.py APP_VERSION)")
           text = open("docs/RELEASE_NOTES.md", encoding="utf-8").read()
           intro = text.split("\n## ", 1)[0].split("\n", 1)[1].strip() # Install / update paragraph
           m = re.search(rf"^## {re.escape(ver)}\n(.*?)(?=^## |\Z)", text, re.S | re.M)
@@ -36,12 +36,24 @@ jobs:
           open(os.environ["GITHUB_ENV"], "a").write(f"VERSION={ver}\n")
           PY
 
-      - name: Build the bundle
-        run: python tools/make_release.py release
-
-      - name: Publish
+      - name: Already released?
+        id: check
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" release/TIF_Viewer-$VERSION.zip release/TIF_Viewer-$VERSION.zip.sha256 \
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "v$VERSION is already released: nothing to do (bump APP_VERSION for a new release)"
+            echo "skip=1" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build the bundle
+        if: steps.check.outputs.skip != '1'
+        run: python tools/make_release.py release
+
+      - name: Publish
+        if: steps.check.outputs.skip != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$VERSION" --target "$GITHUB_SHA" release/TIF_Viewer-$VERSION.zip release/TIF_Viewer-$VERSION.zip.sha256 \
             --title "TIF Viewer $VERSION" --notes-file "$RUNNER_TEMP/notes.md"

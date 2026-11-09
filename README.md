@@ -22,7 +22,7 @@ SAT 멀티게이트 TIF를 레이어별로 보면서 디펙을 타원/사각형/
 3. **exe로 쓰려면:** 풀린 폴더에서 `build.bat`(PyInstaller)으로 만듭니다. 버전은 창 제목과 `VERSION.txt`(커밋 포함)에 있습니다. 바뀐 내용은 `docs\RELEASE_NOTES.md`.
 4. 선택 기능인 PatchCore 모델(`models\`, 35 MB)은 번들에 없습니다. 필요하면 따로 복사합니다.
 
-릴리즈 만들기(개발 쪽): `sat_widgets/version.py`의 `APP_VERSION`을 올리고 `docs/RELEASE_NOTES.md`를 적은 뒤 커밋하고 `python tools/make_release.py` → `release/TIF_Viewer-<버전>.zip`(+ `.sha256`). GitHub 릴리즈: 커밋을 push한 뒤 `git tag v<버전> && git push origin v<버전>` → `.github/workflows/release.yml`이 같은 zip을 만들어 릴리즈(노트는 RELEASE_NOTES의 해당 버전 절)로 올립니다. 받는 곳은 저장소의 Releases 페이지.
+릴리즈 만들기(개발 쪽): `sat_widgets/version.py`의 `APP_VERSION`을 올리고 `docs/RELEASE_NOTES.md`를 적은 뒤 커밋하고 `python tools/make_release.py` → `release/TIF_Viewer-<버전>.zip`(+ `.sha256`). GitHub 릴리즈: 버전을 올린 커밋이 main에 push되면 `.github/workflows/release.yml`이 같은 zip을 만들어 릴리즈 `v<버전>`(노트는 RELEASE_NOTES의 해당 버전 절)으로 올립니다. 이미 있는 버전이면 건너뜁니다. 받는 곳은 저장소의 Releases 페이지.
 
 ## 소스에서 실행
 

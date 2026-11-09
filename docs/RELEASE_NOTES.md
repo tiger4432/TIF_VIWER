@@ -6,7 +6,7 @@
 
 - **본딩맵이 CSV로 올 때:** Excel에서 저장한 한글 CSV(cp949)도 읽고(예전엔 UTF-8만), 따옴표로 묶인 칸·세미콜론 구분도 처리합니다. 현장 플러그인의 `fetch_bonding_map`이 응답 bytes를 그대로 돌려줘도 프로그램이 디코딩합니다.
   - 기본 플러그인의 `fetch_bonding_map`도 cp949를 받도록 바뀌었지만, 현장 `plugins\results_api.py`는 업데이트로 바뀌지 않습니다. 현장 파일이 `body.decode(...)`에서 막히면 `return body`(bytes 그대로)로 바꾸면 됩니다.
-- GitHub Releases에 릴리즈 zip이 올라갑니다(태그 `v<버전>`).
+- GitHub Releases에 릴리즈 zip이 올라갑니다(`v<버전>`, main에 새 버전이 올라갈 때 자동).
 
 ## 1.1.1
 
