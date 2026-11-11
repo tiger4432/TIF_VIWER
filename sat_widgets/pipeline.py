@@ -55,7 +55,7 @@ from . import results_api, void_detect, void_layer_change, void_learn
 from .app_paths import declaration_path
 from .auto_bbox import detect_layout, fit_grid
 from .core_data import BondingMap, CoordinateTransform, GridConfig, MosaicTiffStack, TiffStack
-from .products import GRID_KEYS, load_products
+from .products import GRID_KEYS, grid_values, load_products
 from .version import APP_VERSION
 from .void_manager import VoidManager
 
@@ -330,16 +330,16 @@ class WaferRun:
         for key, ukey in (("start_x", "origin_x"), ("start_y", "origin_y")):
             if ui.get(ukey) is not None:
                 setattr(self.grid, key, float(ui[ukey]))
-        for key in GRID_KEYS:
-            if key in prod.get("grid", {}):
-                setattr(self.grid, key, prod["grid"][key])
+        ui = self.config.get("ui_defaults") or {}
+        um_per_px = float(prod.get("um_per_px", ui.get("um_per_px", 0.0)) or 0.0)
+        for key, value in grid_values(prod, um_per_px).items(): # A pitch in um through the scale
+            setattr(self.grid, key, value)
         if isinstance(self.stack, MosaicTiffStack): # The project's own (exported) grid wins
             for key in GRID_KEYS:
                 if key in self.stack.grid_cfg:
                     setattr(self.grid, key, self.stack.grid_cfg[key])
         self.vm = VoidManager(self.config_path) # Void types, output columns from config.json
-        ui = self.config.get("ui_defaults") or {}
-        self.vm.um_per_px = float(prod.get("um_per_px", ui.get("um_per_px", 0.0)) or 0.0)
+        self.vm.um_per_px = um_per_px
         self.apply_bbox_size()
         layout = prod.get("layout")
         chip = prod.get("chip_size_um")

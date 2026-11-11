@@ -41,7 +41,7 @@ from sat_widgets import void_learn
 from sat_widgets import void_seg, seg_data
 from sat_widgets import results_api
 from sat_widgets.auto_run import AutoRunController
-from sat_widgets.products import load_products, GRID_KEYS
+from sat_widgets.products import load_products, grid_values, pitch_um
 from sat_widgets.app_paths import declaration_path, sync_declarations, default_update_manifest
 from sat_widgets.version import APP_VERSION
 from sat_widgets.updater import UpdateChecker, show_update_dialog
@@ -883,21 +883,14 @@ class MainWindow(QMainWindow):
         if hasattr(self, "chk_learned"):
             self._update_learned_state() # Layer change: one learned model per product
         
-        # Grid: only declared keys
-        grid = prod.get("grid", {})
-        spin = {"start_x": self.sb_grid_x, "start_y": self.sb_grid_y, "pitch_x": self.sb_pitch_x,
-                "pitch_y": self.sb_pitch_y, "rows": self.sb_rows, "cols": self.sb_cols, "angle": self.sb_angle}
-        for key in GRID_KEYS:
-            if key in grid:
-                spin[key].blockSignals(True)
-                spin[key].setValue(grid[key])
-                spin[key].blockSignals(False)
-        
         if "um_per_px" in prod:
             self.sb_um_per_px.blockSignals(True)
             self.sb_um_per_px.setValue(float(prod["um_per_px"]))
             self.sb_um_per_px.blockSignals(False)
         self.void_manager.um_per_px = self.sb_um_per_px.value()
+
+        # Grid: only declared keys (a pitch in um through the Scale)
+        self._set_grid_spins(grid_values(prod, self.sb_um_per_px.value()))
         self._apply_bbox_size()
 
         # Layout inside each bbox (also provides snap offsets such as SL). Declared in chip
@@ -911,6 +904,14 @@ class MainWindow(QMainWindow):
         
         self.update_grid_params()
         print(f"Product: {name}")
+
+    def _set_grid_spins(self, values):
+        spin = {"start_x": self.sb_grid_x, "start_y": self.sb_grid_y, "pitch_x": self.sb_pitch_x,
+                "pitch_y": self.sb_pitch_y, "rows": self.sb_rows, "cols": self.sb_cols, "angle": self.sb_angle}
+        for key, value in values.items():
+            spin[key].blockSignals(True)
+            spin[key].setValue(value)
+            spin[key].blockSignals(False)
 
     def _apply_bbox_size(self):
         """
@@ -942,6 +943,10 @@ class MainWindow(QMainWindow):
     def on_scale_changed(self, value):
         self.void_manager.um_per_px = value
         self._apply_bbox_size()
+        prod = getattr(self, "current_product", None)
+        if value > 0 and pitch_um(prod): # A pitch declared in um follows the Scale
+            self._set_grid_spins({k: v for k, v in grid_values(prod, value).items() if k in ("pitch_x", "pitch_y")})
+            self.update_grid_params()
         if self.glw.void_mode:
             self.glw.update_cursor_style()
         self.glw.update()

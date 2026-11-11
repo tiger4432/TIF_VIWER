@@ -7,7 +7,10 @@ Nothing about a product is defined in code: only the keys present in the file ar
   "products": {
     "<product name>": {
       "grid": {"rows": 10, "cols": 12, "pitch_x": 500, "pitch_y": 500,
-               "start_x": 100, "start_y": 100, "angle": 0.0},      # any subset
+               "start_x": 100, "start_y": 100, "angle": 0.0},      # any subset, image pixels
+               # or the pitch in um: "pitch_um": [1000, 1000] (or one number, or "pitch_x_um" /
+               # "pitch_y_um"): pitch px = pitch_um / Scale, follows Scale changes (wins over
+               # pitch_x / pitch_y while a Scale is set)
       "um_per_px": 2.0,                      # optional: pixel size, sets the Scale field
       "chip_size_um": [960, 960],            # real chip (bbox) size in um. Default size of the
                                              # 'bbox' void type = chip_size_um / Scale
@@ -35,6 +38,35 @@ Legacy: "bbox": {"w", "h"} in pixels and "layout.design_size" in any unit still 
 import json
 
 GRID_KEYS = ("start_x", "start_y", "pitch_x", "pitch_y", "rows", "cols", "angle")
+
+
+def pitch_um(prod):
+    """Declared pitch in um (x, y) of a product's grid, or None (pitch_um [x, y] / number, pitch_x_um / pitch_y_um)."""
+    grid = (prod or {}).get("grid") or {}
+    if grid.get("pitch_um") is not None:
+        v = grid["pitch_um"]
+        x, y = (v, v) if isinstance(v, (int, float)) else (v[0], v[1])
+    else:
+        x, y = grid.get("pitch_x_um"), grid.get("pitch_y_um")
+    if not x and not y:
+        return None
+    return (float(x) if x else None, float(y) if y else None)
+
+
+def grid_values(prod, um_per_px):
+    """
+    The declared grid of a product in image pixels: the GRID_KEYS present, with the pitch from
+    pitch_um / um_per_px when a pitch in um is declared and um_per_px > 0.
+    """
+    grid = (prod or {}).get("grid") or {}
+    out = {k: grid[k] for k in GRID_KEYS if k in grid}
+    um = pitch_um(prod)
+    if um and um_per_px and um_per_px > 0:
+        if um[0]:
+            out["pitch_x"] = um[0] / um_per_px
+        if um[1]:
+            out["pitch_y"] = um[1] / um_per_px
+    return out
 
 
 def load_products(path):

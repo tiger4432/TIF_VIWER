@@ -262,7 +262,7 @@ Extraction 아래 **Auto Run** 묶음에 측정 파일 경로(glob, 예: `D:/SAT
   "default": "WF_A",
   "products": {
     "WF_A": {
-      "grid": {"rows": 10, "cols": 12, "pitch_x": 500, "pitch_y": 500},
+      "grid": {"rows": 10, "cols": 12, "pitch_um": [1000, 1000]},
       "um_per_px": 2.0,
       "chip_size_um": [960, 960],
       "layout": {
@@ -281,6 +281,7 @@ Extraction 아래 **Auto Run** 묶음에 측정 파일 경로(glob, 예: `D:/SAT
 칩 크기와 layout은 **실제 칩 치수(um)**로 선언합니다.
 
 - **`grid`:** 적은 키만 적용합니다. 쓸 수 있는 키는 `rows`, `cols`, `pitch_x`, `pitch_y`, `start_x`, `start_y`, `angle`입니다(이미지 픽셀).
+  - **피치를 um로:** `"pitch_um": [1000, 1000]`(x, y; 숫자 하나면 둘 다) 또는 `"pitch_x_um"` / `"pitch_y_um"`. 피치 px = `pitch_um / Scale`이고, Scale을 바꾸면 bbox 크기처럼 따라 바뀝니다. Scale이 있으면 `pitch_x` / `pitch_y`보다 우선하고, Scale이 비어 있으면 `pitch_x` / `pitch_y`(px)를 씁니다. 원점(`start_x` / `start_y`)은 이미지 안의 위치라 px 그대로입니다.
 - **`um_per_px`:** 1픽셀이 몇 um인지입니다. 생략할 수 있고, 적으면 제품을 고를 때 Grid 패널의 **Scale** 칸에 들어갑니다. Scale은 화면에서 직접 바꿀 수도 있습니다.
 - **`chip_size_um`:** 실제 칩(bbox) 크기(um)입니다. `bbox` 타입의 기본 크기는 `chip_size_um / Scale` 픽셀로 정해지고, Scale을 바꾸면 따라 바뀝니다. Scale이 비어 있으면 bbox는 드래그로 그리고, Detect BBOX는 검출한 크기를 씁니다.
 - **`layout`:** 각 칸의 기준 bbox 안에 점선으로 그리는 세부 박스입니다.
