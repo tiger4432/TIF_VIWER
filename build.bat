@@ -31,6 +31,8 @@ if exist models xcopy /E /I /Y /Q models dist\TIF_Viewer\models >nul
 
 echo.
 echo Build OK: dist\TIF_Viewer\TIF_Viewer.exe
+echo Modules PyInstaller could not find: build\TIF_Viewer\warn-TIF_Viewer.txt
+if "%BUILD_CONSOLE%"=="1" echo Console build: run dist\TIF_Viewer\TIF_Viewer.exe from this window to keep its error text.
 exit /b 0
 
 :error

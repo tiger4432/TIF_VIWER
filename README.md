@@ -111,7 +111,7 @@ copy /Y products.json dist\TIF_Viewer\
 
   그다음 `build.bat`를 다시 실행합니다. `.venv-dev`가 다른 Python으로 만들어졌으면 `build.bat`가 자동으로 다시 만듭니다. PyInstaller 실행 전에 Qt가 로드되는지도 검사해서 안내합니다.
 - **`.venv-dev ... Permission denied` / `is in use`:** 그 가상환경의 python.exe가 실행 중이거나 에디터가 인터프리터로 잡고 있습니다. 해당 프로그램을 닫고 다시 실행합니다.
-- **빌드한 exe 실행 시 `DLL load failed` / DLL을 찾을 수 없음:** 1.1.12부터 빌드는 개발 환경(`.venv-dev`)에서 하고, PyInstaller 훅(`pyinstaller-hooks-contrib`)을 최신으로 올립니다. 예전 `.venv-build`는 지워도 됩니다. 그래도 나오면 오류 창의 모듈 이름(`while importing ...`)을 알려 주세요.
+- **빌드한 exe 실행 시 `DLL load failed` / DLL을 찾을 수 없음:** 1.1.12부터 빌드는 개발 환경(`.venv-dev`)에서 하고, PyInstaller 훅(`pyinstaller-hooks-contrib`)을 최신으로 올립니다. 예전 `.venv-build`는 지워도 됩니다. 그래도 나오면 `set BUILD_CONSOLE=1` 후 `build.bat`으로 콘솔 빌드를 만들고, 같은 창에서 `dist\TIF_Viewer\TIF_Viewer.exe`를 실행하면 오류 전문(어느 모듈·DLL인지)이 창에 남습니다. 빌드 중 PyInstaller가 못 찾은 모듈은 `build\TIF_Viewer\warn-TIF_Viewer.txt`에 있습니다.
 - **실행 시 OpenGL 오류:** GPU 드라이버를 업데이트합니다. 원격 데스크톱처럼 OpenGL 3.3을 지원하지 않는 환경에서는 실행되지 않습니다.
 - **압축 TIF를 열지 못함:** `imagecodecs`가 설치되어 있는지 확인한 뒤 다시 빌드합니다.
 

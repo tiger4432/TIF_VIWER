@@ -1,6 +1,8 @@
 # PyInstaller build definition: pyinstaller --noconfirm --clean TIF_Viewer.spec
 # Output: dist/TIF_Viewer/TIF_Viewer.exe (+ _internal/). config.json and products.json are
 # copied next to the exe by build.bat so they can be edited per deployment.
+import os
+
 from PyInstaller.utils.hooks import collect_submodules
 
 hiddenimports = collect_submodules("imagecodecs") # tifffile imports codecs lazily
@@ -40,7 +42,9 @@ exe = EXE(
     debug=False,
     strip=False,
     upx=False,
-    console=False, # Windowed (same as the released exe); errors are shown in dialogs
+    # Windowed (the released exe; errors in dialogs). set BUILD_CONSOLE=1 before build.bat: a console
+    # window that keeps the full error text (DLL / import errors at start)
+    console=os.environ.get("BUILD_CONSOLE") == "1",
 )
 coll = COLLECT(
     exe,
