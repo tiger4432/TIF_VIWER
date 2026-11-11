@@ -1,9 +1,26 @@
 # PyInstaller build definition: pyinstaller --noconfirm --clean TIF_Viewer.spec
 # Output: dist/TIF_Viewer/TIF_Viewer.exe (+ _internal/). config.json and products.json are
 # copied next to the exe by build.bat so they can be edited per deployment.
+import glob
 import os
+import sys
 
 from PyInstaller.utils.hooks import collect_submodules
+
+# conda Python (and a venv made from it) keeps the DLLs of its standard extension modules in
+# <conda env>\Library\bin: libffi for _ctypes, OpenSSL for _ssl (requests), liblzma, bz2, sqlite.
+# That folder is on PATH only in an activated conda prompt and a venv does not look like conda to
+# PyInstaller, so they were left out and the exe stopped with "DLL load failed while importing
+# _ctypes". The folder goes on PATH for the dependency search and those DLLs are taken explicitly.
+# (python.org Python has them in DLLs\, which PyInstaller finds itself.)
+extra_binaries = []
+conda_bin = os.path.join(sys.base_prefix, "Library", "bin")
+if os.path.isdir(conda_bin):
+    os.environ["PATH"] = conda_bin + os.pathsep + os.environ.get("PATH", "")
+    for pattern in ("ffi*.dll", "libffi*.dll", "libssl*.dll", "libcrypto*.dll", "liblzma*.dll", "libbz2*.dll",
+                    "sqlite3*.dll"):
+        extra_binaries += [(f, ".") for f in glob.glob(os.path.join(conda_bin, pattern))]
+    print("[spec] conda DLLs taken from", conda_bin, ":", ", ".join(os.path.basename(f) for f, _ in extra_binaries) or "none")
 
 hiddenimports = collect_submodules("imagecodecs") # tifffile imports codecs lazily
 # Standard library for plugins/results_api.py (loaded from file at run time, so PyInstaller does
@@ -21,7 +38,7 @@ except ImportError:
 a = Analysis(
     ["tif_view_GL.py"],
     pathex=[],
-    binaries=[],
+    binaries=extra_binaries,
     datas=[],
     hiddenimports=hiddenimports,
     hookspath=[],

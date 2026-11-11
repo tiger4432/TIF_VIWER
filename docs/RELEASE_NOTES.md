@@ -5,6 +5,10 @@
 - **git checkout(git bundle로 업데이트):** `defaults\` 폴더는 없습니다. `plugins\results_api.py`도 업데이트(merge)로 새 버전이 되고, 현장에서 고친 내용은 `--autostash`가 그 위에 다시 얹습니다(같은 줄을 고쳤으면 git이 충돌로 알림). 아래 노트의 "`defaults\`에서 옮겨 붙이세요"는 zip 설치에만 해당합니다.
 - **zip 설치:** 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다(새 기본값은 zip 안의 `defaults\`).
 
+## 1.1.14
+
+- **exe의 `DLL load failed while importing _ctypes`:** conda Python으로 만든 가상환경에서 빌드하면 conda 환경의 `Library\bin`에 있는 DLL(_ctypes의 libffi, _ssl의 OpenSSL 등)을 PyInstaller가 찾지 못해 exe에서 빠졌습니다. 이제 spec이 그 폴더를 직접 찾아 넣습니다. 빌드 로그에 `[spec] conda DLLs taken from ...: libffi-8.dll, ...`가 나오면 들어간 것입니다. `build.bat`으로 다시 빌드하세요.
+
 ## 1.1.13
 
 - **콘솔 빌드(오류 확인용):** `set BUILD_CONSOLE=1` 후 `build.bat` → 같은 창에서 `dist\TIF_Viewer\TIF_Viewer.exe`를 실행하면 시작 오류 전문(어느 모듈·DLL인지)이 창에 남습니다. 빌드가 끝나면 PyInstaller가 못 찾은 모듈 목록 파일(`build\TIF_Viewer\warn-TIF_Viewer.txt`) 위치도 알려 줍니다.
