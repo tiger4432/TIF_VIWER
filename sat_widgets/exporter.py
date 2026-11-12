@@ -51,7 +51,9 @@ class ExportManager(QObject):
         - for_copy: the overlay images (chip, layer) with a defect marking (any non-bbox void) on
                     that layer only, all in one flat folder (to copy them elsewhere), and again in
                     for_copy/<group>/ per defect group: the void type's "group" (config.json
-                    void_types), else the type name (an image with two groups goes to both)
+                    void_types), else the type name (an image with two groups goes to both).
+                    'for_copy_all_layers': every exported layer of a die with a defect on any layer
+                    (into the folders of all its groups)
         """
         self.stop_requested = False
         # Image composition + PNG encoding run on worker threads (Qt releases the GIL); the
@@ -107,6 +109,8 @@ class ExportManager(QObject):
                 for layer, v, _, _ in entries:
                     if not self.void_manager.is_bbox(v):
                         defect_groups.setdefault(cell, {}).setdefault(layer, set()).add(self._group_of(v))
+            if options.get('for_copy_all_layers'): # Every layer of a defective die: the die's groups on all layers
+                defect_groups = {cell: {None: set().union(*by_layer.values())} for cell, by_layer in defect_groups.items()}
             self.for_copy_count = 0
             self.for_copy_groups = {}
             want_marks = bool(options.get('mask') or options.get('merged'))
@@ -164,7 +168,8 @@ class ExportManager(QObject):
 
                         # C. for_copy: overlay of the chips with a defect marked on this layer: one flat
                         # folder, and for_copy/<group>/ per defect group
-                        groups = defect_groups.get((r, c), {}).get(abs_layer)
+                        by_layer = defect_groups.get((r, c), {})
+                        groups = by_layer.get(None, by_layer.get(abs_layer))
                         if 'for_copy' in subdirs and groups:
                             fname = f"{basename}_overlay.png"
                             paths = [os.path.join(subdirs['for_copy'], fname)]

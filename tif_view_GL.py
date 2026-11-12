@@ -3271,6 +3271,10 @@ class ExportDialog(QDialog):
         self.chk_for_copy = QCheckBox("Defect images only, one folder (/for_copy)")
         self.chk_for_copy.setToolTip("The overlay images of the chips with a defect marked on that layer\n"
                                      "(not the bbox), all in one folder to copy elsewhere")
+        self.chk_for_copy_all = QCheckBox("    ... all layers of a defective die")
+        self.chk_for_copy_all.setToolTip("for_copy: every exported layer of a die with a defect on any layer\n"
+                                         "(off: only the layers where a defect is marked)")
+        self.chk_for_copy.toggled.connect(self.chk_for_copy_all.setEnabled)
         self.chk_json = QCheckBox("Voids JSON (voids.json + meta.json)")
         self.chk_csv = QCheckBox("Metadata CSV (voids.csv)")
         
@@ -3280,12 +3284,14 @@ class ExportDialog(QDialog):
         self.chk_mask.setChecked(True)
         self.chk_merged.setChecked(True)
         self.chk_for_copy.setChecked(True)
+        self.chk_for_copy_all.setChecked(True)
         self.chk_json.setChecked(True)
         self.chk_csv.setChecked(True)
         # config.json "ui_defaults": {"export": {"raw": false, ...}}
         defaults = (parent._config().get("ui_defaults") or {}).get("export", {}) if hasattr(parent, "_config") else {}
         for key, chk in (("raw", self.chk_raw), ("overlay", self.chk_overlay), ("mask", self.chk_mask),
-                         ("merged", self.chk_merged), ("for_copy", self.chk_for_copy), ("json", self.chk_json),
+                         ("merged", self.chk_merged), ("for_copy", self.chk_for_copy),
+                         ("for_copy_all_layers", self.chk_for_copy_all), ("json", self.chk_json),
                          ("csv", self.chk_csv)):
             if key in defaults:
                 chk.setChecked(bool(defaults[key]))
@@ -3295,6 +3301,7 @@ class ExportDialog(QDialog):
         v_opt.addWidget(self.chk_mask)
         v_opt.addWidget(self.chk_merged)
         v_opt.addWidget(self.chk_for_copy)
+        v_opt.addWidget(self.chk_for_copy_all)
         v_opt.addWidget(self.chk_json)
         v_opt.addWidget(self.chk_csv)
         self.layout.addWidget(gb_opt)
@@ -3333,6 +3340,7 @@ class ExportDialog(QDialog):
             'mask': self.chk_mask.isChecked(),
             'merged': self.chk_merged.isChecked(),
             'for_copy': self.chk_for_copy.isChecked(),
+            'for_copy_all_layers': self.chk_for_copy_all.isChecked(),
             'json': self.chk_json.isChecked(),
             'csv': self.chk_csv.isChecked()
         }
