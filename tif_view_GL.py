@@ -3136,7 +3136,7 @@ class MainWindow(QMainWindow):
                 print("No output directory selected.")
                 return
                 
-            if self.glw.bonding_map is None and any(opts.get(k) for k in ('raw', 'overlay', 'mask', 'merged')):
+            if self.glw.bonding_map is None and any(opts.get(k) for k in ('raw', 'overlay', 'mask', 'merged', 'for_copy')):
                 QMessageBox.warning(self, "Export", "Images are exported only for cells with a LEG (bonding map value).\n"
                                                     "Paste a bonding map first.")
                 return
@@ -3176,6 +3176,11 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Export", f"Export canceled.\nPartial output: {out_dir}")
             else:
                 print("Export Finished.")
+                if opts.get("for_copy"):
+                    n = getattr(exporter, "for_copy_count", 0)
+                    msg = f"Export finished: {n} defect image(s) in {os.path.join(out_dir, 'for_copy')}"
+                    print(msg)
+                    self.statusBar().showMessage(msg)
                 self.last_export_dir = out_dir
                 if (self._results_settings().get("send") or {}).get("after_export"):
                     self.send_results() # config.json "results_api": {"send": {"after_export": true}}
@@ -3257,6 +3262,9 @@ class ExportDialog(QDialog):
         self.chk_overlay = QCheckBox("Overlay Patches (/overlay)")
         self.chk_mask = QCheckBox("Mask Patches (/mask)")
         self.chk_merged = QCheckBox("Merged Patches (/merged)")
+        self.chk_for_copy = QCheckBox("Defect images only, one folder (/for_copy)")
+        self.chk_for_copy.setToolTip("The overlay images of the chips with a defect marked on that layer\n"
+                                     "(not the bbox), all in one folder to copy elsewhere")
         self.chk_json = QCheckBox("Voids JSON (voids.json + meta.json)")
         self.chk_csv = QCheckBox("Metadata CSV (voids.csv)")
         
@@ -3265,12 +3273,14 @@ class ExportDialog(QDialog):
         self.chk_overlay.setChecked(True)
         self.chk_mask.setChecked(True)
         self.chk_merged.setChecked(True)
+        self.chk_for_copy.setChecked(True)
         self.chk_json.setChecked(True)
         self.chk_csv.setChecked(True)
         # config.json "ui_defaults": {"export": {"raw": false, ...}}
         defaults = (parent._config().get("ui_defaults") or {}).get("export", {}) if hasattr(parent, "_config") else {}
         for key, chk in (("raw", self.chk_raw), ("overlay", self.chk_overlay), ("mask", self.chk_mask),
-                         ("merged", self.chk_merged), ("json", self.chk_json), ("csv", self.chk_csv)):
+                         ("merged", self.chk_merged), ("for_copy", self.chk_for_copy), ("json", self.chk_json),
+                         ("csv", self.chk_csv)):
             if key in defaults:
                 chk.setChecked(bool(defaults[key]))
         
@@ -3278,6 +3288,7 @@ class ExportDialog(QDialog):
         v_opt.addWidget(self.chk_overlay)
         v_opt.addWidget(self.chk_mask)
         v_opt.addWidget(self.chk_merged)
+        v_opt.addWidget(self.chk_for_copy)
         v_opt.addWidget(self.chk_json)
         v_opt.addWidget(self.chk_csv)
         self.layout.addWidget(gb_opt)
@@ -3315,6 +3326,7 @@ class ExportDialog(QDialog):
             'overlay': self.chk_overlay.isChecked(),
             'mask': self.chk_mask.isChecked(),
             'merged': self.chk_merged.isChecked(),
+            'for_copy': self.chk_for_copy.isChecked(),
             'json': self.chk_json.isChecked(),
             'csv': self.chk_csv.isChecked()
         }

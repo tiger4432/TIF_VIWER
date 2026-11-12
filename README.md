@@ -333,7 +333,8 @@ Grid Configuration 묶음 아래쪽의 작은 Angle Preview(항상 표시)가 �
 - **Open Project:** Export 폴더에 함께 저장된 `bonding_map.txt`와 Reject Values(`bonding_map_reject.txt`)도 다시 불러옵니다. Export 폴더(patches.json + raw 패치 + voids.json)를 다시 열면 패치를 원본 이미지와 같은 좌표계(같은 크기, 같은 회전 중심)로 다시 맞춰 붙입니다. 그래서 voids.json의 마킹과 그리드가 그대로 맞습니다. patches.json에 원본 크기(`image_size`)를 저장하고, 이전 Export는 패치 좌표에서 원본 크기를 계산합니다.
 - overlay 패치에는 마킹과 함께 제품 layout(점선)도 그립니다. PNG는 가벼운 압축(파일 약 15% 증가)으로 여러 스레드에서 저장해, 이전보다 약 8배 빠릅니다.
 - overlay, mask, merged에는 제품 layout(점선)도 그립니다. **merged**(같은 LEG 칩들의 마킹을 한 장에 겹친 것)는 칩마다 **기준 bbox 중심**에 맞춰 겹치므로, 격자나 칩 위치가 조금 어긋나도 칩 안 같은 자리가 같은 자리에 겹칩니다(layout은 가운데 한 번).
-- Export 이미지(raw, overlay, mask, merged)는 **LEG(본딩맵 값)가 있는 칸만** 저장합니다. 본딩맵이 없으면 이미지 Export를 시작하지 않습니다. 붙여넣은 맵은 `bonding_map.txt`(그대로 다시 붙여넣을 수 있음), Reject Values는 `bonding_map_reject.txt`로 함께 저장합니다.
+- **for_copy**(기본 켜짐, "Defect images only, one folder"): 불량 마킹(bbox 제외, SNR 필터 통과)이 **그 레이어에 있는 칩**의 overlay 이미지만 `for_copy\` 한 폴더에 모읍니다(레이어 하위 폴더 없음, 파일 이름은 overlay와 같음: `X02_Y02_L02_LEG_A_overlay.png`). 다른 곳으로 복사하기 쉽게 하려는 것이고, Overlay를 끄고 저장해도 만들어집니다. 끝나면 상태바에 몇 장인지 나옵니다. 끄려면 저장 창에서 해제하거나 config.json `"ui_defaults": {"export": {"for_copy": false}}`.
+- Export 이미지(raw, overlay, mask, merged, for_copy)는 **LEG(본딩맵 값)가 있는 칸만** 저장합니다. 본딩맵이 없으면 이미지 Export를 시작하지 않습니다. 붙여넣은 맵은 `bonding_map.txt`(그대로 다시 붙여넣을 수 있음), Reject Values는 `bonding_map_reject.txt`로 함께 저장합니다.
 - **Reject Values:** 쉼표로 구분한 값(예: `X, NG`)과 일치하는 칸은 본딩되지 않은 칸으로 처리합니다. ROI, Export, 칸 이동, 캘리브레이션, 각도 미리보기에서 모두 빠집니다. 값을 바꾸고 Enter를 누르면 바로 다시 적용합니다.
 - 화면 좌상단에 화면 중심 칸의 `X`, `Y`, `LEG`(본딩맵 값)를 노란 글씨로 표시합니다.
 

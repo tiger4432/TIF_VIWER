@@ -42,12 +42,14 @@ class ExportManager(QObject):
         """
         Main export loop.
         options = {'raw': bool, 'overlay': bool, 'mask': bool, 'merged': bool, 
-                   'json': bool, 'csv': bool}
+                   'json': bool, 'csv': bool, 'for_copy': bool}
         win_lo, win_hi: Normalization range (from UI)
         - raw:     pure patch per chip and layer
         - overlay: patch with the void markings drawn on it
         - mask:    per chip, markings of all exported layers
         - merged:  per bonding-map value, markings of all chips with that value composited
+        - for_copy: the overlay images (chip, layer) with a defect marking (any non-bbox void) on
+                    that layer only, all in one flat folder (to copy them elsewhere)
         """
         self.stop_requested = False
         # Image composition + PNG encoding run on worker threads (Qt releases the GIL); the
@@ -61,7 +63,7 @@ class ExportManager(QObject):
             # 1. Create subdirectories
             os.makedirs(output_dir, exist_ok=True)
             subdirs = {}
-            for k in ('raw', 'overlay', 'mask', 'merged'):
+            for k in ('raw', 'overlay', 'mask', 'merged', 'for_copy'):
                 if options.get(k):
                     subdirs[k] = os.path.join(output_dir, k)
                     os.makedirs(subdirs[k], exist_ok=True)
@@ -93,7 +95,11 @@ class ExportManager(QObject):
             void_index = self._index_voids(cfg)
             self._refs = self.void_manager.reference_bboxes(cfg, self.main_window.glw.coord_transform)
             
-            want_patch = bool(options.get('raw') or options.get('overlay'))
+            want_patch = bool(options.get('raw') or options.get('overlay') or options.get('for_copy'))
+            # Cells and layers with a defect marking (for_copy): non-bbox voids that pass the SNR filter
+            defect_layers = {cell: {layer for layer, v, _, _ in entries if not self.void_manager.is_bbox(v)}
+                             for cell, entries in void_index.items()}
+            self.for_copy_count = 0
             want_marks = bool(options.get('mask') or options.get('merged'))
             total = (len(rois) * num_layers if want_patch else 0) + (len(rois) if want_marks else 0)
             self._progress_init(total)
@@ -146,6 +152,13 @@ class ExportManager(QObject):
                             self._submit(self._save_overlay, patch_qimg, void_index, cfg, r, c, abs_layer, title,
                                          os.path.join(layer_subdirs['overlay'], fname), f"overlay/{layer_name}/{fname}")
                             saved_rel_path = saved_rel_path or f"overlay/{layer_name}/{fname}"
+
+                        # C. for_copy: overlay of the chips with a defect marked on this layer, one flat folder
+                        if 'for_copy' in subdirs and abs_layer in defect_layers.get((r, c), ()):
+                            fname = f"{basename}_overlay.png"
+                            self._submit(self._save_overlay, patch_qimg, void_index, cfg, r, c, abs_layer, title,
+                                         os.path.join(subdirs['for_copy'], fname), None)
+                            self.for_copy_count += 1
 
                         # Collect Metadata (Deskewed BBox for visual alignment/mosaic)
                         if saved_rel_path:
