@@ -2684,7 +2684,8 @@ class MainWindow(QMainWindow):
     def open_file(self, path=None, confirm=True):
         """Open TIF (dialog), or `path` (Auto Run: confirm=False, no question about unsaved markings)."""
         if not isinstance(path, str): # Menu action: `checked`
-            path, _ = QFileDialog.getOpenFileName(self, "Open", "", "TIFF (*.tif *.tiff)")
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Open", "", "Images (*.tif *.tiff *.png *.jpg *.jpeg *.bmp);;TIFF (*.tif *.tiff);;All files (*)")
         if not path:
             return
         if confirm and not self._confirm_discard_voids():

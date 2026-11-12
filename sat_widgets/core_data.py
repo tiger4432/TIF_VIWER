@@ -15,6 +15,11 @@ except ImportError:
     tifffile = None
 
 # PIL mode -> numpy dtype (fallback path only)
+# PIL modes read as they are (gray, 16-bit, RGB(A)); any other mode (palette PNG, gray + alpha,
+# CMYK JPG, 1-bit) is converted to RGB first, then to gray like every color image
+_PIL_DIRECT = ("L", "I;16", "I;16L", "I;16B", "I", "F", "RGB", "RGBA")
+_PIL_ONLY = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp") # Not TIFF: read with PIL directly
+
 _PIL_DTYPES = {
     'I;16': np.uint16, 'I;16L': np.uint16, 'I;16B': np.uint16,
     'I': np.int32, 'F': np.float32, '1': np.bool_,
@@ -216,7 +221,7 @@ class TiffStack(ImageStack):
 
         n = w = h = None
         dtype = None
-        if tifffile is not None:
+        if tifffile is not None and not path.lower().endswith(_PIL_ONLY):
             try:
                 self._tf = tifffile.TiffFile(path)
                 n = len(self._tf.pages)
@@ -230,11 +235,11 @@ class TiffStack(ImageStack):
                 if self._tf is not None:
                     self._tf.close()
                 self._tf = None
-        if self._tf is None:
+        if self._tf is None: # Also single-layer PNG / JPG / BMP ... (PIL)
             with Image.open(path) as img:
                 n = getattr(img, 'n_frames', 1)
                 w, h = img.size
-                dtype = _PIL_DTYPES.get(img.mode, np.uint8)
+                dtype = _PIL_DTYPES.get(img.mode, np.uint8) if img.mode in _PIL_DIRECT else np.uint8
 
         self.n_frames = int(n)
         self.width, self.height = int(w), int(h)
@@ -304,6 +309,8 @@ class TiffStack(ImageStack):
             self._frame_cache = None
             with Image.open(self.path) as img:
                 img.seek(idx)
+                if img.mode not in _PIL_DIRECT: # Palette, gray + alpha, CMYK, 1-bit ...: values as seen
+                    img = img.convert("RGB")
                 arr = np.array(img)
         self._frame_cache = (idx, arr)
         return arr
