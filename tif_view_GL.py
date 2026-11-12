@@ -3178,7 +3178,9 @@ class MainWindow(QMainWindow):
                 print("Export Finished.")
                 if opts.get("for_copy"):
                     n = getattr(exporter, "for_copy_count", 0)
-                    msg = f"Export finished: {n} defect image(s) in {os.path.join(out_dir, 'for_copy')}"
+                    groups = getattr(exporter, "for_copy_groups", {})
+                    per = ", ".join(f"{g} {k}" for g, k in sorted(groups.items()))
+                    msg = f"Export finished: {n} defect image(s) in {os.path.join(out_dir, 'for_copy')}" + (f" ({per})" if per else "")
                     print(msg)
                     self.statusBar().showMessage(msg)
                 self.last_export_dir = out_dir

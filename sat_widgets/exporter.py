@@ -49,7 +49,9 @@ class ExportManager(QObject):
         - mask:    per chip, markings of all exported layers
         - merged:  per bonding-map value, markings of all chips with that value composited
         - for_copy: the overlay images (chip, layer) with a defect marking (any non-bbox void) on
-                    that layer only, all in one flat folder (to copy them elsewhere)
+                    that layer only, all in one flat folder (to copy them elsewhere), and again in
+                    for_copy/<group>/ per defect group: the void type's "group" (config.json
+                    void_types), else the type name (an image with two groups goes to both)
         """
         self.stop_requested = False
         # Image composition + PNG encoding run on worker threads (Qt releases the GIL); the
@@ -96,10 +98,15 @@ class ExportManager(QObject):
             self._refs = self.void_manager.reference_bboxes(cfg, self.main_window.glw.coord_transform)
             
             want_patch = bool(options.get('raw') or options.get('overlay') or options.get('for_copy'))
-            # Cells and layers with a defect marking (for_copy): non-bbox voids that pass the SNR filter
-            defect_layers = {cell: {layer for layer, v, _, _ in entries if not self.void_manager.is_bbox(v)}
-                             for cell, entries in void_index.items()}
+            # Cells and layers with a defect marking (for_copy): non-bbox voids that pass the SNR filter,
+            # with their defect groups
+            defect_groups = {}
+            for cell, entries in void_index.items():
+                for layer, v, _, _ in entries:
+                    if not self.void_manager.is_bbox(v):
+                        defect_groups.setdefault(cell, {}).setdefault(layer, set()).add(self._group_of(v))
             self.for_copy_count = 0
+            self.for_copy_groups = {}
             want_marks = bool(options.get('mask') or options.get('merged'))
             total = (len(rois) * num_layers if want_patch else 0) + (len(rois) if want_marks else 0)
             self._progress_init(total)
@@ -153,11 +160,20 @@ class ExportManager(QObject):
                                          os.path.join(layer_subdirs['overlay'], fname), f"overlay/{layer_name}/{fname}")
                             saved_rel_path = saved_rel_path or f"overlay/{layer_name}/{fname}"
 
-                        # C. for_copy: overlay of the chips with a defect marked on this layer, one flat folder
-                        if 'for_copy' in subdirs and abs_layer in defect_layers.get((r, c), ()):
+                        # C. for_copy: overlay of the chips with a defect marked on this layer: one flat
+                        # folder, and for_copy/<group>/ per defect group
+                        groups = defect_groups.get((r, c), {}).get(abs_layer)
+                        if 'for_copy' in subdirs and groups:
                             fname = f"{basename}_overlay.png"
-                            self._submit(self._save_overlay, patch_qimg, void_index, cfg, r, c, abs_layer, title,
-                                         os.path.join(subdirs['for_copy'], fname), None)
+                            paths = [os.path.join(subdirs['for_copy'], fname)]
+                            for g in sorted(groups):
+                                folder = os.path.join(subdirs['for_copy'], g)
+                                if g not in self.for_copy_groups:
+                                    os.makedirs(folder, exist_ok=True)
+                                    self.for_copy_groups[g] = 0
+                                self.for_copy_groups[g] += 1
+                                paths.append(os.path.join(folder, fname))
+                            self._submit(self._save_overlay_to, patch_qimg, void_index, cfg, r, c, abs_layer, title, paths)
                             self.for_copy_count += 1
 
                         # Collect Metadata (Deskewed BBox for visual alignment/mosaic)
@@ -276,6 +292,19 @@ class ExportManager(QObject):
         img = patch.convertToFormat(QImage.Format_RGB32)
         self._draw_chip_voids(img, void_index, cfg, r, c, mode='overlay', current_layer=layer)
         self._write(self._add_title_bar(img, title), path, rel_path)
+
+    def _save_overlay_to(self, patch, void_index, cfg, r, c, layer, title, paths):
+        """One overlay image written to several files (for_copy and its group folders)."""
+        img = patch.convertToFormat(QImage.Format_RGB32)
+        self._draw_chip_voids(img, void_index, cfg, r, c, mode='overlay', current_layer=layer)
+        img = self._add_title_bar(img, title)
+        for path in paths:
+            self._write(img, path, None)
+
+    def _group_of(self, v):
+        """Defect group of a void (for_copy folders): its type's "group", else the type name."""
+        t = self.void_manager.types.get(v.get("type")) or {}
+        return self._safe(str(t.get("group") or v.get("type") or "unknown")) or "unknown"
 
     def _save_mask(self, w, h, void_index, cfg, r, c, layers, title, path, rel_path):
         img = QImage(w, h, QImage.Format_ARGB32)

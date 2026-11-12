@@ -168,6 +168,7 @@ exe 옆의 `deploy.json`에 공유 폴더를 적습니다. 환경변수 `TIF_VIE
 |---|---|
 | `shape` | `ellipse` / `rectangle` / `curve`(초타원 \|x/rx\|^p + \|y/ry\|^p = 1) |
 | `def_w`, `def_h` | 0보다 크면 클릭 한 번으로 이 크기의 마킹을 만듭니다. 0이면 드래그로 크기를 정합니다. |
+| `group` | (선택) 불량 그룹 이름. 저장 시 `for_copy\<그룹>\` 폴더로 모읍니다(여러 타입을 한 그룹으로). 없으면 타입 이름이 그룹. |
 | `def_p` | curve의 기본 p (기본값 4) |
 | `snap: "bbox_corner"` | 그리기·이동·크기 조절 중에는 마우스를 그대로 따라가고, 마우스를 놓을 때 셀 bbox의 가장 가까운 코너에 붙습니다(그린 것은 누른 점에 가까운 코너에서 놓은 점까지). |
 | `snap_anchor` | `center`(기본값): 도형의 중심이 코너에 오고 bbox 안쪽 **사분면만** 그립니다. 사분면은 bbox 내 좌표로 자동 판정합니다. 그릴 때는 드래그한 영역에 가장 가까운 코너를 고르고, 놓으면 그 코너에서 드래그한 영역의 가장 먼 점까지를 크기로 씁니다(그리는 동안에도 같은 방향의 사분면으로 보임).<br>`edge`: 도형 전체의 모서리가 코너에 붙습니다. |
@@ -333,7 +334,7 @@ Grid Configuration 묶음 아래쪽의 작은 Angle Preview(항상 표시)가 �
 - **Open Project:** Export 폴더에 함께 저장된 `bonding_map.txt`와 Reject Values(`bonding_map_reject.txt`)도 다시 불러옵니다. Export 폴더(patches.json + raw 패치 + voids.json)를 다시 열면 패치를 원본 이미지와 같은 좌표계(같은 크기, 같은 회전 중심)로 다시 맞춰 붙입니다. 그래서 voids.json의 마킹과 그리드가 그대로 맞습니다. patches.json에 원본 크기(`image_size`)를 저장하고, 이전 Export는 패치 좌표에서 원본 크기를 계산합니다.
 - overlay 패치에는 마킹과 함께 제품 layout(점선)도 그립니다. PNG는 가벼운 압축(파일 약 15% 증가)으로 여러 스레드에서 저장해, 이전보다 약 8배 빠릅니다.
 - overlay, mask, merged에는 제품 layout(점선)도 그립니다. **merged**(같은 LEG 칩들의 마킹을 한 장에 겹친 것)는 칩마다 **기준 bbox 중심**에 맞춰 겹치므로, 격자나 칩 위치가 조금 어긋나도 칩 안 같은 자리가 같은 자리에 겹칩니다(layout은 가운데 한 번).
-- **for_copy**(기본 켜짐, "Defect images only, one folder"): 불량 마킹(bbox 제외, SNR 필터 통과)이 **그 레이어에 있는 칩**의 overlay 이미지만 `for_copy\` 한 폴더에 모읍니다(레이어 하위 폴더 없음, 파일 이름은 overlay와 같음: `X02_Y02_L02_LEG_A_overlay.png`). 다른 곳으로 복사하기 쉽게 하려는 것이고, Overlay를 끄고 저장해도 만들어집니다. 끝나면 상태바에 몇 장인지 나옵니다. 끄려면 저장 창에서 해제하거나 config.json `"ui_defaults": {"export": {"for_copy": false}}`.
+- **for_copy**(기본 켜짐, "Defect images only, one folder"): 불량 마킹(bbox 제외, SNR 필터 통과)이 **그 레이어에 있는 칩**의 overlay 이미지만 `for_copy\` 한 폴더에 모읍니다(레이어 하위 폴더 없음, 파일 이름은 overlay와 같음: `X02_Y02_L02_LEG_A_overlay.png`). 다른 곳으로 복사하기 쉽게 하려는 것이고, Overlay를 끄고 저장해도 만들어집니다. 같은 이미지가 **불량 그룹별 하위 폴더** `for_copy\<그룹>\`에도 들어갑니다. 그룹은 void 타입의 `"group"`(config.json `void_types`, 여러 타입을 한 그룹으로), 없으면 타입 이름이고, 그룹이 둘인 이미지는 두 폴더에 다 들어갑니다. 끝나면 상태바에 전체·그룹별 장수가 나옵니다. 끄려면 저장 창에서 해제하거나 config.json `"ui_defaults": {"export": {"for_copy": false}}`.
 - Export 이미지(raw, overlay, mask, merged, for_copy)는 **LEG(본딩맵 값)가 있는 칸만** 저장합니다. 본딩맵이 없으면 이미지 Export를 시작하지 않습니다. 붙여넣은 맵은 `bonding_map.txt`(그대로 다시 붙여넣을 수 있음), Reject Values는 `bonding_map_reject.txt`로 함께 저장합니다.
 - **Reject Values:** 쉼표로 구분한 값(예: `X, NG`)과 일치하는 칸은 본딩되지 않은 칸으로 처리합니다. ROI, Export, 칸 이동, 캘리브레이션, 각도 미리보기에서 모두 빠집니다. 값을 바꾸고 Enter를 누르면 바로 다시 적용합니다.
 - 화면 좌상단에 화면 중심 칸의 `X`, `Y`, `LEG`(본딩맵 값)를 노란 글씨로 표시합니다.
