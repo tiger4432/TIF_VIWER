@@ -20,6 +20,70 @@ except ImportError:
 _PIL_DIRECT = ("L", "I;16", "I;16L", "I;16B", "I", "F", "RGB", "RGBA")
 _PIL_ONLY = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp") # Not TIFF: read with PIL directly
 
+def _image_cache_dir():
+    base = os.environ.get("LOCALAPPDATA") or os.path.join(os.path.expanduser("~"), ".cache")
+    return os.path.join(base, "TIF_Viewer", "image_cache")
+
+
+IMAGE_CACHE_KEEP = 3 # Converted images kept (most recently used); older ones are deleted
+
+
+def cached_gray(path):
+    """
+    A PNG / JPG / BMP ... as a memory-mapped gray array (H, W): decoded once into a .npy file in the
+    user cache (keyed by path, size and time), then read like an uncompressed TIFF (only the touched
+    pixels; nothing kept in memory). Color -> luminance (the same weights as to_gray). A JPG is
+    decoded straight to gray (a third of the memory while converting). 16-bit gray stays 16-bit.
+    """
+    import hashlib
+    import time
+    st = os.stat(path)
+    key = hashlib.sha1(f"{os.path.abspath(path)}|{st.st_size}|{st.st_mtime_ns}".encode()).hexdigest()[:20]
+    folder = _image_cache_dir()
+    out = os.path.join(folder, key + ".npy")
+    if os.path.exists(out):
+        os.utime(out) # Recently used
+        return np.load(out, mmap_mode="r")
+    os.makedirs(folder, exist_ok=True)
+    t0 = time.time()
+    print(f"Converting {os.path.basename(path)} to a gray cache (first open only)...")
+    with Image.open(path) as img:
+        if img.format == "JPEG" and img.mode != "L":
+            img.draft("L", img.size) # libjpeg outputs gray: no RGB buffer
+        img.load()
+        if img.mode in ("I;16", "I;16L", "I;16B", "I"):
+            dtype = np.uint16
+        elif img.mode == "F":
+            dtype = np.float32
+        else:
+            dtype = np.uint8
+            if img.mode != "L":
+                img = img.convert("L") # ITU-R 601 luminance, as to_gray
+        w, h = img.size
+        tmp = out + ".part"
+        mm = np.lib.format.open_memmap(tmp, mode="w+", dtype=dtype, shape=(h, w))
+        band = max(1, (64 << 20) // max(1, w * np.dtype(dtype).itemsize)) # ~64 MB per band
+        for y in range(0, h, band):
+            a = np.asarray(img.crop((0, y, w, min(h, y + band))))
+            mm[y:y + a.shape[0]] = np.clip(a, 0, 65535) if dtype == np.uint16 and a.dtype != np.uint16 else a
+        mm.flush()
+        del mm
+    os.replace(tmp, out)
+    print(f"  {w}x{h} {np.dtype(dtype).name}, {time.time() - t0:.1f} s -> {out}")
+    # Keep the cache small: only the most recently used conversions
+    try:
+        old = sorted((f for f in os.listdir(folder) if f.endswith(".npy")),
+                     key=lambda f: os.path.getmtime(os.path.join(folder, f)), reverse=True)
+        for f in old[IMAGE_CACHE_KEEP:]:
+            try:
+                os.remove(os.path.join(folder, f))
+            except OSError:
+                pass # In use by another viewer
+    except OSError:
+        pass
+    return np.load(out, mmap_mode="r")
+
+
 _PIL_DTYPES = {
     'I;16': np.uint16, 'I;16L': np.uint16, 'I;16B': np.uint16,
     'I': np.int32, 'F': np.float32, '1': np.bool_,
@@ -221,7 +285,12 @@ class TiffStack(ImageStack):
 
         n = w = h = None
         dtype = None
-        if tifffile is not None and not path.lower().endswith(_PIL_ONLY):
+        self._image = None # PNG / JPG ...: the memory-mapped gray cache (cached_gray)
+        if path.lower().endswith(_PIL_ONLY):
+            self._image = cached_gray(path)
+            self._volume = self._image[None] # One layer, read through the memory map
+            n, (h, w), dtype = 1, self._image.shape, self._image.dtype
+        if self._image is None and tifffile is not None:
             try:
                 self._tf = tifffile.TiffFile(path)
                 n = len(self._tf.pages)
@@ -235,7 +304,7 @@ class TiffStack(ImageStack):
                 if self._tf is not None:
                     self._tf.close()
                 self._tf = None
-        if self._tf is None: # Also single-layer PNG / JPG / BMP ... (PIL)
+        if self._tf is None and self._image is None: # Other formats PIL reads
             with Image.open(path) as img:
                 n = getattr(img, 'n_frames', 1)
                 w, h = img.size
@@ -244,7 +313,7 @@ class TiffStack(ImageStack):
         self.n_frames = int(n)
         self.width, self.height = int(w), int(h)
         self.dtype = np.dtype(dtype if dtype is not None else np.uint16)
-        self.backend = "tifffile" if self._tf is not None else "PIL"
+        self.backend = "tifffile" if self._tf is not None else ("image cache" if self._image is not None else "PIL")
         self.frame_start = 0
         self.frame_count = self.n_frames
         self.set_range(start, self.n_frames if count is None else count)
@@ -360,6 +429,7 @@ class TiffStack(ImageStack):
         self._frame_cache = None
         self._memmaps.clear()
         self._volume = None
+        self._image = None
         if self._tf is not None:
             self._tf.close()
             self._tf = None

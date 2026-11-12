@@ -5,6 +5,10 @@
 - **git checkout(git bundle로 업데이트):** `defaults\` 폴더는 없습니다. `plugins\results_api.py`도 업데이트(merge)로 새 버전이 되고, 현장에서 고친 내용은 `--autostash`가 그 위에 다시 얹습니다(같은 줄을 고쳤으면 git이 충돌로 알림). 아래 노트의 "`defaults\`에서 옮겨 붙이세요"는 zip 설치에만 해당합니다.
 - **zip 설치:** 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다(새 기본값은 zip 안의 `defaults\`).
 
+## 1.1.21
+
+- **큰 PNG / JPG 메모리:** 처음 열 때 한 번 흑백으로 풀어 디스크 캐시(`%LOCALAPPDATA%\TIF_Viewer\image_cache`, 최근 3개)에 저장하고, 이후 메모리 맵으로 필요한 부분만 읽습니다. 12000×12000 컬러: 연 뒤 메모리 1040 → 약 90 MB, 두 번째부터는 변환 없이 바로 열림(60 MB). 25000×25000 8-bit는 캐시 파일 625 MB.
+
 ## 1.1.20
 
 - **PNG / JPG / BMP 열기:** 단일 레이어 이미지도 열 수 있습니다(열기 창 "Images"; 8·16-bit 흑백, 컬러는 밝기로, 팔레트·알파 PNG도). 마킹·bbox·저장은 TIFF와 같고, 레이어가 하나라 레이어를 비교하는 탐지(Layer change)는 쓸 수 없습니다.
