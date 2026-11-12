@@ -5,6 +5,12 @@
 - **git checkout(git bundle로 업데이트):** `defaults\` 폴더는 없습니다. `plugins\results_api.py`도 업데이트(merge)로 새 버전이 되고, 현장에서 고친 내용은 `--autostash`가 그 위에 다시 얹습니다(같은 줄을 고쳤으면 git이 충돌로 알림). 아래 노트의 "`defaults\`에서 옮겨 붙이세요"는 zip 설치에만 해당합니다.
 - **zip 설치:** 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다(새 기본값은 zip 안의 `defaults\`).
 
+## 1.1.18
+
+- **불량 통계·spec out·bin (저장 시, CSV 옵션):** `defect_rate.csv`(LEG별 × 타입 / 그룹 / 전체 / bin: 발생 칩 수, spec out 칩 수, 전체 칩 수, 불량률 %), `chip_bins.csv`(칩별 bin, 타입별 0/1/2), `bin_map.txt`(bin 격자).
+  - spec out 기준은 `plugins\defect_spec.py`의 `spec_out()`에 직접 작성(기본: 규칙 없음 = 발생하면 spec out). bin은 config.json `"defect_stats": {"bins": [...]}` 우선순위 또는 플러그인 `chip_bin()`. README "불량 통계" 참고.
+  - zip 설치: `run.bat` / `build.bat`이 `defaults\plugins\`의 새 플러그인 파일(`defect_spec.py`)을 없을 때만 복사합니다.
+
 ## 1.1.17
 
 - **for_copy를 불량 그룹별로도:** `for_copy\` 전체 폴더에 더해 `for_copy\<그룹>\`에도 저장합니다. 그룹은 void 타입의 `"group"`(config.json `void_types`에 `"group": "Crack"`처럼; 여러 타입을 한 그룹으로), 없으면 타입 이름. 그룹이 둘인 이미지는 두 폴더에 다 들어갑니다. 상태바에 그룹별 장수.

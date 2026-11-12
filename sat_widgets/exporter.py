@@ -95,6 +95,8 @@ class ExportManager(QObject):
 
             # Voids indexed by grid cell once (instead of scanning all voids for every chip)
             void_index = self._index_voids(cfg)
+            if options.get('csv') and bmap is not None:
+                self._export_defect_rate(output_dir, bmap, cfg, void_index)
             self._refs = self.void_manager.reference_bboxes(cfg, self.main_window.glw.coord_transform)
             
             want_patch = bool(options.get('raw') or options.get('overlay') or options.get('for_copy'))
@@ -489,6 +491,29 @@ class ExportManager(QObject):
         if bmap.reject_values:
             with open(os.path.join(output_dir, "bonding_map_reject.txt"), 'w', encoding='utf-8') as f:
                 f.write(", ".join(bmap.reject_values) + "\n")
+
+    def _export_defect_rate(self, output_dir, bmap, cfg, void_index):
+        """
+        Defect statistics of the chips (grid cells with a LEG; rejected values are not chips), see
+        sat_widgets/defect_stats.py: defect_rate.csv, chip_bins.csv, bin_map.txt.
+        """
+        from . import defect_stats
+        mw = self.main_window
+        settings = (mw._config().get("defect_stats") or {}) if hasattr(mw, "_config") else {}
+        records = self.void_manager.void_records(cfg, bmap, mw.glw.coord_transform)
+        ctx = {"wafer_id": mw.le_wafer_id.text().strip() if hasattr(mw, "le_wafer_id") else "",
+               "product": getattr(mw, "current_product_name", None) or "",
+               "chip_size_um": (getattr(mw, "current_product", None) or {}).get("chip_size_um")}
+        res = defect_stats.compute(self.void_manager, cfg, bmap, records, settings, ctx)
+        defect_stats.write(output_dir, res)
+        self.defect_rate = res["rate_rows"]
+        self.defect_stats_errors = res["errors"]
+        print(f"Defect statistics: {os.path.join(output_dir, 'defect_rate.csv')}, chip_bins.csv, bin_map.txt")
+        for row in res["rate_rows"]:
+            if row[1] == "any":
+                print(f"  LEG {row[0]}: {row[3]} chips with a defect, {row[4]} spec out / {row[5]} chips ({row[7]}%)")
+        for e in res["errors"]:
+            print(f"  {e}")
 
     def _export_csv(self, output_dir):
         path = os.path.join(output_dir, "voids.csv")

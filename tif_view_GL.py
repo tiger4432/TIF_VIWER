@@ -3176,6 +3176,10 @@ class MainWindow(QMainWindow):
                 QMessageBox.information(self, "Export", f"Export canceled.\nPartial output: {out_dir}")
             else:
                 print("Export Finished.")
+                stats_errors = getattr(exporter, "defect_stats_errors", None)
+                if stats_errors:
+                    QMessageBox.warning(self, "Export", f"Defect spec plugin ({len(stats_errors)} error(s)); those types count as "
+                                        "spec out where they occur:\n" + "\n".join(stats_errors[:8]))
                 if opts.get("for_copy"):
                     n = getattr(exporter, "for_copy_count", 0)
                     groups = getattr(exporter, "for_copy_groups", {})

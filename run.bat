@@ -16,7 +16,9 @@ exit /b %errorlevel%
 for %%F in (config.json products.json deploy.json) do (
     if not exist "%%F" if exist "defaults\%%F" copy /Y "defaults\%%F" "%%F" >nul
 )
-if not exist "plugins\results_api.py" if exist "defaults\plugins" xcopy /E /I /Y /Q "defaults\plugins" "plugins" >nul
+if exist "defaults\plugins" if not exist "plugins" mkdir "plugins"
+REM Each plugin file only when missing (a new release may add one; the site's edited ones stay)
+if exist "defaults\plugins" for %%F in ("defaults\plugins\*.py") do if not exist "plugins\%%~nxF" copy /Y "%%F" "plugins\%%~nxF" >nul
 exit /b 0
 
 :error
