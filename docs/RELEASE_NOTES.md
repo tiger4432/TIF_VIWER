@@ -5,6 +5,10 @@
 - **git checkout(git bundle로 업데이트):** `defaults\` 폴더는 없습니다. `plugins\results_api.py`도 업데이트(merge)로 새 버전이 되고, 현장에서 고친 내용은 `--autostash`가 그 위에 다시 얹습니다(같은 줄을 고쳤으면 git이 충돌로 알림). 아래 노트의 "`defaults\`에서 옮겨 붙이세요"는 zip 설치에만 해당합니다.
 - **zip 설치:** 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다(새 기본값은 zip 안의 `defaults\`).
 
+## 1.1.25
+
+- **앵글 프리뷰 기본 위치를 네 사분면으로:** Center → 3사분면, Top → 2사분면, Right → 4사분면, Top-Right → 1사분면(각 0.7R). **config.json에 `angle_preview.points`가 있으면 그 값이 우선**하니, 바꾸려면 그 부분을 지우거나 README의 예로 바꾸세요.
+
 ## 1.1.24
 
 - **Grid BBOX 버튼:** 영상 분석 없이 유효 칸마다 그리드 칸 중심에 정확히 bbox를 놓습니다. 그리드를 손으로 잘 맞췄을 때(칩 사이 간격이 좁아 Detect BBOX가 흔들릴 때). Ctrl+Z로 되돌림.

@@ -7,8 +7,8 @@ Preview points are polar positions on the wafer circle (center = grid center, ra
 smaller grid side), declared in config.json (defaults below):
 
     "angle_preview": {
-        "points": [{"name": "Center", "angle": 0, "r": 0.0},
-                   {"name": "Top 3/4", "angle": 90, "r": 0.75}, ...],
+        "points": [{"name": "Q3 (bottom-left)", "angle": 225, "r": 0.7},
+                   {"name": "Q2 (top-left)", "angle": 135, "r": 0.7}, ...],
         "view_scale": 1.4
     }
 
@@ -30,11 +30,12 @@ from PySide6.QtWidgets import QGridLayout, QLabel, QVBoxLayout, QWidget, QSizePo
 from .core_data import ImageNormalizer, to_uint16
 from .products import layout_boxes
 
+# The four quadrants of the wafer (tiles in this order: top-left, top-right, bottom-left, bottom-right)
 DEFAULT_POINTS = [
-    {"name": "Center", "angle": 0, "r": 0.0},
-    {"name": "Top 3/4", "angle": 90, "r": 0.75},
-    {"name": "Right 3/4", "angle": 0, "r": 0.75},
-    {"name": "Top-Right 1/2", "angle": 45, "r": 0.5},
+    {"name": "Q3 (bottom-left)", "angle": 225, "r": 0.7},
+    {"name": "Q2 (top-left)", "angle": 135, "r": 0.7},
+    {"name": "Q4 (bottom-right)", "angle": 315, "r": 0.7},
+    {"name": "Q1 (top-right)", "angle": 45, "r": 0.7},
 ]
 DEFAULT_VIEW_SCALE = 1.4 # Patch size in cell pitches
 
