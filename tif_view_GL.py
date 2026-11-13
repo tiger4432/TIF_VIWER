@@ -2364,6 +2364,7 @@ class MainWindow(QMainWindow):
             return not pd.wasCanceled()
 
         masks = {}
+        why = ep["debug"] = [] # Why found places were not kept (summary below)
         try:
             found = edge_band.detect(self.full_data, zs, [layers[z] for z in zs], self.glw.grid_cfg,
                                      self.glw.coord_transform, refs, cells, ep, progress, masks)
@@ -2398,6 +2399,22 @@ class MainWindow(QMainWindow):
         self.glw.update()
         self.update_void_ui()
         msg = f"Edge stains: {added} marked ({type_name}, dashed: review with Next Detected), {len(found) - added} already marked"
+        # Where the others were lost: chips without a found place, and the found places dropped by a filter
+        n_chips = len(cells)
+        no_seed = sum(1 for w in why if w[1] == "no seed")
+        drops = {}
+        for w in why:
+            if w[1] != "no seed":
+                drops.setdefault(w[1], []).append(w)
+        parts = [f"{no_seed} of {n_chips} chips: nothing above Thr"]
+        hints = {"short": "Length ≥", "not elongated": "Aspect", "thin": "Min depth", "not on the edge": "Touch / Contact"}
+        for k, ws in drops.items():
+            if k in ("short", "not elongated", "thin"):
+                big = max(ws, key=lambda w: w[2]) # The longest one dropped: the one most likely a stain
+                parts.append(f"{len(ws)} dropped as {k} (longest {big[2]} px long, {big[3]} px deep: {hints[k]})")
+            else:
+                parts.append(f"{len(ws)} dropped as {k} (best contact {max(w[2] for w in ws):.2f}: {hints[k]})")
+        msg += " | " + "; ".join(parts)
         self.statusBar().showMessage(msg)
         print(msg)
 

@@ -201,9 +201,11 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                             continue # Segmented, but no stain found there (specks of noise / layout)
                         w_px, h_px = (c1 - c0) * sx, (r1 + 1 - r0) * sy
                         length, depth = (w_px, h_px) if along == "x" else (h_px, w_px)
-                        if length < p["min_length_px"] or length < p["min_aspect"] * depth or depth < p["min_depth_px"]:
+                        why = ("short" if length < p["min_length_px"] else "not elongated" if length < p["min_aspect"] * depth
+                               else "thin" if depth < p["min_depth_px"] else None)
+                        if why:
                             if dbg is not None:
-                                dbg.append((k, "size", round(w_px), round(h_px)))
+                                dbg.append((k, why, round(length), round(depth)))
                             continue
                         touch = part & band[r0:r1 + 1, c0:c1] # Attached to the chip edge, along how much of it
                         share = (touch.any(axis=0).sum() / max(1, c1 - c0)) if along == "x" else \
