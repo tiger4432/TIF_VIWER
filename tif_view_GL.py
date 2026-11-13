@@ -2737,7 +2737,7 @@ class MainWindow(QMainWindow):
         steps.append(("3 chip as compared (reduced %d, Texture / Shading / Blur applied)" % store["f"], d["chip"], "gray"))
         steps += [(name, a, "gray") for name, a in store["ref"]]
         lim = d["dev_lim"]
-        steps.append(("9 deviation (spreads): blue darker, red brighter", d["dev"].astype(np.float32) / 255 * 2 * lim - lim, "signed"))
+        steps.append(("9 deviation = (chip - ref max (8)) / spread (6) if above, (chip - ref min (7)) / spread if below, else 0: blue darker, red brighter", d["dev"].astype(np.float32) / 255 * 2 * lim - lim, "signed"))
         prm = store["params"]
         if d["sdev"] is not None:
             steps.append(("9b SSIM change: full yellow = %.1f spreads (threshold %.1f)" % (d["sdev_lim"], prm["ssim_threshold"]),

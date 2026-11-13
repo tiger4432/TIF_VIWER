@@ -922,7 +922,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                 lab, areas = _label(specks)
                 specks &= (areas * sx * sy >= p["min_speck_px"])[lab]
             if k == tk:
-                steps.append(("9 deviation (spreads): blue darker, red brighter", dev, "signed"))
+                steps.append(("9 deviation = (chip - ref max (8)) / spread (6) if above, (chip - ref min (7)) / spread if below, else 0: blue darker, red brighter", dev, "signed"))
                 if use_ssim:
                     lim_s = max(2.0 * p["ssim_threshold"], float(np.percentile(sdev[edges], 99.5)))
                     steps.append(("9b SSIM change: full yellow = %.1f spreads (threshold %.1f)" % (lim_s, p["ssim_threshold"]),

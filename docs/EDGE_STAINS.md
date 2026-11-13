@@ -59,26 +59,47 @@
 
 버튼 = 화면 가운데 칩, 영상 위 **Ctrl+Shift+D** = 마우스 아래 칩. **Detect Edge Stains를 한 번 돌린 뒤에는 모든 칩의 결과가 저장되어 바로 열립니다**(돌리기 전이면 그 칩만 계산, 마킹은 하지 않음). 위쪽 글: 축소 배율, 기준 칩을 몇 개로 만들었는지(이 칩이 기준에 들어갔는지), 버려진 띠와 이유(short = Length ≥ / Link gap, thin = Min depth, not elongated = Aspect).
 
-| 번호 | 이미지 | 볼 것 |
+| 번호 | 이미지 | 무엇인가 | 볼 것 |
+|---|---|---|---|
+| 1 | raw window | 원본에서 읽은 창(여백 포함, 영상 그대로라 기울어져 보임) | 칩이 창 가운데 있는지 |
+| 2 | cut: moved dx, dy | 칩 위치에 맞춰 정수 px로 자른 칩(원본) | 여백이 한쪽만 보이면 bbox가 많이 어긋난 것 |
+| 3 | chip as compared | **비교에 쓰는 칩**: ① 원본 해상도에서 패드 간격(Texture) 평균 → ② 작업 해상도로 축소 → ③ 그리드 각도만큼 바로 세움(Upright) → ④ 칩마다 밝기 정규화 (값 − 칩 중앙값) ÷ 칩 흩어짐 → ⑤ 소수 px 위치 맞춤 → ⑥ Blur(설정 시) | 패드 무늬가 남아 있으면 Texture를 패드 간격으로 |
+| 5 | median chip | **기준 칩**: 깨끗한 칩들의 픽셀별 중앙값(변마다 그 변이 깨끗한 칩들 / Golden을 고르면 그 칩들) | 오염이 비치면 Golden 고르기 / Clean % 0(자동) |
+| 6 | chip-to-chip spread | **흩어짐**: 같은 픽셀이 정상 칩끼리 얼마나 다른지(전체 칩 표본 최대 64개, \|칩 − 기준\|의 25% 분위 ÷ 0.32) | 밝을수록 그 자리는 둔감(패드·경계·비네팅) |
+| 7, 8 | reference min / max | **허용 범위**: 기준 칩을 8방향으로 ±Align tol 옮긴 값의 최솟값 / 최댓값 (Shift tol > 0이면 그 반경의 최솟값~최댓값) | 칩이 이만큼 어긋나도 차이 아님 |
+| 9 | deviation | **차이** — 픽셀마다, Shading으로 (칩 − 기준 칩)의 밝기 기울기(2차 곡면, Bg % 설정 시 큰 얼룩)를 뺀 칩으로:<br>칩 > 8번 → (칩 − 8번) ÷ 6번 (양수, **빨강** = 밝음)<br>칩 < 7번 → (칩 − 7번) ÷ 6번 (음수, **파랑** = 어두움)<br>그 사이 → 0<br>단위 = 흩어짐의 배수, ±2×Dark에서 꽉 찬 색 | 오염 띠가 파랗게 보여야 함. 다른 무늬가 보이면 아래 상황표 |
+| 9b | SSIM change | **질감 변화**: 패드 평균 전 칩의 국소 대비(SSIM의 대비 항)를 기준(같은 칩들의 중앙값)과 비교, 칩끼리 흩어짐으로 나눔. 노랑 = 2×SSIM thr(캡션에 값) | 오염 자리가 노랗게 보이는지 |
+| 10 | dark specks | 9번이 −Dark 이하 **또는** 9b가 SSIM thr 이상인 점(가장자리 띠 안만) | |
+| 11 | specks kept | 10번 중 Density(주변에 점이 모인 비율)·Speck ≥(덩어리 면적)를 통과한 점 — **머지 전** | 띠의 점이 사라지면 Density / Speck ≥ ↓ |
+| 11b | specks left by Piece ≥ | Piece ≥ 설정 시, 변 방향 길이가 짧은 점 덩어리를 뺀 것 — 머지 전 | |
+| 12 | joined lines | 점을 변을 따라 이은 띠(Merge r × Along ×) | 끊기면 Merge r / Along × / Link gap ↑ |
+| 13 | stain areas | 최종 영역 = 칩 변부터 띠의 가장 먼 점까지(Smooth로 매끈하게) = 마킹 모양 | |
+
+위쪽 글: 축소 배율, 기준 칩을 몇 개로 만들었는지와 이 칩이 기준에 들어갔는지(변별), **off by (dx, dy)** = 자른 뒤 이 칩이 기준 칩과 어긋난 정도(px), 버려진 띠와 이유.
+
+## 상황별로 바꿀 설정
+
+| 상황(어디서 보이나) | 원인 | 바꿀 설정 |
 |---|---|---|
-| 1 | raw window | 원본에서 읽은 창(여백 포함). 칩이 창 가운데 있는지 |
-| 2 | cut: moved dx, dy | 위치를 맞춰 자른 칩(정수 px). 여백이 한쪽만 보이면 bbox가 많이 어긋난 것 |
-| 3 | reduced, normalised | 작업 해상도 칩 |
-| 4 | blurred | Blur σ > 0일 때만 |
-| 5 | median chip | 기준 칩. 여기에 오염이 보이면 Golden을 고르거나 Clean %를 ↓ |
-| 6 | chip-to-chip spread | 칩끼리 흩어짐. 밝을수록 그 자리는 둔감(패드·경계) |
-| 7, 8 | reference min / max | 이 범위 안이면 차이 아님 |
-| 9 | deviation | 파랑 = 기준보다 어두움, 빨강 = 밝음(±2×Dark에서 꽉 참). 띠가 파랗게 보여야 함 |
-| 9b | SSIM change | 구조(질감)가 달라진 정도, 패드 평균 전 칩으로 계산. 그 칩의 값 범위에 맞춰 표시(캡션: 노랑 = 몇 배, 기준 몇). 노랗게 보이는데 10번에 안 나오면 SSIM thr를 캡션 값 근처로 ↓ |
-| 10 | dark specks | Dark / SSIM 기준을 넘은 점(가장자리 띠 안만) |
-| 11 | specks kept | Density·Speck ≥를 통과한 점(머지 전). 띠의 점이 여기서 사라지면 Density / Speck ≥ ↓, 자잘한 게 남으면 ↑ |
-| 12 | joined lines | 이은 띠. 끊겨 있으면 Merge r / Along × / Link gap ↑ |
-| 13 | stain areas | 최종 영역(= 마킹 모양) |
-
-**보는 순서(못 잡을 때):** 9번에 띠가 파랗게(또는 9b에 노랗게) 보이나? → 안 보이면 Dark / SSIM thr ↓, 또는 5번 기준 칩에 오염이 비치는지 확인(→ Golden). 보이면 10·11번에 점이 남나? → 11에서 사라지면 Density ↓. 12번에서 띠가 이어지나? → 끊기면 Merge r / Along × / Link gap ↑. 13번 영역이 없으면 위쪽 글의 버린 이유(short / thin / not elongated)에 맞는 입력칸을 조정.
-**잘못 잡을 때:** 13번 영역이 생긴 자리의 9·9b를 보고, 정상인데 파랗거나 노라면 Dark / SSIM thr ↑ 또는 Edge tol / Shift tol ↑.
-
-**9번에 레이아웃(칩 무늬)이 보이면:** 위쪽 글의 "off by (dx, dy)"를 보세요. Align tol보다 크면 위치 맞춤이 틀린 것 → Edge BBOX 후 Align = bbox, 또는 Align tol ↑.
+| **못 잡음**: 눈에 보이는데 9번에 파랗지 않음 | 기준 칩(5번)에도 오염이 있음 | Golden(Ctrl+G로 깨끗한 칩 5개 이상) / Clean % 0 |
+| 〃 9번에 약하게만 파람 | 기준이 높음 | Dark ↓(3 → 2), Compare both + SSIM thr ↓ |
+| 〃 9번은 파란데 11번에서 사라짐 | 점이 듬성함 | Density ↓, Speck ≥ 0, Piece ≥ 0 |
+| 〃 12번에서 띠가 끊김 | 점 사이가 멂 | Merge r ↑, Along × ↑, Link gap ↑ |
+| 〃 13번 없음, 글에 short | 띠가 짧게 잡힘 | Length ≥ ↓, Link gap ↑ |
+| 〃 글에 thin / not elongated | 얕거나 짧고 두꺼움 | Min depth ↓ / Aspect ↓ |
+| 〃 칩 맨 끝(경계 바로 옆) 오염 | 바깥 px 제외 | Skip ↓ |
+| 〃 코너 | 기준에 코너 오염이 섞임 | Golden, Clean % 0 |
+| **잘못 잡음**: 9번이 패드 격자 모양으로 파람 | 패드 평균이 패드 간격과 안 맞음 | Texture = 패드 간격(한 칸 건너 하나 = 2) |
+| 〃 9번에 레이아웃(칩 무늬)이 보이고 글에 off by가 큼 | 칩 위치 어긋남 | Edge BBOX(Edge pick, Edge debug로 확인) → Align = bbox, 또는 Align tol ↑ |
+| 〃 9번에 칩 변을 따라 얇은 선 | 경계에서 조금 어긋남 | Align tol ↑, Skip ↑ |
+| 〃 9번에 기울기·비네팅 | 칩마다 조명 다름 | Shading 켬, Bg % 5~10 |
+| 〃 9번에 큰 얼룩 | 칩마다 배경 밝기 다름 | Bg % 5~10 |
+| 〃 9b에 물결(간섭) 무늬가 점으로 잡힘 | 그리드 회전 × 1 px 패드(원리적) | Compare = dark, 또는 SSIM thr ↑ |
+| 〃 튀는 점이 영역을 안쪽으로 끔 | 떨어진 점이 띠에 붙음 | Piece ≥ ↑(2~5부터), Speck ≥ ↑ |
+| 〃 영역 경계가 찌글거림 | | Smooth ↑ |
+| 〃 노이즈 점이 많음 | | Dark ↑, Density ↑, Blur σ 1~2 |
+| **영역이 칩 변에 안 붙음** | bbox가 칩 외곽과 다름 | Edge BBOX 후 Align = bbox |
+| **느림** | | 같은 bbox로 설정만 바꿔 다시 돌리면 칩 자르기는 건너뜀. Compare = dark면 SSIM 계산 생략 |
 
 PNG로 저장(Save PNGs)해 보내 주시면 어느 단계에서 놓치는지 볼 수 있습니다.
 
