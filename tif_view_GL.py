@@ -712,6 +712,12 @@ class MainWindow(QMainWindow):
         btn_refine_bbox.setToolTip("Align the bboxes on the layout again. Bboxes placed or moved by hand stay\n"
                                    "and set the absolute place for the others")
         btn_refine_bbox.clicked.connect(self.refine_bbox)
+        self.chk_bbox_from_grid = QCheckBox("From grid")
+        self.chk_bbox_from_grid.setToolTip("Detect / Refine BBOX keep the grid's place: the bboxes are aligned with each other\n"
+                                           "around the cell centres, not moved as a whole by the package edges.\n"
+                                           "For a grid set well by hand, or narrow streets between the chips.")
+        self.chk_bbox_from_grid.setChecked(self._ui_state("bbox_from_grid", (self._config().get("auto_bbox") or {}).get("absolute") == "grid"))
+        self.chk_bbox_from_grid.toggled.connect(lambda on: self._set_ui_state("bbox_from_grid", on))
         btn_fit_grid = QPushButton("Fit Grid")
         btn_fit_grid.setToolTip("Fit the grid origin, pitch and angle to the bbox centers (asks before applying)")
         btn_fit_grid.clicked.connect(self.fit_grid_to_bboxes)
@@ -725,6 +731,7 @@ class MainWindow(QMainWindow):
         form_calib.addRow(btn_bbox_grid)
         h_auto.addWidget(btn_auto_bbox)
         h_auto.addWidget(btn_refine_bbox)
+        h_auto.addWidget(self.chk_bbox_from_grid)
         form_calib.addRow(h_auto)
         h_auto2 = QHBoxLayout()
         h_auto2.addWidget(btn_fit_grid)
@@ -1665,6 +1672,8 @@ class MainWindow(QMainWindow):
         top_layer = self.abs_layer(0)
         vm = self.void_manager
         params = dict(self._config().get("auto_bbox") or {})
+        if self.chk_bbox_from_grid.isChecked():
+            params["absolute"] = "grid"
         layout = params.get("method", "layout") == "layout"
         zs = list(range(len(self.full_data)))
         if layout:
@@ -1754,6 +1763,8 @@ class MainWindow(QMainWindow):
         tid, size, cells = setup
         cfg, vm = self.glw.grid_cfg, self.void_manager
         params = dict(self._config().get("auto_bbox") or {})
+        if self.chk_bbox_from_grid.isChecked():
+            params["absolute"] = "grid"
         zs = list(range(len(self.full_data)))
         progress = QProgressDialog("Aligning bboxes on the layout...", "Cancel", 0,
                                    max(1, len(cells) * min(len(zs), int(params.get("refine_layers", 4)))), self)

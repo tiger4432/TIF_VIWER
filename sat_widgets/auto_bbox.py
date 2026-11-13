@@ -40,8 +40,13 @@ Parameters (config.json "auto_bbox", defaults in DEFAULTS):
     refine_inner     the outer band of the chip (this fraction of its size) is left out of the match:
                      noisy package edges (one side sticking out, the chip looking larger) do not
                      pull it; the golden chip's box still sets the absolute place
-    locate           "layout": after the coarse pass, find the package edge pair (declared size apart)
-                     of the median chip over a window of a whole pitch and move all bboxes by it
+    absolute         "auto" (default): the absolute place from the golden chip's package box (else the
+                     locate step); "grid": the bboxes are only aligned with each other around the cell
+                     centres of the grid (a grid set well by hand; narrow streets where the package edge
+                     of a chip runs into its neighbour's). Viewer: "From grid" next to Detect BBOX
+    locate           "layout": when the coarse pass finds no golden chip box (origin off by more than
+                     coarse_margin), find the package edge pair (declared size apart) of the median
+                     chip over a window of a whole pitch and move all bboxes by it
     locate_px        longest side of that window's working image
     locate_chips     chips in the median (spread over the wafer)
     locate_layers    loaded layers summed for it
@@ -422,7 +427,9 @@ def refine_bboxes(stack, zs, layer_number, grid_cfg, coord_transform, void_manag
     med, mad = float(np.median(ncc[ok])), float(np.median(np.abs(ncc[ok] - np.median(ncc[ok])))) * 1.4826
     good = ok & (ncc >= p["refine_min_ncc"]) & (ncc >= med - 4 * mad)
     absolute = None
-    if good.any():
+    if good.any() and p.get("absolute") == "grid":
+        s -= s[good].mean(axis=0) # The grid sets the place: aligned with each other, mean place kept
+    elif good.any():
         # The alignment fixes the chips relative to each other; the absolute place: hand-placed
         # bboxes (below), else the package box of the golden chip (the noise of single chips' edges
         # averages out), else the chips keep their mean place
@@ -472,7 +479,8 @@ def refine_bboxes(stack, zs, layer_number, grid_cfg, coord_transform, void_manag
     moved = np.hypot(s[good, 0], s[good, 1]) * factor
     return {"refined": int(good.sum()), "estimated": est, "hand": len(hand),
             "moved_px": float(np.median(moved)) if len(moved) else 0.0, "ncc": med,
-            "absolute": "hand" if anchor else ("golden chip box" if absolute is not None else "mean place"),
+            "absolute": "hand" if anchor else ("golden chip box" if absolute is not None else
+                                               ("grid" if p.get("absolute") == "grid" else "mean place")),
             "ncc_by_cell": {k: float(ncc[i]) for i, k in enumerate(order)}}
 
 
@@ -621,7 +629,8 @@ def detect_layout(stack, zs, layer_number, grid_cfg, coord_transform, void_manag
                 if k is not None:
                     offs.append((gx - cell_c(*k)[0], gy - cell_c(*k)[1]))
                     sizes.append((2 * v["radiusX"], 2 * v["radiusY"]))
-    off = np.median(offs, axis=0) if offs else (0.0, 0.0)
+    # Start: the existing bboxes' place in their cells, or the cell centres (absolute "grid": always)
+    off = np.median(offs, axis=0) if offs and p.get("absolute") != "grid" else (0.0, 0.0)
     if size is None:
         size = tuple(np.median(sizes, axis=0)) if sizes else (0.8 * grid_cfg.pitch_x, 0.8 * grid_cfg.pitch_y)
     n = max(1, len(cells))
@@ -645,10 +654,12 @@ def detect_layout(stack, zs, layer_number, grid_cfg, coord_transform, void_manag
                             (lambda i: progress(0.45 * i)) if progress else None)
         t1 = time.monotonic()
         located = None
-        if res is not None and p.get("locate", True):
+        if res is not None and p.get("locate", True) and res.get("absolute") == "mean place" and p.get("absolute") != "grid":
             # The coarse pass aligns the chips with each other but reaches only coarse_margin: with the
-            # declared origin farther off they would all keep the same shift. The package edges of the
-            # median chip over a whole pitch set the absolute place
+            # declared origin farther off its golden chip box is not found and they would all keep the
+            # same shift. Only then the package edges of the median chip over a whole pitch set the
+            # absolute place (a good grid keeps the golden chip box: an edge pair of the declared size
+            # elsewhere in the chip must not move every bbox)
             boxes = [(layer, v) for layer, vs in vm.voids.items() for v in vs if vm.is_bbox(v)]
             want = set(cells)
             cen = [to_deskew(v["globalCX"], v["globalCY"]) for _, v in boxes if v.get("auto") != "estimated"]
