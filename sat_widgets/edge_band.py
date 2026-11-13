@@ -68,6 +68,7 @@ DEFAULTS = {
                             # out) are taken off every chip against the reference (blotches, vignetting); 0 = a quadratic        # Brightness gradient across each chip (plane of chip - median chip) taken off
     "upright": True,        # Chips turned upright by the grid angle after the pad grid is averaged (Texture >= 2): the
                             # edges run along the rows / columns of the work image
+    "scan_lines": True,     # Row to row brightness jitter (scan lines) taken off: horizontal lines in the deviation
     "warp_tiles": 0,        # Local alignment: every chip moved onto the reference in n x n tiles (a chip bent a little:
                             # the pads closer here, farther there, the layout shows in the deviation); 0 = off
     "warp_px": 3.0,         # ... a tile moved at most this far (image px)
@@ -402,6 +403,12 @@ def _local_align(a, ref, n, max_shift):
         # Smoothed over half a tile: the straight interpolation bends at the tile centres, where the chip would be
         # stretched / squeezed more on one side (it showed as lines along the tile rows / columns)
         field.append(_gauss(f_.astype(np.float32), 0.5 * min(th, tw)))
+    return _apply_field(a, field), sh, field
+
+
+def _apply_field(a, field):
+    """a sampled at (x + field[0], y + field[1]) (bilinear, edges extended): a shift field undone."""
+    h, w = a.shape
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
     X, Y = xx + field[0], yy + field[1] # a sampled at x + shift: the shift undone
     x0_, y0_ = np.floor(X).astype(np.int32), np.floor(Y).astype(np.int32)
@@ -409,7 +416,7 @@ def _local_align(a, ref, n, max_shift):
     xa, xb = np.clip(x0_, 0, w - 1), np.clip(x0_ + 1, 0, w - 1)
     ya, yb = np.clip(y0_, 0, h - 1), np.clip(y0_ + 1, 0, h - 1)
     out = (a[ya, xa] * (1 - ffx) + a[ya, xb] * ffx) * (1 - ffy) + (a[yb, xa] * (1 - ffx) + a[yb, xb] * ffx) * ffy
-    return out.astype(np.float32), sh
+    return out.astype(np.float32)
 
 
 def _rotate_bilinear(a, out_h, out_w, c, s):
@@ -833,6 +840,11 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             a = chips[k] if fn is None else fn(chips[k], golden, centre)
             if p["shading"]:
                 a = deshade(a, golden)
+            if p["scan_lines"]:
+                # Scan lines: row to row brightness jitter of the image (each row its own offset). Only the part that
+                # changes from one row to the next is taken off (a stain changes over many rows: it stays)
+                ro = np.median(a - golden, axis=1)
+                a = a - (ro - _blur1(ro.astype(np.float64), 2.0)).astype(np.float32)[:, None]
             return (np.maximum(a - gmax, 0) - np.maximum(gmin - a, 0)) / spread # > 0 brighter, < 0 darker
 
         ss_sig = max(0.8, p["ssim_sigma_px"] / min(sx, sy))
@@ -920,7 +932,9 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             # A chip bent a little (pads closer here, farther there): every chip moved onto the reference piece by piece,
             # then the reference made again from the moved chips
             for wi, k in enumerate(keys):
-                chips[k], _sh = _local_align(chips[k], ref[0], int(p["warp_tiles"]), p["warp_px"] / f)
+                chips[k], _sh, _field = _local_align(chips[k], ref[0], int(p["warp_tiles"]), p["warp_px"] / f)
+                if tex is not None: # The texture chips (SSIM) moved the same way
+                    tex[k] = _apply_field(tex[k].astype(np.float32), _field).astype(np.float16)
                 if k == tk:
                     trace.setdefault("info", []).append(
                         f"local alignment (Warp {int(p['warp_tiles'])} x {int(p['warp_tiles'])}): tiles moved up to "

@@ -2435,9 +2435,13 @@ class MainWindow(QMainWindow):
         self.chk_stain_shading.setChecked(bool(cfg.get("shading", True)))
         self.chk_stain_shading.setToolTip("Take a brightness gradient across each chip (illumination over the wafer) off\n"
                                           "before the comparison (plane of chip - median chip, fitted robustly)")
+        self.chk_stain_lines = QCheckBox("Scan lines")
+        self.chk_stain_lines.setChecked(bool(cfg.get("scan_lines", True)))
+        self.chk_stain_lines.setToolTip("Take the row to row brightness jitter of the image (scan lines) off before the comparison:\n"
+                                        "horizontal lines in Debug 9. A stain changes over many rows and stays")
         row("Texture", spin("texture_px", "", 0, 50, 1, 0, "Pad grid pitch (image px): every chip is averaged over a box of it before the\n"
                                                            "comparison, so the pads do not read as a darker grid (pads every other px: 2; 0 = off)"),
-            self.chk_stain_shading,
+            self.chk_stain_shading, self.chk_stain_lines,
             "Warp", spin("warp_tiles", "", 0, 32, 1, 0, "Local alignment: each chip moved onto the reference in Warp x Warp pieces (a chip\n"
                                                          "bent a little: pads closer here, farther there, the layout stays in Debug 9). 0 = off; 4 .. 8"),
             "Warp px", spin("warp_px", "", 0.5, 100, 0.5, 1, "A piece is moved at most this far (image px)"),
@@ -2545,6 +2549,8 @@ class MainWindow(QMainWindow):
             out["per_edge"] = self.chk_stain_per_edge.isChecked()
         if getattr(self, "cb_stain_align", None) is not None:
             out["align"] = self.cb_stain_align.currentData()
+        if getattr(self, "chk_stain_lines", None) is not None:
+            out["scan_lines"] = self.chk_stain_lines.isChecked()
         if getattr(self, "chk_stain_shading", None) is not None:
             out["shading"] = self.chk_stain_shading.isChecked()
         if getattr(self.glw, "golden_cells", None):
