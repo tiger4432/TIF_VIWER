@@ -92,6 +92,19 @@ def _box(a, h, w):
     return (s / (h * w)).astype(np.float32)
 
 
+def _gauss(a, sigma):
+    """Gaussian blur approximated by three box blurs (cumulative sums: the cost does not grow with sigma)."""
+    if sigma <= 0:
+        return a
+    w = max(1, int(round(math.sqrt(12.0 * sigma * sigma / 3.0 + 1.0))))
+    if w <= 1:
+        return a
+    out = a.astype(np.float32)
+    for _ in range(3):
+        out = _box(out, w, w)
+    return out
+
+
 def _match_centre(a, golden, centre, n=24):
     """
     a mapped onto golden by a monotone intensity curve: golden's pixels in the centre part grouped in
@@ -340,7 +353,7 @@ def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tic
     def whole(win):
         """The window (chip and the street around it) reduced and blurred, faded out over the margin only:
         the chip outline and its large structures decide the coarse alignment, a pad grid does not."""
-        a = _blur(_reduce(win, f).astype(np.float32)[:hw, :ww], sig)
+        a = _gauss(_reduce(win, f).astype(np.float32)[:hw, :ww], sig)
         return (a - a.mean()) * taper
 
     def shift(win, ref):
@@ -509,7 +522,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                 steps.append(("3b pad grid averaged (Texture %g px)" % p["texture_px"], chips[tk], "gray"))
         if p["blur_px"] > 0: # Gaussian blur (noise down; specks of the rim spread, keep it below their spacing)
             sig = p["blur_px"] / min(sx, sy)
-            chips = {k: _blur(c, sig) for k, c in chips.items()}
+            chips = {k: _gauss(c, sig) for k, c in chips.items()}
             if tk in chips:
                 steps.append(("4 blurred (Blur %.1f px)" % p["blur_px"], chips[tk], "gray"))
         if p["shading"]:
@@ -605,10 +618,10 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             a = chips[k] if fn is None else fn(chips[k], golden, centre)
             L = float(np.percentile(golden, 99) - np.percentile(golden, 1)) + 1e-3
             c1, c2 = (0.01 * L) ** 2, (0.03 * L) ** 2
-            ma, mb = _blur(a, ss_sig), _blur(golden, ss_sig)
-            va = _blur(a * a, ss_sig) - ma * ma
-            vb = _blur(golden * golden, ss_sig) - mb * mb
-            cov = _blur(a * golden, ss_sig) - ma * mb
+            ma, mb = _gauss(a, ss_sig), _gauss(golden, ss_sig)
+            va = _gauss(a * a, ss_sig) - ma * ma
+            vb = _gauss(golden * golden, ss_sig) - mb * mb
+            cov = _gauss(a * golden, ss_sig) - ma * mb
             ss = ((2 * ma * mb + c1) * (2 * cov + c2)) / ((ma * ma + mb * mb + c1) * (va + vb + c2))
             return (1.0 - ss).astype(np.float32)
 
@@ -680,6 +693,25 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             steps.append(("8 reference max (envelope)", ref[3], "gray"))
         if not tick(li, layer, "detect", 0, len(keys), True):
             return None
+        # Debug of every chip (first searched layer), kept by the viewer for Debug chip after a run: the shared
+        # reference once, per chip its images reduced to <= 256 px as uint8 and the masks packed
+        store = p.get("store") if li == 0 else None
+        if store is not None:
+            ds = max(1, int(math.ceil(max(H, W) / 256.0)))
+
+            def small(a):
+                return _reduce(np.asarray(a, np.float32), ds) if ds > 1 else np.asarray(a, np.float32)
+
+            def q8(a, lo, hi):
+                return np.clip((small(a) - lo) / max(hi - lo, 1e-6) * 255, 0, 255).astype(np.uint8)
+            store.update(layer=layer, f=f, Wr=Wr, Hr=Hr, M=M, H=H, W=W, use_ssim=use_ssim, chips={}, params=dict(p),
+                         ref=[(name, q8(a, *np.percentile(a, [1, 99]))) for name, a in
+                              (("5 median chip (reference)", ref[0]), ("6 chip-to-chip spread", ref[1]),
+                               ("7 reference min", ref[2]), ("8 reference max", ref[3]))],
+                         info=[f"reduction {f} (image px per working px), chip {Wr} x {Hr} image px",
+                               (f"reference: {len(gold)} golden chips picked, spread from {len(clean)} chips" if gold else
+                                f"reference: per edge the cleanest chips there ({len(clean)} of {len(keys)} overall)")],
+                         clean=set(gold or clean), strip_clean={sd: set(v) for sd, v in strip_clean.items()})
 
         dbg = p.get("debug")
         shown = masks is not None and li == 0
@@ -754,7 +786,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                     full |= g[0]
                     best = max(best, g[1])
                 groups.append((full, best))
-            if shown or k == tk:
+            if shown or k == tk or store is not None:
                 area_all = np.zeros((H, W), bool)
                 for full, _ in groups:
                     area_all |= full
@@ -762,6 +794,16 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                 steps.append(("12 joined lines (Merge %g px, x%g along)" % (p["merge_radius_px"], p["merge_along"]), lines, "mask"))
                 steps.append(("13 stain areas: chip edge up to the line", area_all, "mask"))
                 trace.setdefault("info", []).extend(f"dropped: {d[1]} (length {d[2]}, depth {d[3]} px)" for d in (dbg or []) if d[0] == k)
+            if store is not None:
+                lim = 2.0 * p["dark_threshold"]
+                cl, ch = np.percentile(chips[k], [1, 99])
+                store["chips"][k] = {
+                    "at": at[k], "chip": q8(chips[k], cl, ch),
+                    "dev": q8(dev, -lim, lim), "dev_lim": lim,
+                    "sdev": q8(sdev, 0, 2.0 * p["ssim_threshold"]) if use_ssim else None,
+                    "dark": np.packbits(dark & edges), "specks": np.packbits(specks & edges),
+                    "lines": np.packbits(lines), "area": np.packbits(area_all),
+                    "why": [d for d in (dbg or []) if d[0] == k], "found": len(groups)}
             if shown: # Show mask: dark specks (red), joined lines (yellow), stain areas (cyan), as segmented
                 mx, my = to_deskew(*at[k])
                 masks[k] = ((mx, my, float(Wr), float(Hr)), (H, W), np.packbits(specks & edges), np.packbits(area_all),

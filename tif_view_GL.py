@@ -2665,6 +2665,10 @@ class MainWindow(QMainWindow):
         glw = self.glw
         cell = glw.grid_cfg.cell_at(*glw.get_image_coords(QPointF(glw.width() / 2, glw.height() / 2))) if at_centre \
             else self._cell_under_mouse()
+        store = getattr(self, "_stain_store", None)
+        if store and cell in store["chips"]:
+            self._show_stored_trace(cell, store) # From the last Detect Edge Stains run: no waiting
+            return
         setup = self._detect_setup("Edge Stains")
         if setup is None:
             return
@@ -2696,6 +2700,39 @@ class MainWindow(QMainWindow):
         mine = [f for f in found if tuple(f[5]) == tuple(cell)]
         info = [f"Chip X{cell[1]:02d}_Y{cell[0]:02d}, layer {layers[z]}: {len(mine)} stain(s) found"] + (trace.get("info") or [])
         self._show_trace(f"Edge Stains debug: X{cell[1]:02d}_Y{cell[0]:02d}", info, trace.get("steps") or [], ep)
+
+    def _show_stored_trace(self, cell, store):
+        """Debug chip from the last Detect Edge Stains run (every chip was kept)."""
+        from sat_widgets import edge_band
+        d = store["chips"][cell]
+        H, W, M, Wr, Hr = store["H"], store["W"], store["M"], store["Wr"], store["Hr"]
+        zs = [z for z in range(len(self.full_data)) if self.abs_layer(z) == store["layer"]]
+        steps = []
+        if zs:
+            x, y = d["at"]
+            win = edge_band._read(self.full_data, zs[0], x - M, y - M, Wr + 2 * M, Hr + 2 * M)
+            if win is not None:
+                steps.append(("1 raw window (margin %d px, image px)" % M, win, "gray"))
+                steps.append(("2 cut (whole px, no resampling)", win[M:M + Hr, M:M + Wr], "gray"))
+        steps.append(("3 chip as compared (reduced %d, Texture / Shading / Blur applied)" % store["f"], d["chip"], "gray"))
+        steps += [(name, a, "gray") for name, a in store["ref"]]
+        lim = d["dev_lim"]
+        steps.append(("9 deviation (spreads): blue darker, red brighter", d["dev"].astype(np.float32) / 255 * 2 * lim - lim, "signed"))
+        prm = store["params"]
+        if d["sdev"] is not None:
+            steps.append(("9b SSIM change (spreads)", d["sdev"].astype(np.float32) / 255 * 2 * prm["ssim_threshold"], "pos"))
+        unpack = lambda b: np.unpackbits(b)[:H * W].reshape(H, W)
+        steps.append(("10 dark specks (Dark %.1f%s)" % (prm["dark_threshold"], ", SSIM %.1f" % prm["ssim_threshold"] if store["use_ssim"] else ""),
+                      unpack(d["dark"]), "mask"))
+        steps.append(("11 specks kept (Density %.2f)" % prm["speck_density"], unpack(d["specks"]), "mask"))
+        steps.append(("12 joined lines (Merge %g px, x%g along)" % (prm["merge_radius_px"], prm["merge_along"]), unpack(d["lines"]), "mask"))
+        steps.append(("13 stain areas: chip edge up to the line", unpack(d["area"]), "mask"))
+        info = [f"Chip X{cell[1]:02d}_Y{cell[0]:02d}, layer {store['layer']}: {d['found']} stain(s) found (last Detect Edge Stains run)"]
+        info += store["info"]
+        info.append(f"this chip in the reference: {'yes' if cell in store['clean'] else 'no'}" +
+                    "".join(f"; {side}: {'yes' if cell in sel else 'no'}" for side, sel in store["strip_clean"].items()))
+        info += [f"dropped: {w[1]} (length {w[2]}, depth {w[3]} px)" for w in d["why"]]
+        self._show_trace(f"Edge Stains debug: X{cell[1]:02d}_Y{cell[0]:02d}", info, steps, prm)
 
     def _show_trace(self, title, info, steps, ep):
         """Dialog with the images of the steps (gray / signed / mask), Save writes them as PNGs."""
@@ -2808,12 +2845,14 @@ class MainWindow(QMainWindow):
 
         masks = {}
         why = ep["debug"] = [] # Why found places were not kept (summary below)
+        store = ep["store"] = {} # Debug of every chip (Debug chip shows it without running again)
         try:
             found = edge_band.detect(self.full_data, zs, [layers[z] for z in zs], self.glw.grid_cfg,
                                      self.glw.coord_transform, refs, cells, ep, progress, masks)
         finally:
             pd.close()
         self.glw.stain_masks = masks # Show mask (debug)
+        self._stain_store = store if store.get("chips") else None
         self.glw.update()
         if found is None:
             self.statusBar().showMessage("Edge stains: canceled")

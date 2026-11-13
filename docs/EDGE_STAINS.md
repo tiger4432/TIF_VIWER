@@ -52,7 +52,7 @@
 
 ## Debug chip 이미지 읽는 법
 
-버튼 = 화면 가운데 칩, 영상 위 **Ctrl+Shift+D** = 마우스 아래 칩. 마킹은 하지 않습니다. 위쪽 글: 축소 배율, 기준 칩을 몇 개로 만들었는지(이 칩이 기준에 들어갔는지), 버려진 띠와 이유(short = Length ≥ / Link gap, thin = Min depth, not elongated = Aspect).
+버튼 = 화면 가운데 칩, 영상 위 **Ctrl+Shift+D** = 마우스 아래 칩. **Detect Edge Stains를 한 번 돌린 뒤에는 모든 칩의 결과가 저장되어 바로 열립니다**(돌리기 전이면 그 칩만 계산, 마킹은 하지 않음). 위쪽 글: 축소 배율, 기준 칩을 몇 개로 만들었는지(이 칩이 기준에 들어갔는지), 버려진 띠와 이유(short = Length ≥ / Link gap, thin = Min depth, not elongated = Aspect).
 
 | 번호 | 이미지 | 볼 것 |
 |---|---|---|

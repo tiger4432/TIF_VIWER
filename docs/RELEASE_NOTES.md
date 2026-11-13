@@ -5,6 +5,11 @@
 - **git checkout(git bundle로 업데이트):** `defaults\` 폴더는 없습니다. `plugins\results_api.py`도 업데이트(merge)로 새 버전이 되고, 현장에서 고친 내용은 `--autostash`가 그 위에 다시 얹습니다(같은 줄을 고쳤으면 git이 충돌로 알림). 아래 노트의 "`defaults\`에서 옮겨 붙이세요"는 zip 설치에만 해당합니다.
 - **zip 설치:** 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다(새 기본값은 zip 안의 `defaults\`).
 
+## 1.1.45
+
+- **Debug chip = 모든 칩:** Detect Edge Stains를 한 번 돌리면 모든 칩의 단계별 결과를 저장해 둡니다. 그 뒤 Debug chip(화면 가운데 칩) / Ctrl+Shift+D(마우스 아래 칩)는 다시 돌리지 않고 바로 열립니다(0.1초 이하). 위쪽 글에 그 칩이 기준(레퍼)에 들어갔는지 변별로 표시. 아직 한 번도 돌리지 않았으면 그 칩만 계산.
+- 블러·SSIM 계산을 빠른 방식(상자 3번)으로 바꿈.
+
 ## 1.1.44
 
 - **Edge Stains, 차이 맵이 격자 모양으로 전부 어둡던 문제:** 기준 칩(중앙값)은 패드가 뭉개지고 개별 칩은 선명해, 패드 사이가 기준보다 어둡게 나왔습니다. 이제 칩·기준을 패드 간격 상자(**Texture**, 기본 2 px = 한 칸 건너 패드)로 평균 낸 뒤 비교합니다.
