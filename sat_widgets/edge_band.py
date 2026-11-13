@@ -7,9 +7,11 @@ inside, on part of the chips.
 Per loaded layer:
 1. Every chip (its reference bbox) is cut at a working size, normalised (median / spread) and moved
    onto the median chip (subpixel): a bbox a few px off does not show as a dark edge.
-2. Per pixel the median chip and the chip-to-chip spread (MAD).
-3. Deviation |chip - median| / spread, both ways: the dark rim and the bright inside both count, so
-   the stain shows as one area whatever its ragged outline.
+2. Reference: the median chip (optionally every chip's intensity matched onto it, measured on the
+   centre: match), the chip-to-chip spread per pixel and the median chip's local min..max (3x3, or
+   +- shift_tol_px): pads / gaps of about 1 px a little off between chips are no difference.
+3. Deviation outside that range / spread, both ways: the dark rim and the bright inside both count,
+   so the stain shows as one area whatever its ragged outline.
 4. Averaged over a min_width_px box (pixel noise and thin layout residue drop, the stain stays) and
    kept where above threshold x the noise of the averaged map (all chips).
 5. Segmentation, each edge on its own (a stain near a corner is not joined with the next edge):
@@ -45,8 +47,13 @@ DEFAULTS = {
     "min_width_px": 12,     # Averaging box (image px); about the narrowest stain
     "min_aspect": 1.5,      # Longer / shorter side, at least (elongated along the edge)
     "min_depth_px": 6,      # Shallowest stain (image px from the edge): thinner lines along the edge are not stains
-    "two_pass": False,      # Second pass against the chips without the stains found (off: on the synthetic
-                            # arch stains it made clean chips stand out at the edges)
+    "shift_tol_px": 0,      # A chip pixel within the median chip's min..max over +- this (image px) is no
+                            # difference (at least 3x3 working px): pads / gaps a little off are not stains
+    "edges": "tblr",        # Edges searched: t(op) b(ottom) l(eft) r(ight), e.g. "tb" for top and bottom only
+    "match": "none",        # Per-chip intensity matching onto the median chip, measured on the centre: "none"
+                            # (best on the synthetic sets), "linear" (gain / offset), "curve" (monotone curve)
+    "register_frac": 0.6,   # Chips aligned on their centre part only (this share of the size): stains at
+                            # the top / bottom do not pull the alignment
     "blur_px": 0.0,         # Gaussian blur of every chip before the comparison (sigma, image px; 0 = off)
     "zone_share": 0.5,      # Share of the stain inside the edge zone, at least
     "touch_px": 6,          # A stain is attached to the chip edge: its pixels within this (image px) of the edge
@@ -72,6 +79,68 @@ def _box(a, h, w):
     c = np.pad(c, ((1, 0), (1, 0)))
     s = c[h:, w:] - c[:-h, w:] - c[h:, :-w] + c[:-h, :-w]
     return (s / (h * w)).astype(np.float32)
+
+
+def _match_centre(a, golden, centre, n=24):
+    """
+    a mapped onto golden by a monotone intensity curve: golden's pixels in the centre part grouped in
+    n quantile classes, each class' median of `a` mapped to its median of golden (interpolated).
+    """
+    g, c = golden[centre], a[centre]
+    edges = np.quantile(g, np.linspace(0, 1, n + 1))
+    cls = np.clip(np.searchsorted(edges, g, side="right") - 1, 0, n - 1)
+    xs, ys = [], []
+    for i in range(n):
+        m = cls == i
+        if m.sum() >= 8:
+            xs.append(float(np.median(c[m])))
+            ys.append(float(np.median(g[m])))
+    if len(xs) < 2:
+        return a
+    order = np.argsort(xs)
+    xs, ys = np.maximum.accumulate(np.asarray(xs)[order]), np.asarray(ys)[order]
+    xs = xs + np.arange(len(xs)) * 1e-6 # Strictly increasing for interp
+    lo, hi = (ys[1] - ys[0]) / max(xs[1] - xs[0], 1e-6), (ys[-1] - ys[-2]) / max(xs[-1] - xs[-2], 1e-6)
+    out = np.interp(a, xs, ys)
+    out = np.where(a < xs[0], ys[0] + (a - xs[0]) * lo, out) # Linear beyond the ends
+    return np.where(a > xs[-1], ys[-1] + (a - xs[-1]) * hi, out).astype(np.float32)
+
+
+def _match_linear(a, golden, centre):
+    """a mapped onto golden by gain / offset measured on the centre part (robust: 20 / 80 % quantile classes)."""
+    g, c = golden[centre], a[centre]
+    q = np.quantile(g, [0.1, 0.3, 0.7, 0.9])
+    lo, hi = (g >= q[0]) & (g < q[1]), (g >= q[2]) & (g < q[3])
+    if lo.sum() < 8 or hi.sum() < 8:
+        return a
+    x0, x1, y0, y1 = np.median(c[lo]), np.median(c[hi]), np.median(g[lo]), np.median(g[hi])
+    k = (y1 - y0) / (x1 - x0) if abs(x1 - x0) > 1e-6 else 1.0
+    return ((a - x0) * k + y0).astype(np.float32)
+
+
+def _register_centre(chips, frac=0.6):
+    """
+    Chips moved onto the median chip (subpixel phase correlation), the shift measured on the centre
+    part only (frac of the size): a large stain along an edge does not pull the chip off.
+    """
+    from .void_detect import _phase_shift, _translate
+    keys = list(chips)
+    h, w = next(iter(chips.values())).shape
+    mh, mw = int(h * (1 - frac) / 2), int(w * (1 - frac) / 2)
+    cen = lambda a: a[mh:h - mh, mw:w - mw]
+    idx = np.linspace(0, len(keys) - 1, min(len(keys), 48)).astype(int)
+    out = chips
+    for _ in range(2): # Second pass against the median of the moved chips
+        ref = np.median(np.stack([cen(out[keys[i]]).astype(np.float32) for i in idx]), axis=0)
+        moved = {}
+        for k, c in chips.items():
+            a = c.astype(np.float32)
+            dx, dy = _phase_shift(cen(a), ref)
+            if not (math.isfinite(dx) and math.isfinite(dy)) or math.hypot(dx, dy) > 0.1 * max(h, w):
+                dx = dy = 0.0
+            moved[k] = _translate(a, dx, dy) if (dx or dy) else a
+        out = moved
+    return out
 
 
 def _fill_to_edge(part, side):
@@ -106,7 +175,8 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
     progress(i, n, text) -> False cancels.
     """
     from .auto_bbox import _cutter
-    from .void_detect import _blur, _components, _normalize, _register, chip_rects
+    from .void_detect import _blur, _components, _filt, _normalize, chip_rects
+    from PIL import ImageFilter
     from .void_layer_change import _contour
     p = dict(DEFAULTS)
     p.update(params or {})
@@ -133,6 +203,10 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
               ("y", inner & (xx >= W - depth_x), inner & (xx >= W - t_x), "right")]
     # (direction along, strip mask, contact band along the chip edge, edge)
     k_dens = max(3, int(round(p["merge_radius_px"] / min(sx, sy))) | 1)
+    strips = [st for st in strips if st[3][0] in str(p["edges"]).lower()] # Only the edges asked for
+    mh, mw = int(H * 0.2), int(W * 0.2)
+    centre = np.zeros((H, W), bool) # Intensity matching measured here (no edge stains)
+    centre[mh:H - mh, mw:W - mw] = True
     edges = np.zeros((H, W), bool) # Union of the edge strips (shown masks)
     for _, strip, _, _ in strips:
         edges |= strip
@@ -159,21 +233,39 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
         stack.release_cache()
         if len(chips) < 4:
             continue
-        chips, _ = _register(chips)
+        chips = _register_centre(chips, p["register_frac"])
         if p["blur_px"] > 0: # Gaussian blur (noise down; specks of the rim spread, keep it below their spacing)
             sig = p["blur_px"] / min(sx, sy)
             chips = {k: _blur(c.astype(np.float32), sig) for k, c in chips.items()}
         keys = list(chips)
-        A = np.stack([chips[k].astype(np.float32) for k in keys])
-        med = np.median(A, axis=0)
-        spread = np.median(np.abs(A - med), axis=0) * 1.4826
+        # Reference: the median chip; every chip's intensity matched onto it with a curve measured on the
+        # chip centre only (pad brightness / contrast per chip; a large stain along an edge does not pull
+        # the curve), the chip-to-chip spread per pixel, and the median chip's local min..max (3x3, or
+        # +- shift_tol_px): pads of about 1 px a little off between chips are no difference
+        B0 = np.stack([chips[k].astype(np.float32) for k in keys])
+        golden = np.median(B0, axis=0)
+        mode = p["match"]
+        if mode == "none":
+            A = B0
+        else:
+            fn = _match_centre if mode == "curve" else _match_linear
+            A = np.stack([fn(B0[i], golden, centre) for i in range(len(keys))])
+            golden = np.median(A, axis=0)
+            A = np.stack([fn(B0[i], golden, centre) for i in range(len(keys))])
+        del B0
+        spread = np.median(np.abs(A - golden), axis=0) * 1.4826
+        spread = _filt(spread, ImageFilter.MaxFilter(3))
         spread = np.maximum(spread, 0.5 * float(np.median(spread)) + 1e-3)
+        k_tol = max(3, 2 * int(round(p["shift_tol_px"] / min(sx, sy))) + 1)
+        gmin = _filt(golden, ImageFilter.MinFilter(k_tol))
+        gmax = _filt(golden, ImageFilter.MaxFilter(k_tol))
+        DEV = (np.maximum(A - gmax, 0) - np.maximum(gmin - A, 0)) / spread # > 0 brighter, < 0 darker (outside the envelope)
         if progress is not None and not progress(2 * li + 1, n_steps, f"Edge stains: layer {layer}"):
             return None
-        def stains_of(med, spread, mask_out=None):
-            """[(cell, r0, r1, c0, c1, filled part, score)] of the chips against this reference."""
+        def stains_of(mask_out=None):
+            """[(cell, r0, r1, c0, c1, filled part, score)] of the chips against the reference."""
             out = []
-            S = {k: _box(np.abs(A[i] - med) / spread, T_y, T_x) for i, k in enumerate(keys)}
+            S = {k: _box(np.abs(DEV[i]), T_y, T_x) for i, k in enumerate(keys)}
             vals = np.concatenate([S[k][zone][::7] for k in keys])
             m0 = float(np.median(vals))
             noise = float(np.median(np.abs(vals - m0))) * 1.4826 + 1e-6
@@ -185,7 +277,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                     if dbg is not None:
                         dbg.append((k, "no seed", float(S[k][zone].max() / max(level, 1e-6))))
                     continue
-                dev = (A[i] - med) / spread
+                dev = DEV[i]
                 specks = (dev <= -p["dark_threshold"]).astype(np.float32)
                 specks = (specks > 0) & (_box(specks, k_dens, k_dens) >= p["speck_density"]) # Dense specks only
                 bright = _box(np.clip(dev, 0, None), 3, 3) >= p["bright_threshold"]
@@ -235,22 +327,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             return out
 
         shown = {} if (masks is not None and li == 0) else None
-        found1 = stains_of(med, spread, shown)
-        if found1 and p.get("two_pass", True):
-            # Second pass against a reference without the stains found: when half of the chips or more
-            # are stained at similar places, the median holds the stains and clean chips stand out
-            masked = A.copy()
-            for k, r0, r1, c0, c1, part, score in found1:
-                full = np.zeros((H, W), np.float32)
-                full[r0:r1 + 1, c0:c1] = part
-                masked[keys.index(k)][_box(full, k_merge, k_merge) > 0] = np.nan
-            with np.errstate(all="ignore"):
-                med2 = np.nanmedian(masked, axis=0)
-                spread2 = np.nanmedian(np.abs(masked - med2), axis=0) * 1.4826
-            bad = ~np.isfinite(med2) | ~np.isfinite(spread2)
-            med2 = np.where(bad, med, med2)
-            spread2 = np.maximum(np.where(bad, spread, spread2), 0.5 * float(np.median(spread)) + 1e-3)
-            found1 = stains_of(med2, spread2, shown)
+        found1 = stains_of(shown)
         if shown is not None:
             for k, (mx, my, dk, br) in shown.items():
                 masks[k] = ((mx, my, bw, bh), (H, W), np.packbits(dk), np.packbits(br))

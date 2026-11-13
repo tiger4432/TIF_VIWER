@@ -2273,10 +2273,26 @@ class MainWindow(QMainWindow):
                                                            "less pixel noise; keep it below the spacing of the rim's dark specks"))
         h4b.addWidget(QLabel("Min depth"))
         h4b.addWidget(spin("min_depth_px", "", 0, 10000, 1, 0, "Shallowest stain (image px from the edge): thinner lines along the edge are not stains"))
-        self.chk_stain_two_pass = QCheckBox("2 passes")
-        self.chk_stain_two_pass.setToolTip("Second pass against the chips without the stains found (when most chips are stained)")
-        self.chk_stain_two_pass.setChecked(bool(cfg.get("two_pass", False)))
-        h4b.addWidget(self.chk_stain_two_pass)
+        h4b.addWidget(QLabel("Edges"))
+        self._stain_edges = {}
+        for key, label in (("t", "T"), ("b", "B"), ("l", "L"), ("r", "R")):
+            cb = QCheckBox(label)
+            cb.setToolTip({"t": "Top edge", "b": "Bottom edge", "l": "Left edge", "r": "Right edge"}[key] + " searched")
+            cb.setChecked(key in str(cfg.get("edges", "tblr")).lower())
+            self._stain_edges[key] = cb
+            h4b.addWidget(cb)
+        h4b.addWidget(QLabel("Match"))
+        self.cb_stain_match = QComboBox()
+        for key, label in (("none", "none"), ("linear", "linear"), ("curve", "curve")):
+            self.cb_stain_match.addItem(label, key)
+        self.cb_stain_match.setCurrentIndex(max(0, self.cb_stain_match.findData(cfg.get("match", "none"))))
+        self.cb_stain_match.setToolTip("Per-chip brightness matching onto the median chip, measured on the chip centre:\n"
+                                       "none (default), linear (gain / offset: chips brighter / darker overall),\n"
+                                       "curve (contrast / gamma too)")
+        h4b.addWidget(self.cb_stain_match)
+        h4b.addWidget(QLabel("Shift tol"))
+        h4b.addWidget(spin("shift_tol_px", "", 0, 100, 1, 0, "Chips may sit this far (image px) off each other: a pixel inside the median chip's\n"
+                                                                "min..max over +- this is no difference (pads / gaps a little off are not stains)"))
         form.addRow(h4b)
         h5 = QHBoxLayout()
         h5.addWidget(QLabel("Mark as"))
@@ -2303,8 +2319,10 @@ class MainWindow(QMainWindow):
         out = {k: sb.value() for k, sb in getattr(self, "_stain_inputs", {}).items()}
         if "depth_frac" in out:
             out["depth_frac"] /= 100.0
-        if getattr(self, "chk_stain_two_pass", None) is not None:
-            out["two_pass"] = self.chk_stain_two_pass.isChecked()
+        if getattr(self, "cb_stain_match", None) is not None:
+            out["match"] = self.cb_stain_match.currentData()
+        if getattr(self, "_stain_edges", None):
+            out["edges"] = "".join(k for k, cb in self._stain_edges.items() if cb.isChecked())
         if getattr(self, "cb_stain_type", None) is not None and self.cb_stain_type.currentData():
             out["type"] = self.cb_stain_type.currentData()
         return out
