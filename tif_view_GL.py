@@ -2267,6 +2267,17 @@ class MainWindow(QMainWindow):
         h4.addWidget(QLabel("Box"))
         h4.addWidget(spin("min_width_px", "", 1, 1000, 1, 0, "Averaging box (image px) for finding stains: about the narrowest stain"))
         form.addRow(h4)
+        h4b = QHBoxLayout()
+        h4b.addWidget(QLabel("Blur σ"))
+        h4b.addWidget(spin("blur_px", "", 0, 100, 0.5, 1, "Gaussian blur of every chip before the comparison (sigma, image px; 0 = off):\n"
+                                                           "less pixel noise; keep it below the spacing of the rim's dark specks"))
+        h4b.addWidget(QLabel("Min depth"))
+        h4b.addWidget(spin("min_depth_px", "", 0, 10000, 1, 0, "Shallowest stain (image px from the edge): thinner lines along the edge are not stains"))
+        self.chk_stain_two_pass = QCheckBox("2 passes")
+        self.chk_stain_two_pass.setToolTip("Second pass against the chips without the stains found (when most chips are stained)")
+        self.chk_stain_two_pass.setChecked(bool(cfg.get("two_pass", False)))
+        h4b.addWidget(self.chk_stain_two_pass)
+        form.addRow(h4b)
         h5 = QHBoxLayout()
         h5.addWidget(QLabel("Mark as"))
         self.cb_stain_type = QComboBox()
@@ -2280,6 +2291,11 @@ class MainWindow(QMainWindow):
             if i >= 0:
                 self.cb_stain_type.setCurrentIndex(i)
         h5.addWidget(self.cb_stain_type, 1)
+        self.chk_stain_mask = QCheckBox("Show mask")
+        self.chk_stain_mask.setToolTip("What the last run took as dark specks (red) and bright inside (cyan) in the\n"
+                                       "edge strips of every chip (first searched layer), to tune Dark / Bright / Density")
+        self.chk_stain_mask.toggled.connect(lambda on: (setattr(self.glw, "show_stain_masks", on), self.glw.update()))
+        h5.addWidget(self.chk_stain_mask)
         form.addRow(h5)
         dock_layout.addWidget(gb)
 
@@ -2287,6 +2303,8 @@ class MainWindow(QMainWindow):
         out = {k: sb.value() for k, sb in getattr(self, "_stain_inputs", {}).items()}
         if "depth_frac" in out:
             out["depth_frac"] /= 100.0
+        if getattr(self, "chk_stain_two_pass", None) is not None:
+            out["two_pass"] = self.chk_stain_two_pass.isChecked()
         if getattr(self, "cb_stain_type", None) is not None and self.cb_stain_type.currentData():
             out["type"] = self.cb_stain_type.currentData()
         return out
@@ -2345,11 +2363,14 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
             return not pd.wasCanceled()
 
+        masks = {}
         try:
             found = edge_band.detect(self.full_data, zs, [layers[z] for z in zs], self.glw.grid_cfg,
-                                     self.glw.coord_transform, refs, cells, ep, progress)
+                                     self.glw.coord_transform, refs, cells, ep, progress, masks)
         finally:
             pd.close()
+        self.glw.stain_masks = masks # Show mask (debug)
+        self.glw.update()
         if found is None:
             self.statusBar().showMessage("Edge stains: canceled")
             return

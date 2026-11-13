@@ -18,7 +18,8 @@ Per loaded layer:
    bright_threshold, 3x3 average), joined when closer than merge_radius_px (closing): a rim of
    separate dots becomes one line and the stain one area, from the chip edge to its rim. Each area
    touching a found place (4.) is a stain; its box is the box of the segmented area and its
-   outline is kept (Shapes, debug). Stains of two edges overlapping at a corner: the larger kept.
+   outline is kept (Shapes, debug). Pieces of the edges that touch at a corner are one stain
+   (a stain wrapping around a corner onto the next edge).
    A stain is attached to the chip edge: its pixels come within touch_px of the edge (after the
    edge_skip_px left out) along at least `contact` of its length; areas inside the chip near the
    edge (layout residue, other defects) are not stains.
@@ -43,6 +44,10 @@ DEFAULTS = {
     "min_length_px": 100,   # Shortest stain (image px, its longer side)
     "min_width_px": 12,     # Averaging box (image px); about the narrowest stain
     "min_aspect": 1.5,      # Longer / shorter side, at least (elongated along the edge)
+    "min_depth_px": 6,      # Shallowest stain (image px from the edge): thinner lines along the edge are not stains
+    "two_pass": False,      # Second pass against the chips without the stains found (off: on the synthetic
+                            # arch stains it made clean chips stand out at the edges)
+    "blur_px": 0.0,         # Gaussian blur of every chip before the comparison (sigma, image px; 0 = off)
     "zone_share": 0.5,      # Share of the stain inside the edge zone, at least
     "touch_px": 6,          # A stain is attached to the chip edge: its pixels within this (image px) of the edge
     "contact": 0.3,         # ... along at least this share of its length (else: inside the chip, not a stain)
@@ -92,14 +97,16 @@ def _fill_to_edge(part, side):
     return out if side in ("top", "bottom") else out.T
 
 
-def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, params=None, progress=None):
+def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, params=None, progress=None, masks=None):
     """
     Returns [(layer, gx, gy, rx, ry, cell, score, outline)] (Deskewed centre / half sizes, outline:
     [(gx, gy)] Deskewed points of the segmented area) or None when cancelled.
+    masks (dict): filled with what was taken as dark specks / bright inside in the edge strips (last
+    pass, first searched layer): {cell: ((x0, y0, w, h) Deskewed, (H, W), packed dark, packed bright)}.
     progress(i, n, text) -> False cancels.
     """
     from .auto_bbox import _cutter
-    from .void_detect import _components, _normalize, _register, chip_rects
+    from .void_detect import _blur, _components, _normalize, _register, chip_rects
     from .void_layer_change import _contour
     p = dict(DEFAULTS)
     p.update(params or {})
@@ -126,6 +133,9 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
               ("y", inner & (xx >= W - depth_x), inner & (xx >= W - t_x), "right")]
     # (direction along, strip mask, contact band along the chip edge, edge)
     k_dens = max(3, int(round(p["merge_radius_px"] / min(sx, sy))) | 1)
+    edges = np.zeros((H, W), bool) # Union of the edge strips (shown masks)
+    for _, strip, _, _ in strips:
+        edges |= strip
     k_merge = 2 * max(1, int(round(p["merge_radius_px"] / min(sx, sy)))) + 1 # Closing window (working px)
 
     def closing(m):
@@ -150,6 +160,9 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
         if len(chips) < 4:
             continue
         chips, _ = _register(chips)
+        if p["blur_px"] > 0: # Gaussian blur (noise down; specks of the rim spread, keep it below their spacing)
+            sig = p["blur_px"] / min(sx, sy)
+            chips = {k: _blur(c.astype(np.float32), sig) for k, c in chips.items()}
         keys = list(chips)
         A = np.stack([chips[k].astype(np.float32) for k in keys])
         med = np.median(A, axis=0)
@@ -157,62 +170,95 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
         spread = np.maximum(spread, 0.5 * float(np.median(spread)) + 1e-3)
         if progress is not None and not progress(2 * li + 1, n_steps, f"Edge stains: layer {layer}"):
             return None
-        S = {k: _box(np.abs(A[i] - med) / spread, T_y, T_x) for i, k in enumerate(keys)}
-        vals = np.concatenate([S[k][zone][::7] for k in keys])
-        m0 = float(np.median(vals))
-        noise = float(np.median(np.abs(vals - m0))) * 1.4826 + 1e-6
-        level = m0 + p["threshold"] * noise
-        for i, k in enumerate(keys):
-            seeds = (S[k] >= level) & inner
+        def stains_of(med, spread, mask_out=None):
+            """[(cell, r0, r1, c0, c1, filled part, score)] of the chips against this reference."""
+            out = []
+            S = {k: _box(np.abs(A[i] - med) / spread, T_y, T_x) for i, k in enumerate(keys)}
+            vals = np.concatenate([S[k][zone][::7] for k in keys])
+            m0 = float(np.median(vals))
+            noise = float(np.median(np.abs(vals - m0))) * 1.4826 + 1e-6
+            level = m0 + p["threshold"] * noise
             dbg = p.get("debug")
-            if not seeds.any():
-                if dbg is not None:
-                    dbg.append((k, "no seed", float(S[k][zone].max() / max(level, 1e-6))))
-                continue
-            dev = (A[i] - med) / spread
-            specks = (dev <= -p["dark_threshold"]).astype(np.float32)
-            specks = (specks > 0) & (_box(specks, k_dens, k_dens) >= p["speck_density"]) # Dense specks only
-            bright = _box(np.clip(dev, 0, None), 3, 3) >= p["bright_threshold"]
-            x0, y0 = rects[k][0], rects[k][1]
-            cands = []
-            for along, strip, band, side in strips:
-                seg = closing((specks | bright) & strip) & strip
-                seg |= seeds & strip & (_box(np.abs(dev), 3, 3) >= p["bright_threshold"]) # Faint parts the averaging found
-                for r0, r1, c0, c1, area in _components(seg):
-                    part = seg[r0:r1 + 1, c0:c1]
-                    if not (seeds[r0:r1 + 1, c0:c1] & part).any():
-                        continue # Segmented, but no stain found there (specks of noise / layout)
-                    w_px, h_px = (c1 - c0) * sx, (r1 + 1 - r0) * sy
-                    length, depth = (w_px, h_px) if along == "x" else (h_px, w_px)
-                    if length < p["min_length_px"] or length < p["min_aspect"] * depth:
-                        if dbg is not None:
-                            dbg.append((k, "size", round(w_px), round(h_px)))
-                        continue
-                    touch = part & band[r0:r1 + 1, c0:c1] # Attached to the chip edge, along how much of it
-                    share = (touch.any(axis=0).sum() / max(1, c1 - c0)) if along == "x" else \
-                        (touch.any(axis=1).sum() / max(1, r1 + 1 - r0))
-                    if share < p["contact"]:
-                        if dbg is not None:
-                            dbg.append((k, "not on the edge", round(float(share), 2)))
-                        continue
-                    # The stain = the chip edge up to its dark rim, filled: at every place along the edge
-                    # from the edge to the farthest segmented pixel (the rim); gaps of the rim bridged
-                    part = _fill_to_edge(part, side)
-                    cands.append((int(part.sum()), r0, r1, c0, c1, part))
-            # A corner: the same stain may show in both strips -> the larger one
-            cands.sort(key=lambda c: -c[0])
-            kept = []
-            for area, r0, r1, c0, c1, part in cands:
-                if any(not (c1 <= q[3] or q[4] <= c0 or r1 < q[1] or q[2] < r0) for q in kept):
+            for i, k in enumerate(keys):
+                seeds = (S[k] >= level) & inner
+                if not seeds.any():
+                    if dbg is not None:
+                        dbg.append((k, "no seed", float(S[k][zone].max() / max(level, 1e-6))))
                     continue
-                kept.append((area, r0, r1, c0, c1, part))
-            for area, r0, r1, c0, c1, part in kept:
-                gx0, gy0 = x0 + c0 * sx, y0 + r0 * sy
-                gx1, gy1 = x0 + c1 * sx, y0 + (r1 + 1) * sy
-                if any(not (gx1 < a0 or a1 < gx0 or gy1 < b0 or b1 < gy0) for a0, b0, a1, b1 in taken.get(k, ())):
-                    continue # The same stain on an earlier layer
-                taken.setdefault(k, []).append((gx0, gy0, gx1, gy1))
-                score = float(S[k][r0:r1 + 1, c0:c1].max() / max(level, 1e-6))
-                outline = [(gx0 + (px + 0.5) * sx, gy0 + (py + 0.5) * sy) for py, px in _contour(part)]
-                found.append((layer, (gx0 + gx1) / 2, (gy0 + gy1) / 2, (gx1 - gx0) / 2, (gy1 - gy0) / 2, k, score, outline))
+                dev = (A[i] - med) / spread
+                specks = (dev <= -p["dark_threshold"]).astype(np.float32)
+                specks = (specks > 0) & (_box(specks, k_dens, k_dens) >= p["speck_density"]) # Dense specks only
+                bright = _box(np.clip(dev, 0, None), 3, 3) >= p["bright_threshold"]
+                if mask_out is not None:
+                    mask_out[k] = (rects[k][0], rects[k][1], specks & edges, bright & edges)
+                cands = []
+                for along, strip, band, side in strips:
+                    seg = closing((specks | bright) & strip) & strip
+                    seg |= seeds & strip & (_box(np.abs(dev), 3, 3) >= p["bright_threshold"]) # Faint parts the averaging found
+                    for r0, r1, c0, c1, area in _components(seg):
+                        part = seg[r0:r1 + 1, c0:c1]
+                        if not (seeds[r0:r1 + 1, c0:c1] & part).any():
+                            continue # Segmented, but no stain found there (specks of noise / layout)
+                        w_px, h_px = (c1 - c0) * sx, (r1 + 1 - r0) * sy
+                        length, depth = (w_px, h_px) if along == "x" else (h_px, w_px)
+                        if length < p["min_length_px"] or length < p["min_aspect"] * depth or depth < p["min_depth_px"]:
+                            if dbg is not None:
+                                dbg.append((k, "size", round(w_px), round(h_px)))
+                            continue
+                        touch = part & band[r0:r1 + 1, c0:c1] # Attached to the chip edge, along how much of it
+                        share = (touch.any(axis=0).sum() / max(1, c1 - c0)) if along == "x" else \
+                            (touch.any(axis=1).sum() / max(1, r1 + 1 - r0))
+                        if share < p["contact"]:
+                            if dbg is not None:
+                                dbg.append((k, "not on the edge", round(float(share), 2)))
+                            continue
+                        # The stain = the chip edge up to its dark rim, filled: at every place along the edge
+                        # from the edge to the farthest segmented pixel (the rim); gaps of the rim bridged
+                        cands.append((r0, r1, c0, c1, _fill_to_edge(part, side)))
+                # A stain wrapping around a corner shows in two (or three) strips: pieces within the merge
+                # radius of each other are one stain, their filled areas joined
+                groups = []
+                for r0, r1, c0, c1, part in cands:
+                    full = np.zeros((H, W), bool)
+                    full[r0:r1 + 1, c0:c1] = part
+                    grown = _box(full.astype(np.float32), k_merge, k_merge) > 0
+                    for gi in [gi for gi, g in enumerate(groups) if (grown & g).any()][::-1]:
+                        full |= groups.pop(gi)
+                    groups.append(full)
+                for full in groups:
+                    rows, cols = np.nonzero(full)
+                    r0, r1, c0, c1 = rows.min(), rows.max(), cols.min(), cols.max() + 1
+                    score = float(S[k][r0:r1 + 1, c0:c1].max() / max(level, 1e-6))
+                    out.append((k, r0, r1, c0, c1, full[r0:r1 + 1, c0:c1], score))
+            return out
+
+        shown = {} if (masks is not None and li == 0) else None
+        found1 = stains_of(med, spread, shown)
+        if found1 and p.get("two_pass", True):
+            # Second pass against a reference without the stains found: when half of the chips or more
+            # are stained at similar places, the median holds the stains and clean chips stand out
+            masked = A.copy()
+            for k, r0, r1, c0, c1, part, score in found1:
+                full = np.zeros((H, W), np.float32)
+                full[r0:r1 + 1, c0:c1] = part
+                masked[keys.index(k)][_box(full, k_merge, k_merge) > 0] = np.nan
+            with np.errstate(all="ignore"):
+                med2 = np.nanmedian(masked, axis=0)
+                spread2 = np.nanmedian(np.abs(masked - med2), axis=0) * 1.4826
+            bad = ~np.isfinite(med2) | ~np.isfinite(spread2)
+            med2 = np.where(bad, med, med2)
+            spread2 = np.maximum(np.where(bad, spread, spread2), 0.5 * float(np.median(spread)) + 1e-3)
+            found1 = stains_of(med2, spread2, shown)
+        if shown is not None:
+            for k, (mx, my, dk, br) in shown.items():
+                masks[k] = ((mx, my, bw, bh), (H, W), np.packbits(dk), np.packbits(br))
+        for k, r0, r1, c0, c1, part, score in found1:
+            x0, y0 = rects[k][0], rects[k][1]
+            gx0, gy0 = x0 + c0 * sx, y0 + r0 * sy
+            gx1, gy1 = x0 + c1 * sx, y0 + (r1 + 1) * sy
+            if any(not (gx1 < a0 or a1 < gx0 or gy1 < b0 or b1 < gy0) for a0, b0, a1, b1 in taken.get(k, ())):
+                continue # The same stain on an earlier layer
+            taken.setdefault(k, []).append((gx0, gy0, gx1, gy1))
+            outline = [(gx0 + (px + 0.5) * sx, gy0 + (py + 0.5) * sy) for py, px in _contour(part)]
+            found.append((layer, (gx0 + gx1) / 2, (gy0 + gy1) / 2, (gx1 - gx0) / 2, (gy1 - gy0) / 2, k, score, outline))
     return found

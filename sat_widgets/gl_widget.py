@@ -970,6 +970,29 @@ class GLImageWidget(QOpenGLWidget):
         if self.cursor().shape() != shape:
             self.setCursor(shape)
 
+    def _draw_stain_masks(self, painter):
+        """Edge Stains debug: what the last run took as dark specks (red) / bright inside (cyan), per chip."""
+        cache = self.__dict__.setdefault("_stain_mask_cache", {})
+        if cache.get("_src") is not self.stain_masks:
+            cache.clear()
+            cache["_src"] = self.stain_masks
+        vw, vh = self.width(), self.height()
+        for cell, ((x0, y0, w, h), (H, W), dk, br) in self.stain_masks.items():
+            sx0, sy0 = self.deskew_to_screen(x0, y0)
+            sx1, sy1 = self.deskew_to_screen(x0 + w, y0 + h)
+            if sx1 < 0 or sy1 < 0 or sx0 > vw or sy0 > vh:
+                continue # Not on screen
+            img = cache.get(cell)
+            if img is None:
+                d = np.unpackbits(dk)[:H * W].reshape(H, W).astype(bool)
+                b = np.unpackbits(br)[:H * W].reshape(H, W).astype(bool)
+                rgba = np.zeros((H, W, 4), np.uint8)
+                rgba[b] = (0, 220, 255, 90)
+                rgba[d] = (255, 30, 30, 200)
+                img = QImage(rgba.data, W, H, 4 * W, QImage.Format_RGBA8888).copy()
+                cache[cell] = img
+            painter.drawImage(QRectF(sx0, sy0, sx1 - sx0, sy1 - sy0), img)
+
     def _paint_outline(self, painter, v):
         """Detected shape (debug, Shapes in Void Detection > Advanced): raw offsets from the centre,
         scaled with the radii (the void may have been resized or moved since)."""
@@ -1097,6 +1120,8 @@ class GLImageWidget(QOpenGLWidget):
              
              # Chip layout inside each cell's reference bbox
              self._draw_layout(painter)
+             if getattr(self, "show_stain_masks", False) and getattr(self, "stain_masks", None):
+                 self._draw_stain_masks(painter)
 
              # First Pass: Ghost Voids (Other Layers), then Current Layer Voids on top
              vm = self.void_manager
