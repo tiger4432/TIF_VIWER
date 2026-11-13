@@ -298,7 +298,7 @@ Extraction 아래 **Auto Run** 묶음에 측정 파일 경로(glob, 예: `D:/SAT
 
 ### 축척 (Scale)
 
-Grid 패널의 **Scale (um/px)**은 1픽셀의 실제 크기입니다. 값이 있으면 voids.json / voids.csv에 um 컬럼(`RelativeX_um`, `RelativeY_um`, `RadiusX_um`, `RadiusY_um`, `BBoxRelX_um`, `BBoxRelY_um`)을 채웁니다. 이 컬럼 이름도 `output_columns`로 바꿀 수 있습니다. meta.json과 patches.json에 `um_per_px`를 함께 저장하고, 그 voids.json을 불러오면 Scale 칸에 값을 다시 넣습니다.
+Grid 패널의 **Scale (um/px)**은 1픽셀의 실제 크기입니다. **Measure**(Scale 칸 옆)로 바로 잴 수 있습니다: 누른 뒤 영상에서 길이를 아는 두 점(예: 칩의 양 끝, 피치 몇 칸)을 차례로 클릭하고(선과 px 거리가 표시됨, Esc로 취소) 실제 길이(um)를 넣으면 Scale = 길이 / 픽셀 거리가 들어갑니다. bbox 크기·um 피치도 따라 바뀝니다. 길게 잴수록(확대해서 정확히 찍을수록) 정확합니다. 제품을 다시 고르면 제품의 `um_per_px`가 다시 들어갑니다. 값이 있으면 voids.json / voids.csv에 um 컬럼(`RelativeX_um`, `RelativeY_um`, `RadiusX_um`, `RadiusY_um`, `BBoxRelX_um`, `BBoxRelY_um`)을 채웁니다. 이 컬럼 이름도 `output_columns`로 바꿀 수 있습니다. meta.json과 patches.json에 `um_per_px`를 함께 저장하고, 그 voids.json을 불러오면 Scale 칸에 값을 다시 넣습니다.
 
 ### 업데이트 알림
 

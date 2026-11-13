@@ -256,7 +256,14 @@ class MainWindow(QMainWindow):
         self.sb_um_per_px.setToolTip("How many um one image pixel is. Converts the product's chip size (um) to the\n"
                                      "bbox size in pixels and fills the um columns of voids.json / voids.csv.")
         self.sb_um_per_px.valueChanged.connect(self.on_scale_changed)
-        form.addRow("Scale:", self.sb_um_per_px)
+        btn_measure = QPushButton("Measure")
+        btn_measure.setToolTip("Scale from a known length: click its two ends on the image, then type the real\n"
+                               "length in um (Esc cancels). Scale = length / pixel distance.")
+        btn_measure.clicked.connect(self.measure_scale)
+        h_scale = QHBoxLayout()
+        h_scale.addWidget(self.sb_um_per_px, 1)
+        h_scale.addWidget(btn_measure)
+        form.addRow("Scale:", h_scale)
         
         self.slider_opacity = QSlider(Qt.Horizontal)
         self.slider_opacity.setRange(0, 100)
@@ -959,6 +966,32 @@ class MainWindow(QMainWindow):
         if self.void_manager.apply_bbox_size():
             self.void_manager.resnap(self.glw.grid_cfg, self.glw.coord_transform)
             self.glw.update()
+
+    def measure_scale(self):
+        """Measure: two clicks on the image (GLImageWidget.start_measure), then the real length -> Scale."""
+        if self.full_data is None:
+            return
+        if not getattr(self, "_measure_connected", False):
+            self.glw.measure_done.connect(self._on_measured)
+            self._measure_connected = True
+        self.glw.start_measure()
+        self.statusBar().showMessage("Measure: click the two ends of a known length on the image (Esc cancels)")
+
+    def _on_measured(self, px):
+        from PySide6.QtWidgets import QInputDialog
+        if px < 1.0:
+            self.statusBar().showMessage("Measure: the two points are the same, measure again")
+            return
+        um, ok = QInputDialog.getDouble(self, "Measure Scale", f"Distance on the image: {px:.2f} px\n"
+                                        "Real length (um):", getattr(self, "_measure_last_um", 1000.0), 0.0001, 1e9, 3)
+        if not ok or um <= 0:
+            self.statusBar().showMessage("Measure canceled")
+            return
+        self._measure_last_um = um
+        self.sb_um_per_px.setValue(um / px) # Updates the bbox size and a pitch declared in um
+        msg = f"Scale = {um:g} um / {px:.2f} px = {um / px:.4f} um/px"
+        self.statusBar().showMessage(msg)
+        print(msg)
 
     def on_scale_changed(self, value):
         self.void_manager.um_per_px = value

@@ -166,6 +166,7 @@ class GLImageWidget(QOpenGLWidget):
     cursor_moved = Signal(int, int) # Col, Row
     navigation_requested = Signal(int, int) # Col, Row (Request to move view)
     voids_changed = Signal() # Void data edited (count labels etc.)
+    measure_done = Signal(float) # Measure (scale): distance in image pixels between the two clicked points
     cell_step_requested = Signal(int) # Right click without dragging: +1 next / -1 previous (Shift) cell
 
     def __init__(self):
@@ -1080,6 +1081,10 @@ class GLImageWidget(QOpenGLWidget):
         
         # Emit View Center Info
         self.update_view_center_info()
+        if getattr(self, "measure_points", None):
+            mp = QPainter(self)
+            self._paint_measure(mp)
+            mp.end()
         
         if self.void_manager and self.tiled_image:
              painter = QPainter(self)
@@ -1257,7 +1262,58 @@ class GLImageWidget(QOpenGLWidget):
         
         return gx, gy
 
+    # ---- Measure: two clicked points -> their distance in image pixels (Scale from a known length) ----
+    def start_measure(self):
+        self.measure_points = []
+        self._measure_mouse = None
+        self.setCursor(Qt.CrossCursor)
+        self.setFocus()
+        self.update()
+
+    def cancel_measure(self):
+        self.measure_points = None
+        self._measure_mouse = None
+        self.update_cursor_style()
+        self.update()
+
+    def _image_to_screen(self, gx, gy):
+        """Inverse of get_image_coords (deskewed image coordinates -> widget pixels)."""
+        if self.coord_transform:
+            img_cx, img_cy = self.coord_transform.img_cx, self.coord_transform.img_cy
+        else:
+            img_cx = img_cy = 500
+        return (QPointF(self.width() / 2 + (gx - (img_cx - self.pan_x)) * self.zoom,
+                        self.height() / 2 + (gy - (img_cy - self.pan_y)) * self.zoom))
+
+    def _paint_measure(self, painter):
+        pts = list(getattr(self, "measure_points", None) or [])
+        if not pts:
+            return
+        if len(pts) == 1 and getattr(self, "_measure_mouse", None) is not None:
+            pts.append(self._measure_mouse)
+        sp = [self._image_to_screen(*p) for p in pts]
+        painter.setRenderHint(QPainter.Antialiasing)
+        for color, width in ((QColor(0, 0, 0, 200), 4), (QColor(0, 255, 255), 2)):
+            painter.setPen(QPen(color, width))
+            if len(sp) == 2:
+                painter.drawLine(sp[0], sp[1])
+            for q in sp:
+                painter.drawLine(QPointF(q.x() - 8, q.y()), QPointF(q.x() + 8, q.y()))
+                painter.drawLine(QPointF(q.x(), q.y() - 8), QPointF(q.x(), q.y() + 8))
+        if len(pts) == 2:
+            d = math.hypot(pts[1][0] - pts[0][0], pts[1][1] - pts[0][1])
+            painter.setPen(QColor(0, 255, 255))
+            painter.drawText(sp[1] + QPointF(10, -10), f"{d:.1f} px")
+
     def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and getattr(self, "measure_points", None) is not None:
+            self.measure_points.append(self.get_image_coords(e.position()))
+            self.update()
+            if len(self.measure_points) == 2:
+                (x0, y0), (x1, y1) = self.measure_points
+                self.cancel_measure()
+                self.measure_done.emit(math.hypot(x1 - x0, y1 - y0)) # Deskewed = raw distance (rotation)
+            return
         if e.button() in (Qt.MiddleButton, Qt.RightButton):
             # Pan in every mode (a right click without dragging steps to the next cell, see release)
             self._last_mouse = e.position()
@@ -1355,6 +1411,9 @@ class GLImageWidget(QOpenGLWidget):
     def mouseMoveEvent(self, e):
         # 0. Always calculate grid pos and emit signal
         gx, gy = self.get_image_coords(e.position())
+        if getattr(self, "measure_points", None):
+            self._measure_mouse = (gx, gy) # Rubber line from the first measure point
+            self.update()
         
         # Guard against zero pitch logic/init issues
         if self.grid_cfg.pitch_x > 0 and self.grid_cfg.pitch_y > 0:
@@ -1715,6 +1774,9 @@ class GLImageWidget(QOpenGLWidget):
         self.update()
 
     def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape and getattr(self, "measure_points", None) is not None:
+            self.cancel_measure()
+            return
         modifiers = e.modifiers()
         
         # 1. Ctrl + Arrows : Grid Nudge
