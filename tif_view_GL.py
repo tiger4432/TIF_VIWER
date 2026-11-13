@@ -2290,6 +2290,9 @@ class MainWindow(QMainWindow):
                                        "none (default), linear (gain / offset: chips brighter / darker overall),\n"
                                        "curve (contrast / gamma too)")
         h4b.addWidget(self.cb_stain_match)
+        h4b.addWidget(QLabel("Along"))
+        h4b.addWidget(spin("edge_along_px", "", 0, 1000, 1, 0, "Within this many image px of the chip edge, the median chip's range is taken along the\n"
+                                                                 "edge only: the steep step at the package edge does not hide a stain right at the edge (0 = off)"))
         h4b.addWidget(QLabel("Shift tol"))
         h4b.addWidget(spin("shift_tol_px", "", 0, 100, 1, 0, "Chips may sit this far (image px) off each other: a pixel inside the median chip's\n"
                                                                 "min..max over +- this is no difference (pads / gaps a little off are not stains)"))

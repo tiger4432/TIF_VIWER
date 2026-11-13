@@ -49,6 +49,8 @@ DEFAULTS = {
     "min_depth_px": 6,      # Shallowest stain (image px from the edge): thinner lines along the edge are not stains
     "shift_tol_px": 0,      # A chip pixel within the median chip's min..max over +- this (image px) is no
                             # difference (at least 3x3 working px): pads / gaps a little off are not stains
+    "edge_along_px": 12,    # Within this (image px) of the chip edge the min..max range is taken along the edge
+                            # only (the steep step across the package edge does not hide a stain there; 0 = off)
     "edges": "tblr",        # Edges searched: t(op) b(ottom) l(eft) r(ight), e.g. "tb" for top and bottom only
     "match": "none",        # Per-chip intensity matching onto the median chip, measured on the centre: "none"
                             # (best on the synthetic sets), "linear" (gain / offset), "curve" (monotone curve)
@@ -259,6 +261,20 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
         k_tol = max(3, 2 * int(round(p["shift_tol_px"] / min(sx, sy))) + 1)
         gmin = _filt(golden, ImageFilter.MinFilter(k_tol))
         gmax = _filt(golden, ImageFilter.MaxFilter(k_tol))
+        if p["edge_along_px"] > 0:
+            # Next to the chip edge the median chip changes steeply across the edge (package edge): a min..max
+            # over a square there spans that step and hides a stain right at the edge. There the range is
+            # taken along the edge only (rows near the top / bottom, columns near the left / right)
+            e_y = int(round(p["edge_along_px"] / sy)) + skip_y
+            e_x = int(round(p["edge_along_px"] / sx)) + skip_x
+            row_min = np.minimum.reduce([np.roll(golden, d, axis=1) for d in range(-(k_tol // 2), k_tol // 2 + 1)])
+            row_max = np.maximum.reduce([np.roll(golden, d, axis=1) for d in range(-(k_tol // 2), k_tol // 2 + 1)])
+            col_min = np.minimum.reduce([np.roll(golden, d, axis=0) for d in range(-(k_tol // 2), k_tol // 2 + 1)])
+            col_max = np.maximum.reduce([np.roll(golden, d, axis=0) for d in range(-(k_tol // 2), k_tol // 2 + 1)])
+            near_tb = (yy < e_y) | (yy >= H - e_y)
+            near_lr = (xx < e_x) | (xx >= W - e_x)
+            gmin = np.where(near_tb & ~near_lr, row_min, np.where(near_lr & ~near_tb, col_min, gmin))
+            gmax = np.where(near_tb & ~near_lr, row_max, np.where(near_lr & ~near_tb, col_max, gmax))
         DEV = (np.maximum(A - gmax, 0) - np.maximum(gmin - A, 0)) / spread # > 0 brighter, < 0 darker (outside the envelope)
         if progress is not None and not progress(2 * li + 1, n_steps, f"Edge stains: layer {layer}"):
             return None
