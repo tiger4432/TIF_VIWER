@@ -66,6 +66,8 @@ DEFAULTS = {
     "shading": True,
     "background": 0.0,      # Shading: brightness differences larger than this share of the chip (smoothed, stains left
                             # out) are taken off every chip against the reference (blotches, vignetting); 0 = a quadratic        # Brightness gradient across each chip (plane of chip - median chip) taken off
+    "upright": True,        # Chips turned upright by the grid angle after the pad grid is averaged (Texture >= 2): the
+                            # edges run along the rows / columns of the work image
     "subpixel": True,       # After the pad grid is averaged (Texture >= 2): the chips also moved by the part of a px
                             # (interpolated: smooth now, no moire), so they sit within ~0.1 px of the reference
     "align": "image",       # Chip positions: "image" (aligned on the image, whole px) or "bbox" (the bboxes as they are:
@@ -360,8 +362,24 @@ def _box_sum(a, k):
     return sum(rows[:, j:j + w] for j in range(k)) / float(k * k)
 
 
+def _rotate_bilinear(a, out_h, out_w, c, s):
+    """a (centred) sampled on an out_h x out_w grid turned by (cos, sin) (output offsets -> input offsets:
+    x' = c x - s y, y' = s x + c y), bilinear, edges extended."""
+    h, w = a.shape
+    yy, xx = np.mgrid[0:out_h, 0:out_w].astype(np.float32)
+    u, v = xx + 0.5 - out_w / 2.0, yy + 0.5 - out_h / 2.0
+    X = c * u - s * v + w / 2.0 - 0.5
+    Y = s * u + c * v + h / 2.0 - 0.5
+    x0, y0 = np.floor(X).astype(np.int32), np.floor(Y).astype(np.int32)
+    fx, fy = X - x0, Y - y0
+    x0c, x1c = np.clip(x0, 0, w - 1), np.clip(x0 + 1, 0, w - 1)
+    y0c, y1c = np.clip(y0, 0, h - 1), np.clip(y0 + 1, 0, h - 1)
+    return ((a[y0c, x0c] * (1 - fx) + a[y0c, x1c] * fx) * (1 - fy) +
+            (a[y1c, x0c] * (1 - fx) + a[y1c, x1c] * fx) * fy).astype(np.float32)
+
+
 def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tick=None, texture_k=0, plain=False, align=True,
-               subpixel=False):
+               subpixel=False, rot=None):
     """
     Chips cut from the raw image as they lie (no rotation, no resampling: a pad grid of about 1 px at
     a small angle gives no moire), moved onto the median chip by whole image px only (measured by
@@ -374,6 +392,7 @@ def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tic
     from .void_detect import _blur, _phase_shift
     H, W = Hr // f, Wr // f
     mh, mw = int(H * (1 - frac) / 2), int(W * (1 - frac) / 2)
+    rot_e = (int(math.ceil(max(Hr, Wr) * abs(rot[1]) / 2.0)) + 2 * f + f) if rot is not None else 0
     cen = lambda a: a[mh:H - mh, mw:W - mw]
 
     def windows(cells, span):
@@ -403,12 +422,16 @@ def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tic
         """The chip moved by (sx, sy) whole px, the pad grid averaged out at the raw resolution (box of texture_k
         px: before the reduction, so it is flat wherever the pads fall in the blocks: no beat pattern), reduced."""
         sx, sy = int(np.clip(sx, -M, M)), int(np.clip(sy, -M, M))
-        if avg and texture_k > 1:
-            y0, x0 = M + sy - texture_k // 2, M + sx - texture_k // 2
-            a = _box_sum(win, texture_k)[y0 + texture_k // 2:y0 + texture_k // 2 + Hr, x0 + texture_k // 2:x0 + texture_k // 2 + Wr]
-        else:
-            a = win[M + sy:M + sy + Hr, M + sx:M + sx + Wr]
-        return _reduce(a, f).astype(np.float32)
+        src = _box_sum(win, texture_k) if (avg and texture_k > 1) else win
+        if rot is None:
+            return _reduce(src[M + sy:M + sy + Hr, M + sx:M + sx + Wr], f).astype(np.float32)
+        # Turned upright (grid angle) after the reduction: the chip edges run along the rows / columns. With the pad
+        # grid averaged the chip is smooth and the interpolation makes no moire. A margin e (whole blocks) around it
+        # keeps the corners
+        e = min(rot_e, M - max(abs(sx), abs(sy)))
+        e -= e % f
+        a = _reduce(src[M + sy - e:M + sy + Hr + e, M + sx - e:M + sx + Wr + e], f)
+        return _rotate_bilinear(a.astype(np.float32), H, W, rot[0], rot[1])
 
     sig = max(1.5, max(H, W) / 100.0) # Working px: blur for the coarse alignment (a pad grid is gone)
     hw, ww = Hr // f + 2 * (M // f), Wr // f + 2 * (M // f)
@@ -576,12 +599,16 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
         tk = trace.get("cell") if trace is not None else None
         # The cut chips are kept for the next run on the same image / layer / bboxes / size (settings changed and
         # run again: no reading and aligning again)
+        # Grid angle: the chips are turned upright after the pad grid is averaged (needs Texture >= 2: else they stay as
+        # they lie in the image, a pad grid of 1 px would make a moire)
+        ang = float(getattr(coord_transform, "angle", 0.0) or 0.0) if coord_transform else 0.0
         use_ssim = p["compare"] in ("ssim", "both")
         texture_k = int(round(p["texture_px"])) if p["texture_px"] >= 1.5 else 0
         plain = use_ssim and texture_k > 1
+        rot = (math.cos(math.radians(ang)), math.sin(math.radians(ang))) if (p["upright"] and texture_k > 1 and abs(ang) > 1e-4) else None
         key = (id(stack), getattr(stack, "path", None), stack.width, stack.height, z,
                hash(tuple(sorted(origin.items()))), Wr, Hr, f, M, p["register_frac"], texture_k, plain, p["align"],
-               p["subpixel"])
+               p["subpixel"], rot)
         hit = _CUT_CACHE.get(key)
         if hit is not None:
             cut = dict(hit)
@@ -595,7 +622,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             cut = _raw_chips(stack, z, origin, Wr, Hr, f, M, p["register_frac"], keep=trace,
                              tick=lambda stage, i, n, li=li, layer=layer: tick(li, layer, stage, i, n),
                              texture_k=texture_k, plain=plain, align=p["align"] != "bbox",
-                             subpixel=bool(p["subpixel"]) and texture_k > 1)
+                             subpixel=bool(p["subpixel"]) and texture_k > 1, rot=rot)
             if cut is None:
                 return None
             if len(_CUT_CACHE) >= 4: # A few layers at most (memory)
@@ -605,6 +632,14 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             continue
         keys = [k for k in order if k in cut]
         at = {k: cut[k][1] for k in keys} # Raw top-left of every chip as cut
+        if rot is not None: # Upright chips: their pixels are Deskewed (top-left = the cut centre, Deskewed, - half the size)
+            def dk_of(k):
+                cx_, cy_ = to_deskew(at[k][0] + Wr / 2.0, at[k][1] + Hr / 2.0)
+                return cx_ - Wr / 2.0, cy_ - Hr / 2.0
+            to_d = lambda x, y: (x, y)
+        else: # As they lie: raw pixels
+            dk_of = lambda k: at[k]
+            to_d = to_deskew
         chips = {k: _normalize(cut[k][0]) for k in keys}
         cut_plain = {k: cut[k][2] for k in keys} if plain else None
         if tk in cut and "window" in trace:
@@ -1001,14 +1036,14 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                     "lines": np.packbits(lines), "area": np.packbits(area_all),
                     "why": [d for d in (dbg or []) if d[0] == k], "found": len(groups)}
             if shown: # Show mask: dark specks (red), joined lines (yellow), stain areas (cyan), as segmented
-                mx, my = to_deskew(*at[k])
+                mx, my = to_d(*dk_of(k))
                 masks[k] = ((mx, my, float(Wr), float(Hr)), (H, W), np.packbits(specks & edges), np.packbits(area_all),
                             np.packbits(lines))
-            ox, oy = at[k]
+            ox, oy = dk_of(k) # Deskewed top-left of the chip as cut (upright) / raw (as it lies)
             for full, sc in groups:
                 rows, cols = np.nonzero(full)
                 r0, r1, c0, c1 = rows.min(), rows.max(), cols.min(), cols.max() + 1
-                corners = [to_deskew(ox + c * sx, oy + r * sy) for c, r in ((c0, r0), (c1, r0), (c0, r1 + 1), (c1, r1 + 1))]
+                corners = [to_d(ox + c * sx, oy + r * sy) for c, r in ((c0, r0), (c1, r0), (c0, r1 + 1), (c1, r1 + 1))]
                 gx0, gx1 = min(q[0] for q in corners), max(q[0] for q in corners)
                 gy0, gy1 = min(q[1] for q in corners), max(q[1] for q in corners)
                 if any(not (gx1 < a0 or a1 < gx0 or gy1 < b0 or b1 < gy0) for a0, b0, a1, b1 in taken.get(k, ())):
@@ -1019,7 +1054,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                     """Pixel centre, but the first / last pixel row or column on the chip edge itself (the outline
                     lies on the chip edge, not half a pixel inside)"""
                     return 0.0 if v <= 0 else float(n) if v >= n - 1 else v + 0.5
-                outline = [to_deskew(ox + at_edge(c0 + px, W) * sx, oy + at_edge(r0 + py, H) * sy) for py, px in _contour(part)]
+                outline = [to_d(ox + at_edge(c0 + px, W) * sx, oy + at_edge(r0 + py, H) * sy) for py, px in _contour(part)]
                 found.append((layer, (gx0 + gx1) / 2, (gy0 + gy1) / 2, (gx1 - gx0) / 2, (gy1 - gy0) / 2, k, sc, outline))
     return found
 
