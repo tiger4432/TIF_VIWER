@@ -245,7 +245,8 @@ class MainWindow(QMainWindow):
         
         self.sb_angle = QDoubleSpinBox(); self.sb_angle.setRange(-180, 180); self.sb_angle.setValue(0.0)
         self.sb_angle.setDecimals(3) # Fit Grid gives the angle to 0.001 deg
-        self.sb_angle.setSingleStep(0.1)
+        # Arrow keys / wheel: 0.001 deg (config ui_defaults "angle_step"); PgUp / PgDn: x10
+        self.sb_angle.setSingleStep(float((self._config().get("ui_defaults") or {}).get("angle_step", 0.001)))
         form.addRow("Angle:", self.sb_angle)
 
         # Pixel size: chip / layout declarations in um -> pixels, um columns of the exports
@@ -839,6 +840,7 @@ class MainWindow(QMainWindow):
             "export": lambda v: None, # Read by the export dialog when it opens
             "void_line_width": lambda v: setattr(self.glw, "void_line_width", max(0.5, float(v))),
             "void_min_px": lambda v: setattr(self.glw, "void_min_px", max(0.0, float(v))),
+            "angle_step": lambda v: self.sb_angle.setSingleStep(max(1e-3, float(v))),
             "snr_min": lambda v: self.sb_snr.setValue(float(v)),
             "origin_x": lambda v: self.sb_grid_x.setValue(float(v)),
             "origin_y": lambda v: self.sb_grid_y.setValue(float(v)),
