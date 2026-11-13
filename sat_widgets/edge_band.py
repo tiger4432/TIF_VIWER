@@ -68,6 +68,9 @@ DEFAULTS = {
                             # out) are taken off every chip against the reference (blotches, vignetting); 0 = a quadratic        # Brightness gradient across each chip (plane of chip - median chip) taken off
     "upright": True,        # Chips turned upright by the grid angle after the pad grid is averaged (Texture >= 2): the
                             # edges run along the rows / columns of the work image
+    "warp_tiles": 0,        # Local alignment: every chip moved onto the reference in n x n tiles (a chip bent a little:
+                            # the pads closer here, farther there, the layout shows in the deviation); 0 = off
+    "warp_px": 3.0,         # ... a tile moved at most this far (image px)
     "subpixel": True,       # After the pad grid is averaged (Texture >= 2): the chips also moved by the part of a px
                             # (interpolated: smooth now, no moire), so they sit within ~0.1 px of the reference
     "align": "image",       # Chip positions: "image" (aligned on the image, whole px) or "bbox" (the bboxes as they are:
@@ -362,6 +365,48 @@ def _box_sum(a, k):
     h, w = a.shape
     rows = sum(p[i:i + h, :] for i in range(k))
     return sum(rows[:, j:j + w] for j in range(k)) / float(k * k)
+
+
+def _local_align(a, ref, n, max_shift):
+    """a moved onto ref piece by piece (a chip bent a little: pads closer here, farther there): the shift of each
+    of n x n overlapping tiles (phase correlation, within max_shift working px), smoothed over the neighbours
+    (median 3 x 3, a stain does not pull its tile), interpolated over the chip and applied (bilinear: the chip is
+    smooth, its pad grid averaged). Returns (moved a, (n, n, 2) tile shifts)."""
+    h, w = a.shape
+    rad = max(1, int(math.ceil(max_shift)))
+    sh = np.zeros((n, n, 2), np.float32)
+    th, tw = h / n, w / n
+    for i in range(n):
+        for j in range(n):
+            cy, cx = (i + 0.5) * th, (j + 0.5) * tw
+            y0, y1 = int(max(0, cy - th)), int(min(h, cy + th))
+            x0, x1 = int(max(0, cx - tw)), int(min(w, cx + tw))
+            if y1 - y0 < 8 or x1 - x0 < 8:
+                continue
+            dx, dy = _peak_near(a[y0:y1, x0:x1], ref[y0:y1, x0:x1], 0, 0, rad)
+            if math.isfinite(dx) and math.isfinite(dy) and max(abs(dx), abs(dy)) <= max_shift:
+                sh[i, j] = (dx, dy)
+    if n >= 3: # Median over the 3 x 3 neighbours
+        pad = np.pad(sh, ((1, 1), (1, 1), (0, 0)), mode="edge")
+        sh = np.median(np.stack([pad[di:di + n, dj:dj + n] for di in range(3) for dj in range(3)]), axis=0)
+    # Bilinear interpolation of the tile shifts (at the tile centres) over the chip
+    gy = np.clip((np.arange(h) + 0.5) / th - 0.5, 0, n - 1)
+    gx = np.clip((np.arange(w) + 0.5) / tw - 0.5, 0, n - 1)
+    iy0, ix0 = np.minimum(gy.astype(int), n - 2) if n > 1 else gy.astype(int), np.minimum(gx.astype(int), n - 2) if n > 1 else gx.astype(int)
+    fy, fx = (gy - iy0)[:, None], (gx - ix0)[None, :]
+    iy1, ix1 = np.minimum(iy0 + 1, n - 1), np.minimum(ix0 + 1, n - 1)
+    field = []
+    for c in range(2):
+        g = sh[..., c]
+        field.append((g[iy0][:, ix0] * (1 - fx) + g[iy0][:, ix1] * fx) * (1 - fy) + (g[iy1][:, ix0] * (1 - fx) + g[iy1][:, ix1] * fx) * fy)
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    X, Y = xx + field[0], yy + field[1] # a sampled at x + shift: the shift undone
+    x0_, y0_ = np.floor(X).astype(np.int32), np.floor(Y).astype(np.int32)
+    ffx, ffy = X - x0_, Y - y0_
+    xa, xb = np.clip(x0_, 0, w - 1), np.clip(x0_ + 1, 0, w - 1)
+    ya, yb = np.clip(y0_, 0, h - 1), np.clip(y0_ + 1, 0, h - 1)
+    out = (a[ya, xa] * (1 - ffx) + a[ya, xb] * ffx) * (1 - ffy) + (a[yb, xa] * (1 - ffx) + a[yb, xb] * ffx) * ffy
+    return out.astype(np.float32), sh
 
 
 def _rotate_bilinear(a, out_h, out_w, c, s):
@@ -868,6 +913,20 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                     r_s = reference(sel, sample)
                     new = tuple(np.where(m, a_s, a_all) for a_s, a_all in zip(r_s, new))
                 ref = new
+        if p["warp_tiles"] >= 2:
+            # A chip bent a little (pads closer here, farther there): every chip moved onto the reference piece by piece,
+            # then the reference made again from the moved chips
+            for wi, k in enumerate(keys):
+                chips[k], _sh = _local_align(chips[k], ref[0], int(p["warp_tiles"]), p["warp_px"] / f)
+                if k == tk:
+                    trace.setdefault("info", []).append(
+                        f"local alignment (Warp {int(p['warp_tiles'])} x {int(p['warp_tiles'])}): tiles moved up to "
+                        f"{float(np.abs(_sh).max()) * f:.1f} image px")
+                if not tick(li, layer, "reference", wi + 1, len(keys)):
+                    return None
+            ref = reference(gold or clean, sample)
+            if steps is not None and tk in chips:
+                steps.append(("4c moved piece by piece onto the reference (Warp)", chips[tk], "gray"))
         ref = with_ssim(ref, gold or clean, None if gold else
                         [(m_, list(strip_clean[sd])) for _, m_, sd in strips if sd in strip_clean])
         if steps is not None:

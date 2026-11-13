@@ -46,6 +46,8 @@
 | Along | `edge_along_px` | 4 | 칩 경계에서 이 거리(px) 안은 기준 범위를 변 방향으로만(0=끔) | 경계 바로 옆 오염을 놓치면 ↑ |
 | Shift tol | `shift_tol_px` | 0 | 칩끼리 어긋남 허용(px; 0이어도 3×3) | 패드·틈이 잡히면 ↑ |
 | Align | `align` | "image" | 칩 위치: image = 영상으로 맞춤(정수 px), bbox = bbox 위치 그대로(Edge BBOX 후) | Debug에 "off by"가 크고 9번에 레이아웃이 보이면 Edge BBOX → bbox |
+| Warp | `warp_tiles` | 0 | 국부 위치 맞춤: 칩을 Warp×Warp 조각으로 나눠 조각마다 기준 칩에 맞춤(칩이 국부적으로 휘어 패드 간격이 다를 때) | 9번에 레이아웃이 곳곳에 남으면 4~8 |
+| Warp px | `warp_px` | 3 | 한 조각이 움직일 최대 거리(px) | 휨이 크면 ↑ |
 | Bg % | `background` | 0 | Shading: 칩−기준 칩의 밝기 차이 중 칩 크기의 이 비율보다 큰 것(얼룩·비네팅)을 오염 빼고 매끈하게 추정해 뺌(config는 비율; 0 = 2차 곡면) | 9번에 큰 얼룩이 남으면 5~10 |
 | Edges T B L R | `edges` | "tblr" | 볼 변 | 상하단만: "tb" |
 | Match | `match` | "none" | 칩 밝기 맞춤(칩 가운데로): none / linear / curve | 칩마다 전체 밝기가 다르면 linear |
@@ -92,6 +94,7 @@
 | 〃 코너 | 기준에 코너 오염이 섞임 | Golden, Clean % 0 |
 | **잘못 잡음**: 9번이 패드 격자 모양으로 파람 | 패드 평균이 패드 간격과 안 맞음 | Texture = 패드 간격(한 칸 건너 하나 = 2) |
 | 〃 9번에 레이아웃(칩 무늬)이 보이고 글에 off by가 큼 | 칩 위치 어긋남 | Edge BBOX(Edge pick, Edge debug로 확인) → Align = bbox, 또는 Align tol ↑ |
+| 〃 9번에 레이아웃이 칩 곳곳에(부분마다 다르게) 남음 | 칩이 국부적으로 휨(패드 간격이 곳곳에서 다름) | Warp 4~8(Warp px는 휨 크기), Align tol 2 |
 | 〃 9번에 칩 변을 따라 얇은 선 | 경계에서 조금 어긋남 | Align tol ↑, Skip ↑ |
 | 〃 9번에 기울기·비네팅 | 칩마다 조명 다름 | Shading 켬, Bg % 5~10 |
 | 〃 9번에 큰 얼룩 | 칩마다 배경 밝기 다름 | Bg % 5~10 |
