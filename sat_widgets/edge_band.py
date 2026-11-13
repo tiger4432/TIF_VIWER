@@ -78,6 +78,8 @@ DEFAULTS = {
                             # (spreads, mean) to be a stain; 0 = not checked (the dark line decides)
     "speck_density": 0.06,  # Segmentation: share of specks around a speck (merge radius box), at least:
                             # the rim's specks are dense, scattered noise / layout specks are not
+    "per_edge": False,      # Reference per edge strip from the chips cleanest at that edge, pieced together (mosaic);
+                            # False: one reference from the chips cleanest at all edges together
     "clean_ref": 0.0,       # Reference (median chip, spread) from this share of the chips that differ least
                             # (at most 64; 1 = a sample of all): stains at the same place on many chips
                             # (long ones, corners) do not get into the reference
@@ -858,7 +860,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                 clean = cleanest(0)
                 new = reference(gold or clean, sample)
                 strip_clean = {}
-                for j, (side, m) in enumerate(regions):
+                for j, (side, m) in enumerate(regions if p["per_edge"] else []):
                     sel = cleanest(j + 1)
                     strip_clean[side] = sel
                     if gold:

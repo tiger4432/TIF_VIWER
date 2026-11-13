@@ -2465,6 +2465,11 @@ class MainWindow(QMainWindow):
         self.cb_stain_align.setToolTip("Chip positions: image = aligned on the image (whole px); bbox = the bboxes as they are\n"
                                        "(use after Edge BBOX when the layout still shows in Debug 9: the image alignment is off)")
         h4b.addWidget(self.cb_stain_align)
+        self.chk_stain_per_edge = QCheckBox("Per edge")
+        self.chk_stain_per_edge.setChecked(bool(cfg.get("per_edge", False)))
+        self.chk_stain_per_edge.setToolTip("Reference pieced together per edge (mosaic): each edge strip from the chips cleanest\n"
+                                           "there. Off (default): one reference from the chips cleanest at all edges together")
+        h4b.addWidget(self.chk_stain_per_edge)
         h4b.addWidget(QLabel("Clean %"))
         h4b.addWidget(spin("clean_ref", "", 0, 100, 5, 0, "Reference (median chip, spread) per edge from the chips cleanest at that edge:\n"
                                                          "0 = automatic (the clean group: within 1.5 x the cleanest 10 %, 8 .. half of the chips),\n"
@@ -2533,6 +2538,8 @@ class MainWindow(QMainWindow):
                 out[k] /= 100.0
         if getattr(self, "cb_stain_compare", None) is not None:
             out["compare"] = self.cb_stain_compare.currentData()
+        if getattr(self, "chk_stain_per_edge", None) is not None:
+            out["per_edge"] = self.chk_stain_per_edge.isChecked()
         if getattr(self, "cb_stain_align", None) is not None:
             out["align"] = self.cb_stain_align.currentData()
         if getattr(self, "chk_stain_shading", None) is not None:
