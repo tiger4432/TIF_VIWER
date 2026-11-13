@@ -1447,14 +1447,15 @@ class GLImageWidget(QOpenGLWidget):
                  v = self.active_void
                  vm = self.void_manager
                  anchor = vm.snap_anchor(v)
-                 k = vm.corner_for_box((bx0, by0, bx1, by1), self.grid_cfg, self.coord_transform) if anchor else None
+                 # Corner-snap types: the bbox corner nearest to the FIRST click (press point), whatever
+                 # the drag direction; on release the shape spans that corner -> the box point farthest
+                 # from it (see _snap_on_release)
+                 k = vm.corner_for_box((start_x, start_y, start_x, start_y), self.grid_cfg, self.coord_transform) if anchor else None
                  if k is not None:
-                     # Corner-snap types: the bbox corner nearest to the drawn box; on release the
-                     # shape spans that corner -> the box point farthest from it (see _snap_on_release)
                      _, _, ix, iy = k
                      near = (bx0 if ix > 0 else bx1, by0 if iy > 0 else by1)
                      far = (bx1 if ix > 0 else bx0, by1 if iy > 0 else by0)
-                     self._snap_hint, self._snap_drag_point = near, far
+                     self._snap_hint, self._snap_drag_point = (start_x, start_y), far
                  if k is not None and anchor == "center":
                      # Quadrant shape inside the drawn box, oriented as it will attach
                      cx, cy = near
