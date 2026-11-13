@@ -398,7 +398,10 @@ def _local_align(a, ref, n, max_shift):
     field = []
     for c in range(2):
         g = sh[..., c]
-        field.append((g[iy0][:, ix0] * (1 - fx) + g[iy0][:, ix1] * fx) * (1 - fy) + (g[iy1][:, ix0] * (1 - fx) + g[iy1][:, ix1] * fx) * fy)
+        f_ = (g[iy0][:, ix0] * (1 - fx) + g[iy0][:, ix1] * fx) * (1 - fy) + (g[iy1][:, ix0] * (1 - fx) + g[iy1][:, ix1] * fx) * fy
+        # Smoothed over half a tile: the straight interpolation bends at the tile centres, where the chip would be
+        # stretched / squeezed more on one side (it showed as lines along the tile rows / columns)
+        field.append(_gauss(f_.astype(np.float32), 0.5 * min(th, tw)))
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
     X, Y = xx + field[0], yy + field[1] # a sampled at x + shift: the shift undone
     x0_, y0_ = np.floor(X).astype(np.int32), np.floor(Y).astype(np.int32)
