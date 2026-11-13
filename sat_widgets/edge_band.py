@@ -588,22 +588,46 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
         gold = [k for k in (tuple(c) for c in (p.get("golden_cells") or [])) if k in chips]
         ref = reference(gold or sample, None if gold else sample)
         clean = sample
+        strip_clean = {}
         if p["clean_ref"] < 1.0:
-            dirt = {}
-            for i, k in enumerate(keys):
-                dirt[k] = float(np.clip(np.abs(dev_of(k, ref)[edges]), 0, 10).mean())
-                if not tick(li, layer, "reference", i + 1, len(keys)):
-                    return None
-            n_clean = max(min(8, len(keys)), int(round(p["clean_ref"] * len(keys))))
-            clean = sorted(keys, key=lambda k: dirt[k])[:min(64, n_clean)]
-        ref = reference(gold or clean, clean)
+            # Cleanest chips per edge strip (a chip stained at the top may be clean at the bottom): each strip's part
+            # of the reference comes from the chips cleanest there, the rest from the chips cleanest overall.
+            # Twice: the second pass measures against the reference of the first
+            n_clean = min(64, max(min(8, len(keys)), int(round(p["clean_ref"] * len(keys)))))
+            regions = [(side, strip) for _, strip, side in strips]
+            for it in range(2):
+                dirt = {k: [] for k in keys}
+                for i, k in enumerate(keys):
+                    a = np.clip(np.abs(dev_of(k, ref)), 0, 10)
+                    dirt[k] = [float(a[edges].mean())] + [float(a[m].mean()) for _, m in regions]
+                    if not tick(li, layer, "reference", it * len(keys) // 2 + (i + 1) // 2, len(keys)):
+                        return None
+                def cleanest(j):
+                    """The chips cleanest by dirt[.][j]: those within 1.5 x the 10 % quantile (the clean cluster:
+                    stained chips are well above it), at least 8, at most n_clean"""
+                    order_ = sorted(keys, key=lambda k: dirt[k][j])
+                    q = dirt[order_[max(0, int(0.1 * len(order_)) - 1)]][j]
+                    n = sum(1 for k in order_ if dirt[k][j] <= 1.5 * q + 1e-6)
+                    return order_[:max(min(8, len(order_)), min(n_clean, n))]
+                clean = cleanest(0)
+                new = reference(gold or clean, clean)
+                strip_clean = {}
+                for j, (side, m) in enumerate(regions):
+                    sel = cleanest(j + 1)
+                    strip_clean[side] = sel
+                    if gold:
+                        continue # Golden chips picked: their median everywhere, only the spread per strip
+                    r_s = reference(sel, sel)
+                    new = tuple(np.where(m, a_s, a_all) for a_s, a_all in zip(r_s, new))
+                ref = new
         ref = with_ssim(ref, clean)
         if steps is not None:
             if trace.get("cell") in chips:
                 trace["info"] = [f"reduction {f} (image px per working px), chip {Wr} x {Hr} image px",
                                  (f"reference: {len(gold)} golden chips picked, spread from {len(clean)} chips" if gold else
-                                  f"reference: {len(clean)} of {len(keys)} chips (clean_ref {p['clean_ref']})") +
-                                 f", traced chip {'in' if tk in (gold or clean) else 'not in'} it"]
+                                  f"reference: per edge the {len(clean)} of {len(keys)} chips cleanest there (clean_ref {p['clean_ref']})") +
+                                 f", traced chip {'in' if tk in (gold or clean) else 'not in'} it" +
+                                 "".join(f"; {side}: {'in' if tk in sel else 'not in'}" for side, sel in strip_clean.items())]
             steps.append(("5 median chip (reference)", ref[0], "gray"))
             steps.append(("6 chip-to-chip spread", ref[1], "gray"))
             steps.append(("7 reference min (envelope)", ref[2], "gray"))
