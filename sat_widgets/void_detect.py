@@ -40,7 +40,8 @@ Parameters (config.json "void_detect", defaults in DEFAULTS):
                      pixel (sharper outlines, misses large faint voids)
     type_rules       void type from the layout position and shape (sat_widgets/void_classify.py);
                      products.json "type_rules" of the selected product win
-    method           "die_to_die" (default), "patchcore" (CNN features, optional: needs
+    method           "die_to_die" (default), "ssim" (die-to-die on the local structure, shift-robust:
+                     ss_sigma window, ss_shift px search; see _ssim), "patchcore" (CNN features, optional: needs
                      onnxruntime and models/*.onnx, see docs/PATCHCORE.md; pc_* parameters) or
                      "layer_change" (all layers at once: each layer explained from the layers above
                      it and the golden chips; lc_* parameters, see void_layer_change.py)
@@ -521,7 +522,7 @@ def detect_voids(stack, grid_cfg, coord_transform, refs, cells, layer_numbers, v
             else:
                 src, shifts = chips, {}
             dctx = {"shifts": shifts}
-            items = _die_to_die(src, p, diag, dctx)
+            items = (_ssim if p["method"] == "ssim" else _die_to_die)(src, p, diag, dctx)
             dump = p.get("dump")
             if dump is not None:
                 # Training data (sat_widgets/void_seg.py): the chips as the detector sees them
@@ -896,6 +897,73 @@ def _blur(a, sigma):
     h, w = a.shape
     tmp = sum(k[i] * pad[:, i:i + w] for i in range(2 * r + 1))
     return sum(k[i] * tmp[i:i + h, :] for i in range(2 * r + 1)).astype(np.float32)
+
+
+def _ssim(chips, p, diag=None, ctx=None):
+    """
+    Method "ssim": die-to-die on structure. Each matched chip (as _die_to_die: brightness / contrast
+    / shading onto the golden chip) is compared with the golden chip by the local SSIM (Gaussian
+    window ss_sigma, working px). Shift-robust: the golden chip is moved by up to ss_shift px each
+    way and every pixel keeps its best SSIM, so a residual misalignment of a few px (after the
+    per-chip registration) is not a defect. The dissimilarity 1 - SSIM is then compared like a chip
+    against its per-pixel median and chip-to-chip spread over a sample of chips (layout edges, which
+    vary from chip to chip, stay quiet), so the Thr is in spreads as for die-to-die.
+    Yields (cell, deviation map, sign, matched chip) like _die_to_die.
+    """
+    spread, gmin, gmax, match = _golden(chips, p)
+    if diag is not None:
+        diag.golden(match.golden, spread)
+    if ctx is not None:
+        ctx.update(golden=match.golden, spread=spread, sp_med=float(np.median(spread)))
+    golden = match.golden.astype(np.float32)
+    sig = float(p.get("ss_sigma", 1.5))
+    k = int(p.get("ss_shift", 2))
+    lo, hi = np.percentile(golden, [1, 99])
+    L = max(float(hi - lo), 1e-3)
+    C1, C2 = (0.01 * L) ** 2, (0.03 * L) ** 2
+    blur = lambda a: _blur(a, sig)
+
+    def shifted(a, dx, dy):
+        return np.roll(np.roll(a, dy, axis=0), dx, axis=1) if (dx or dy) else a
+
+    gstats = []
+    for dy in range(-k, k + 1):
+        for dx in range(-k, k + 1):
+            g = shifted(golden, dx, dy)
+            mu = blur(g)
+            gstats.append((dx, dy, g, mu, blur(g * g) - mu * mu))
+
+    def matched(cell):
+        m = match.apply(chips[cell].astype(np.float32))
+        if match.fit is not None:
+            m = match.fit.apply(m)
+        return m.astype(np.float32)
+
+    def dissim(m):
+        mu_m = blur(m)
+        var_m = blur(m * m) - mu_m * mu_m
+        best = None
+        for dx, dy, g, mu_g, var_g in gstats:
+            cov = blur(m * g) - mu_m * mu_g
+            ss = ((2 * mu_m * mu_g + C1) * (2 * cov + C2)) / ((mu_m ** 2 + mu_g ** 2 + C1) * (var_m + var_g + C2))
+            best = ss if best is None else np.maximum(best, ss)
+        if k:
+            best[:k] = best[-k:] = 1.0 # Rolled-in border rows / columns are not compared
+            best[:, :k] = best[:, -k:] = 1.0
+        return 1.0 - best
+
+    keys = list(chips)
+    n = min(len(keys), int(p["template_cells"]), 64)
+    sample = np.stack([dissim(matched(keys[i])) for i in np.linspace(0, len(keys) - 1, n).astype(int)])
+    s_med = np.median(sample, axis=0)
+    s_spread = np.quantile(np.abs(sample - s_med), 0.9, axis=0) / 1.6449 * (4.0 / 3.0) # As _die_to_die (smooth)
+    del sample
+    s_spread = _filt(s_spread, ImageFilter.MaxFilter(3))
+    s_spread = np.maximum(s_spread, 0.5 * float(np.median(s_spread)) + 1e-4)
+    for cell in chips:
+        m = matched(cell)
+        d = (dissim(m) - s_med) / s_spread
+        yield cell, np.maximum(d, 0.0), np.sign(blur(m - golden)), m
 
 
 def _die_to_die(chips, p, diag=None, ctx=None):

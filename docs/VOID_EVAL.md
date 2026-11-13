@@ -28,7 +28,7 @@ S1 d6 3 1 37 22 bt33 dup2
 | 위치 | 뜻 |
 |---|---|
 | 1줄 `S1` | 짧은 코드 버전 |
-| `d6` / `l6` / `c26` / `k26` / `p10` | Die-to-die / Die-to-die + 학습 필터 / Layer change / Layer change + 학습 필터 / PatchCore, 임계값 (Layer change의 `pk`는 그 레이어의 증거 ÷ 임계값) |
+| `d6` / `l6` / `c26` / `k26` / `m4` / `p10` | Die-to-die / Die-to-die + 학습 필터 / Layer change / Layer change + 학습 필터 / SSIM die-to-die / PatchCore, 임계값 (Layer change의 `pk`는 그 레이어의 증거 ÷ 임계값) |
 | 다음 네 숫자 | ok(찾음), ly(다른 레이어), ms(놓침), fp(잘못 잡음) |
 | 나머지 | 많은 놓친 이유 2개 (`M` 줄과 같은 코드) |
 | 2줄 첫 네 숫자 | 임계값 미달로 놓친 것의 중앙값: `pk`×100, `s`×100, `c`×100, `z` (아래 `B` 줄과 같음) |

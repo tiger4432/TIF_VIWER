@@ -5,6 +5,10 @@
 - **git checkout(git bundle로 업데이트):** `defaults\` 폴더는 없습니다. `plugins\results_api.py`도 업데이트(merge)로 새 버전이 되고, 현장에서 고친 내용은 `--autostash`가 그 위에 다시 얹습니다(같은 줄을 고쳤으면 git이 충돌로 알림). 아래 노트의 "`defaults\`에서 옮겨 붙이세요"는 zip 설치에만 해당합니다.
 - **zip 설치:** 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다(새 기본값은 zip 안의 `defaults\`).
 
+## 1.1.29
+
+- **Detect Voids 방법 "SSIM die-to-die"(실험):** 기준 칩과 국소 구조(SSIM) 비교, 칩 정렬 + ±2 px 탐색으로 어긋남에 강건. 단일 레이어 이미지에도. 합성 데이터에서는 die-to-die보다 낫다는 결과가 없어(둘 다 Layer change에 크게 못 미침) 실제 데이터에서 Evaluate(코드 `m`)로 비교가 필요합니다.
+
 ## 1.1.28
 
 - **Ctrl+C로 칩 이미지 복사:** 영상 위에서 Ctrl+C → 마우스 아래 칩(영상 밖이면 화면 가운데 칩)을 마킹·layout·제목줄이 들어간 overlay 이미지로 클립보드에. 붙여넣기만 하면 됩니다.

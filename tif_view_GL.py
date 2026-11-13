@@ -506,6 +506,7 @@ class MainWindow(QMainWindow):
         self.cb_detect_method = QComboBox()
         self.cb_detect_method.addItem("Die-to-die", ("die_to_die", None))
         self.cb_detect_method.addItem("Layer change", ("layer_change", None))
+        self.cb_detect_method.addItem("SSIM die-to-die", ("ssim", None))
         self.cb_detect_method.addItem("PatchCore MobileNetV2", ("patchcore", "models/patchcore_mobilenetv2.onnx"))
         self.cb_detect_method.addItem("PatchCore ResNet50", ("patchcore", "models/patchcore_resnet50.onnx"))
         self.cb_detect_method.addItem("Segmentation U-Net", ("segmentation", "models/void_unet.onnx"))
@@ -2051,6 +2052,7 @@ class MainWindow(QMainWindow):
         default = cfg.get("pc_threshold", patchcore.DEFAULTS["pc_threshold"]) if method == "patchcore" else \
             cfg.get("seg_threshold", 5.0) if method == "segmentation" else \
             cfg.get("lc_threshold", void_layer_change.DEFAULTS["lc_threshold"]) if method == "layer_change" else \
+            cfg.get("ss_threshold", cfg.get("threshold", void_detect.DEFAULTS["threshold"])) if method == "ssim" else \
             cfg.get("threshold", void_detect.DEFAULTS["threshold"])
         self.sb_detect_thr.setValue(float(self._detect_thr.get(idx, default)))
         self._detect_last = idx

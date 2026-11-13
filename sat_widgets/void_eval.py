@@ -353,7 +353,8 @@ class Evaluation:
         """
         p = self.p
         m = ("l" if p.get("learned_model") is not None else "d") if p.get("method") == "die_to_die" else \
-            (("k" if p.get("learned_model") is not None else "c") if p.get("method") == "layer_change" else "p")
+            (("k" if p.get("learned_model") is not None else "c") if p.get("method") == "layer_change" else
+             ("m" if p.get("method") == "ssim" else "p"))
         if p.get("seg_model") is not None:
             m = "s" if p["seg_model"].mode == "seg" else "r"
         thr = _threshold(p)
@@ -379,7 +380,7 @@ class Evaluation:
     def code(self, s):
         """Short text for the phone (see docs/VOID_EVAL.md)."""
         p = self.p
-        m = {"die_to_die": "dd", "layer_change": "lc"}.get(
+        m = {"die_to_die": "dd", "layer_change": "lc", "ssim": "ss"}.get(
             p.get("method"), "pc" + ("r" if "resnet" in str(p.get("pc_model", "")).lower() else "m"))
         if p.get("seg_model") is not None:
             m = "sg" if p["seg_model"].mode == "seg" else "rc"
@@ -393,6 +394,8 @@ class Evaluation:
             rule += " lm"
         if p.get("method") == "die_to_die":
             rule += f" sm{_fmt(p.get('smooth', 0))}" + (" lf" if p.get("layout_fit", True) else "") + (" rg" if p.get("register", True) else "")
+        elif p.get("method") == "ssim":
+            rule += f" sg{_fmt(p.get('ss_sigma', 1.5))} sh{int(p.get('ss_shift', 2))}" + (" rg" if p.get("register", True) else "")
         elif p.get("method") == "layer_change":
             rule += f" lo{_fmt(p.get('lc_tlo', 3.0))}" + (" pr" if p.get("lc_place") == "rms" else "") + \
                 f" gp{_fmt(p.get('lc_pad_sigma', 5.0))}" + \
