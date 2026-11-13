@@ -449,6 +449,9 @@ def _range_along(a, k, axis):
     return parts.min(axis=0), parts.max(axis=0)
 
 
+_CUT_CACHE = {} # (image, layer, bboxes, size) -> chips as cut by _raw_chips (last runs)
+
+
 def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, params=None, progress=None, masks=None):
     """
     Returns [(layer, gx, gy, rx, ry, cell, score, outline)] (Deskewed centre / half sizes, outline:
@@ -535,16 +538,33 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
         trace = p.get("trace") if li == 0 else None # Debug: every step of one chip ({"cell": (row, col)})
         steps = trace.setdefault("steps", []) if trace is not None else None
         tk = trace.get("cell") if trace is not None else None
-        cut = _raw_chips(stack, z, origin, Wr, Hr, f, M, p["register_frac"], keep=trace,
-                         tick=lambda stage, i, n, li=li, layer=layer: tick(li, layer, stage, i, n))
-        if cut is None:
-            return None
+        # The cut chips are kept for the next run on the same image / layer / bboxes / size (settings changed and
+        # run again: no reading and aligning again)
+        key = (id(stack), getattr(stack, "path", None), stack.width, stack.height, z,
+               hash(tuple(sorted(origin.items()))), Wr, Hr, f, M, p["register_frac"])
+        hit = _CUT_CACHE.get(key)
+        if hit is not None:
+            cut = dict(hit)
+            if trace is not None and tk in cut: # The traced chip's raw window, read again
+                x_, y_ = cut[tk][1]
+                win_ = _read(stack, z, x_ - M, y_ - M, Wr + 2 * M, Hr + 2 * M)
+                if win_ is not None:
+                    trace.update(window=win_, shift=(x_ - origin[tk][0], y_ - origin[tk][1]), M=M)
+            tick(li, layer, "cut", N, N, True)
+        else:
+            cut = _raw_chips(stack, z, origin, Wr, Hr, f, M, p["register_frac"], keep=trace,
+                             tick=lambda stage, i, n, li=li, layer=layer: tick(li, layer, stage, i, n))
+            if cut is None:
+                return None
+            if len(_CUT_CACHE) >= 4: # A few layers at most (memory)
+                _CUT_CACHE.pop(next(iter(_CUT_CACHE)))
+            _CUT_CACHE[key] = dict(cut)
         if len(cut) < 4:
             continue
         keys = [k for k in order if k in cut]
         at = {k: cut[k][1] for k in keys} # Raw top-left of every chip as cut
         chips = {k: _normalize(cut[k][0]) for k in keys}
-        if tk in cut:
+        if tk in cut and "window" in trace:
             Mw = trace["M"]
             win = trace.pop("window")
             steps.append(("1 raw window (margin %d px, image px)" % Mw, win, "gray"))
@@ -842,8 +862,8 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                     if p["smooth_px"] > 0 and len(dep) > 2:
                         dep = _blur1(np.asarray(dep, np.float64), p["smooth_px"] / s_al / 2.0)
                     fill = np.arange(seg.shape[0])[:, None] < np.round(dep)[None, :]
-                    fill[:skip] = False
-                    d_px = (int(np.nonzero(fill.any(axis=1))[0][-1]) + 1 - skip) * s_al if fill.any() else 0
+                    # The area starts at the chip edge itself (Skip only keeps the outermost px out of the search)
+                    d_px = (int(np.nonzero(fill.any(axis=1))[0][-1]) + 1) * s_al if fill.any() else 0
                     if d_px < p["min_depth_px"]:
                         if dbg is not None:
                             dbg.append((k, "thin", round(length), round(d_px)))
@@ -910,7 +930,11 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                     continue # The same stain on an earlier layer
                 taken.setdefault(k, []).append((gx0, gy0, gx1, gy1))
                 part = full[r0:r1 + 1, c0:c1]
-                outline = [to_deskew(ox + (c0 + px + 0.5) * sx, oy + (r0 + py + 0.5) * sy) for py, px in _contour(part)]
+                def at_edge(v, n):
+                    """Pixel centre, but the first / last pixel row or column on the chip edge itself (the outline
+                    lies on the chip edge, not half a pixel inside)"""
+                    return 0.0 if v <= 0 else float(n) if v >= n - 1 else v + 0.5
+                outline = [to_deskew(ox + at_edge(c0 + px, W) * sx, oy + at_edge(r0 + py, H) * sy) for py, px in _contour(part)]
                 found.append((layer, (gx0 + gx1) / 2, (gy0 + gy1) / 2, (gx1 - gx0) / 2, (gy1 - gy0) / 2, k, sc, outline))
     return found
 
