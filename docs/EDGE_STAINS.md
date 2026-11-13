@@ -26,6 +26,7 @@
 | Length ≥ | `min_length_px` | 100 | 변을 따라 잰 최소 띠 길이(px) | 짧은 오염을 놓치면 ↓ |
 | Merge r | `merge_radius_px` | 8 | 점을 선으로 잇는 거리(px, 변을 가로질러) | 띠가 굵게 흩어져 있으면 ↑ |
 | Along × | `merge_along` | 2 | 변을 따라서는 Merge r의 이 배수까지 이음 | 듬성한 띠가 끊기면 ↑ |
+| Speck ≥ | `min_speck_px` | 0 | **머지 전**: 붙어 있는 어두운 점 덩어리가 이 면적(px²)보다 작으면 버림(0=끔) | 자잘한 점이 띠로 이어지면 ↑(예: 4~10) |
 | Piece ≥ | `min_piece_px` | 5 | 변을 따라 이보다 짧은 띠 조각(튀는 점)은 버림(px, 0=다 씀) | 튀는 점이 영역을 안쪽으로 끌면 ↑(너무 올리면 듬성한 띠가 끊김) |
 | Link gap | `link_gap_px` | 40 | 변을 따라 이 거리(px) 이내로 끊긴 조각은 한 띠 | 긴 띠가 여러 개/짧게 잡히면 ↑ |
 | Depth % | `depth_frac` | 0.25 | 가장자리에서 안쪽으로 볼 깊이(칩 크기 대비; config는 비율) | 깊은 오염이 잘리면 ↑ |
@@ -67,7 +68,7 @@
 | 9 | deviation | 파랑 = 기준보다 어두움, 빨강 = 밝음(±2×Dark에서 꽉 참). 띠가 파랗게 보여야 함 |
 | 9b | SSIM change | 구조(질감)가 달라진 정도, 패드 평균 전 칩으로 계산. 그 칩의 값 범위에 맞춰 표시(캡션: 노랑 = 몇 배, 기준 몇). 노랗게 보이는데 10번에 안 나오면 SSIM thr를 캡션 값 근처로 ↓ |
 | 10 | dark specks | Dark / SSIM 기준을 넘은 점(가장자리 띠 안만) |
-| 11 | specks kept | Density를 통과한 점. 띠의 점이 여기서 사라지면 Density ↓ |
+| 11 | specks kept | Density·Speck ≥를 통과한 점(머지 전). 띠의 점이 여기서 사라지면 Density / Speck ≥ ↓, 자잘한 게 남으면 ↑ |
 | 12 | joined lines | 이은 띠. 끊겨 있으면 Merge r / Along × / Link gap ↑ |
 | 13 | stain areas | 최종 영역(= 마킹 모양) |
 

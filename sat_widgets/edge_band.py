@@ -57,6 +57,7 @@ DEFAULTS = {
     "bright_threshold": 1.5,  # Segmentation: the bright inside (3x3 average), in spreads
     "merge_radius_px": 8,   # Segmentation: dark specks this close (image px, across the edge) are one line
     "merge_along": 2.0,     # ... and this many times farther along the edge (a sparse rim joined into one line)
+    "min_speck_px": 0,      # Before the merge: specks (connected dark px) smaller than this area (image px2) dropped (0 = off)
     "min_piece_px": 5,      # Line pieces shorter than this along the edge (image px: lone specks) are dropped
     "link_gap_px": 40,      # Pieces of a dark line this far apart along the edge (image px) are one stain
     "texture_px": 2.0,      # Pad grid pitch (image px): every chip averaged over a box of it before the comparison
@@ -210,6 +211,42 @@ def _reduce(a, f):
         return a
     h, w = a.shape[0] // f, a.shape[1] // f
     return a[:h * f, :w * f].reshape(h, f, w, f).mean(axis=(1, 3))
+
+
+def _label(mask):
+    """Connected components (8-neighbour) of a boolean mask: (label image, area per label); label 0 = background
+    (area 0)."""
+    h, w = mask.shape
+    runs = []
+    for r in np.nonzero(mask.any(axis=1))[0]:
+        d = np.diff(np.concatenate(([0], mask[r].astype(np.int8), [0])))
+        for c0, c1 in zip(np.nonzero(d == 1)[0], np.nonzero(d == -1)[0]):
+            runs.append((int(r), int(c0), int(c1)))
+    parent = list(range(len(runs)))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+    by_row = {}
+    for i, (r, c0, c1) in enumerate(runs):
+        for j in by_row.get(r - 1, ()):
+            _, d0, d1 = runs[j]
+            if c0 <= d1 and d0 <= c1: # Touching diagonally too
+                parent[find(i)] = find(j)
+        by_row.setdefault(r, []).append(i)
+    lab = np.zeros((h, w), np.int32)
+    ids = {}
+    areas = [0]
+    for i, (r, c0, c1) in enumerate(runs):
+        root = find(i)
+        if root not in ids:
+            ids[root] = len(areas)
+            areas.append(0)
+        lab[r, c0:c1] = ids[root]
+        areas[ids[root]] += c1 - c0
+    return lab, np.asarray(areas, np.float64)
 
 
 def _orient(m, side, back=False):
@@ -739,6 +776,10 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                 dark = dark | (sdev >= p["ssim_threshold"])
             specks = dark.astype(np.float32)
             specks = (specks > 0) & (_box(specks, k_dens, k_dens) >= p["speck_density"]) # Not lone noise specks
+            if p["min_speck_px"] > 0: # Before the merge: specks (connected dark pixels) smaller than min_speck_px (image px2) go
+                specks &= edges
+                lab, areas = _label(specks)
+                specks &= (areas * sx * sy >= p["min_speck_px"])[lab]
             if k == tk:
                 steps.append(("9 deviation (spreads): blue darker, red brighter", dev, "signed"))
                 if use_ssim:
@@ -746,7 +787,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                     steps.append(("9b SSIM change: full yellow = %.1f spreads (threshold %.1f)" % (lim_s, p["ssim_threshold"]),
                                   np.clip(sdev / lim_s, 0, 1), "unit"))
                 steps.append(("10 dark specks (Dark %.1f%s)" % (p["dark_threshold"], ", SSIM %.1f" % p["ssim_threshold"] if use_ssim else ""), dark & edges, "mask"))
-                steps.append(("11 specks kept (Density %.2f)" % p["speck_density"], specks & edges, "mask"))
+                steps.append(("11 specks kept (Density %.2f, Speck >= %g px2)" % (p["speck_density"], p["min_speck_px"]), specks & edges, "mask"))
             lines = np.zeros((H, W), bool)
             cands = []
             for along, strip, side in strips:
