@@ -2418,11 +2418,19 @@ class MainWindow(QMainWindow):
             "Blur σ", spin("blur_px", "", 0, 100, 0.5, 1, "Gaussian blur of every chip before the comparison (sigma, image px; 0 = off)"))
         row("Skip", spin("edge_skip_px", "", 0, 1000, 1, 0, "Outermost image px of the chip left out (bbox / package edge)"),
             "Min depth", spin("min_depth_px", "", 0, 10000, 1, 0, "Shallowest stain (image px from the edge)"),
-            "Edge tol", spin("edge_tol_px", "", 0, 10, 0.5, 1, "Next to the chip edge, a chip may sit this far (image px) across the edge off the\n"
-                                                                 "median chip (chips are cut on whole px): no line along the edge from that"),
+            "Align tol", spin("edge_tol_px", "", 0, 10, 0.5, 1, "A chip may sit this far (image px) off the median chip (chips are cut on whole px):\n"
+                                                                  "a pixel within the median chip's values moved by +- this is no difference\n"
+                                                                  "(Shift tol > 0: the wider square range instead)"),
             "Along", spin("edge_along_px", "", 0, 1000, 1, 0, "Within this many image px of the chip edge the median chip's range is taken along the\n"
                                                               "edge only (the steep package edge does not hide a stain there; 0 = off)"),
             "Shift tol", spin("shift_tol_px", "", 0, 100, 1, 0, "A pixel inside the median chip's min..max over +- this (image px) is no difference"))
+        self.chk_stain_shading = QCheckBox("Shading")
+        self.chk_stain_shading.setChecked(bool(cfg.get("shading", True)))
+        self.chk_stain_shading.setToolTip("Take a brightness gradient across each chip (illumination over the wafer) off\n"
+                                          "before the comparison (plane of chip - median chip, fitted robustly)")
+        row("Texture", spin("texture_px", "", 0, 50, 1, 1, "Pad grid pitch (image px): every chip is averaged over a box of it before the\n"
+                                                           "comparison, so the pads do not read as a darker grid (pads every other px: 2; 0 = off)"),
+            self.chk_stain_shading)
         h4b = QHBoxLayout()
         h4b.addWidget(QLabel("Edges"))
         self._stain_edges = {}
@@ -2507,6 +2515,8 @@ class MainWindow(QMainWindow):
                 out[k] /= 100.0
         if getattr(self, "cb_stain_compare", None) is not None:
             out["compare"] = self.cb_stain_compare.currentData()
+        if getattr(self, "chk_stain_shading", None) is not None:
+            out["shading"] = self.chk_stain_shading.isChecked()
         if getattr(self.glw, "golden_cells", None):
             out["golden_cells"] = sorted(self.glw.golden_cells)
         if getattr(self, "cb_stain_match", None) is not None:

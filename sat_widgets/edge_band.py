@@ -58,6 +58,9 @@ DEFAULTS = {
     "merge_radius_px": 8,   # Segmentation: dark specks this close (image px, across the edge) are one line
     "merge_along": 2.0,     # ... and this many times farther along the edge (a sparse rim joined into one line)
     "link_gap_px": 40,      # Pieces of a dark line this far apart along the edge (image px) are one stain
+    "texture_px": 2.0,      # Pad grid pitch (image px): every chip averaged over a box of it before the comparison
+                            # (0 = off). Pads every other px: 2
+    "shading": True,        # Brightness gradient across each chip (plane of chip - median chip) taken off
     "edge_tol_px": 1.0,     # Next to the chip edge a chip may sit this far (image px) across the edge off the
                             # median chip (it is cut on whole px): no dark / bright line along the edge
     "bright_min": 0.0,      # Optional: the area between the edge and the line brighter than the chips by this
@@ -497,11 +500,39 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                           win[Mw + trace["shift"][1]:Mw + trace["shift"][1] + Hr, Mw + trace["shift"][0]:Mw + trace["shift"][0] + Wr], "gray"))
             steps.append(("3 reduced %dx%d blocks, normalised" % (f, f), chips[tk], "gray"))
         del cut
+        if p["texture_px"] > 0:
+            # Pad grid averaged out (box of the pad pitch): the median chip has the pads smeared (chips sit a fraction
+            # of a px apart), a single chip has them sharp, so between its pads it read darker everywhere, in a grid
+            kt = max(2, int(round(p["texture_px"] / f)))
+            chips = {k: _box(c, kt, kt) for k, c in chips.items()}
+            if tk in chips:
+                steps.append(("3b pad grid averaged (Texture %g px)" % p["texture_px"], chips[tk], "gray"))
         if p["blur_px"] > 0: # Gaussian blur (noise down; specks of the rim spread, keep it below their spacing)
             sig = p["blur_px"] / min(sx, sy)
             chips = {k: _blur(c, sig) for k, c in chips.items()}
             if tk in chips:
                 steps.append(("4 blurred (Blur %.1f px)" % p["blur_px"], chips[tk], "gray"))
+        if p["shading"]:
+            # Brightness gradient across a chip (illumination over the wafer): the plane of (chip - median chip),
+            # fitted robustly over the whole chip (stains are a small part: trimmed), is taken off every chip
+            samp = [keys[i] for i in sorted(set(np.linspace(0, len(keys) - 1, min(len(keys), 64)).astype(int)))]
+            g0 = np.median(np.stack([chips[k] for k in samp]), axis=0)
+            st_ = max(1, min(H, W) // 64)
+            Y, X = np.mgrid[0:H:st_, 0:W:st_]
+            A = np.stack([np.ones(X.size), (X.ravel() - W / 2) / W, (Y.ravel() - H / 2) / H], 1)
+            Xf = (np.arange(W)[None, :] - W / 2) / W
+            Yf = (np.arange(H)[:, None] - H / 2) / H
+            for k in keys:
+                d = (chips[k] - g0)[::st_, ::st_].ravel()
+                keep = np.ones(d.size, bool)
+                for _ in range(3):
+                    coef = np.linalg.lstsq(A[keep], d[keep], rcond=None)[0]
+                    res = d - A @ coef
+                    mad = float(np.median(np.abs(res[keep]))) * 1.4826 + 1e-6
+                    keep = np.abs(res) <= 2.5 * mad
+                chips[k] = (chips[k] - (coef[0] + coef[1] * Xf + coef[2] * Yf)).astype(np.float32)
+            if tk in chips:
+                steps.append(("4b brightness gradient taken off (Shading)", chips[tk], "gray"))
         mode = p["match"]
         fn = None if mode == "none" else (_match_centre if mode == "curve" else _match_linear)
         k_tol = max(3, 2 * int(round(p["shift_tol_px"] / min(sx, sy))) + 1)
@@ -524,6 +555,21 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             spread = np.median(np.abs(B0 - golden), axis=0) * 1.4826
             spread = _filt(spread, ImageFilter.MaxFilter(3))
             spread = np.maximum(spread, 0.5 * float(np.median(spread)) + 1e-3)
+            if p["shift_tol_px"] <= 0:
+                # Chips are cut within +- 0.5 image px of each other: the reference's range is its values moved by
+                # +- edge_tol_px (image px, interpolated) in the 8 directions. A 3 x 3 working px min..max spans
+                # f image px: with a pad grid of about 1 px it is the pad level everywhere, and a chip a little
+                # brighter / darker between the pads (the inside of a stain) stays inside it
+                t = min(1.0, p["edge_tol_px"] / f)
+                gp = np.pad(golden, 1, mode="edge")
+                gmin, gmax = golden.copy(), golden.copy()
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        if dx or dy:
+                            sh = (1 - t) * golden + t * gp[1 + dy:1 + dy + H, 1 + dx:1 + dx + W]
+                            np.minimum(gmin, sh, out=gmin)
+                            np.maximum(gmax, sh, out=gmax)
+                return golden, spread, gmin, gmax
             gmin = _filt(golden, ImageFilter.MinFilter(k_tol))
             gmax = _filt(golden, ImageFilter.MaxFilter(k_tol))
             if p["edge_along_px"] > 0:
