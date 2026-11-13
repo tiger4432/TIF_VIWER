@@ -5,6 +5,10 @@
 - **git checkout(git bundle로 업데이트):** `defaults\` 폴더는 없습니다. `plugins\results_api.py`도 업데이트(merge)로 새 버전이 되고, 현장에서 고친 내용은 `--autostash`가 그 위에 다시 얹습니다(같은 줄을 고쳤으면 git이 충돌로 알림). 아래 노트의 "`defaults\`에서 옮겨 붙이세요"는 zip 설치에만 해당합니다.
 - **zip 설치:** 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다(새 기본값은 zip 안의 `defaults\`).
 
+## 1.1.46
+
+- **Edge Stains, 튀는 검은 점이 영역을 안쪽으로 끌던 문제:** 변을 따라 **Piece ≥**(기본 5 px)보다 짧은 띠 조각(혼자 떨어진 점)은 띠에서 뺍니다. 영역 깊이는 변을 따라 Merge r × Along × 폭으로 **중앙값**을 내서, 한두 점만 깊은 곳은 뾰족하게 들어가지 않습니다. 더 큰 덩어리가 끌면 Piece ≥를 올리세요(띠가 듬성하면 너무 올리면 띠도 끊김).
+
 ## 1.1.45
 
 - **Debug chip = 모든 칩:** Detect Edge Stains를 한 번 돌리면 모든 칩의 단계별 결과를 저장해 둡니다. 그 뒤 Debug chip(화면 가운데 칩) / Ctrl+Shift+D(마우스 아래 칩)는 다시 돌리지 않고 바로 열립니다(0.1초 이하). 위쪽 글에 그 칩이 기준(레퍼)에 들어갔는지 변별로 표시. 아직 한 번도 돌리지 않았으면 그 칩만 계산.

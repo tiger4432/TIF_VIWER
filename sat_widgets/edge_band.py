@@ -57,6 +57,7 @@ DEFAULTS = {
     "bright_threshold": 1.5,  # Segmentation: the bright inside (3x3 average), in spreads
     "merge_radius_px": 8,   # Segmentation: dark specks this close (image px, across the edge) are one line
     "merge_along": 2.0,     # ... and this many times farther along the edge (a sparse rim joined into one line)
+    "min_piece_px": 5,      # Line pieces shorter than this along the edge (image px: lone specks) are dropped
     "link_gap_px": 40,      # Pieces of a dark line this far apart along the edge (image px) are one stain
     "texture_px": 2.0,      # Pad grid pitch (image px): every chip averaged over a box of it before the comparison
                             # (0 = off). Pads every other px: 2
@@ -738,6 +739,15 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                 # ragged rim becomes one line. A line long enough is a stain: the chip edge up to the line
                 # (bright parts are not added: the area does not run past the rim into the chip)
                 line = line_closing(specks & strip, along) & strip
+                if p["min_piece_px"] > 0:
+                    # Pieces shorter along the edge than min_piece_px (a lone dark speck, a small blob) are not part
+                    # of a line: they would pull the area inward
+                    lim_c = p["min_piece_px"] / (sx if along == "x" else sy)
+                    keep = np.zeros_like(line)
+                    for r0, r1, c0, c1, _a in _components(line):
+                        if ((c1 - c0) if along == "x" else (r1 + 1 - r0)) >= lim_c:
+                            keep[r0:r1 + 1, c0:c1] |= line[r0:r1 + 1, c0:c1]
+                    line = keep
                 lines |= line
                 # Pieces of the line are linked along the edge across gaps up to link_gap_px: a stain is a run
                 # along the edge with line pixels, its area the chip edge up to the farthest line pixel
@@ -753,7 +763,17 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                         if dbg is not None and length >= 0.3 * p["min_length_px"]:
                             dbg.append((k, "short", round(length), round((rows[-1] + 1 - skip) * s_al)))
                         continue
-                    fill = _fill_to_edge(seg, "top")
+                    # Depth per place along the edge: the farthest line pixel, gaps interpolated, then the median
+                    # over merge_along x merge radius along the edge (a stray deeper pixel does not make a spike)
+                    has = seg.any(axis=0)
+                    dep = np.where(has, seg.shape[0] - np.argmax(seg[::-1], axis=0), 0).astype(np.float32)
+                    idx = np.nonzero(has)[0]
+                    dep = np.interp(np.arange(seg.shape[1]), idx, dep[idx])
+                    km = max(1, int(round(p["merge_along"] * p["merge_radius_px"] / s_al)) | 1)
+                    if km > 1 and len(dep) > km:
+                        pad_ = np.pad(dep, km // 2, mode="edge")
+                        dep = np.median(np.lib.stride_tricks.sliding_window_view(pad_, km), axis=1)
+                    fill = np.arange(seg.shape[0])[:, None] < np.round(dep)[None, :]
                     fill[:skip] = False
                     d_px = (int(np.nonzero(fill.any(axis=1))[0][-1]) + 1 - skip) * s_al if fill.any() else 0
                     if d_px < p["min_depth_px"]:

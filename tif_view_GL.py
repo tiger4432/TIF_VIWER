@@ -2399,7 +2399,9 @@ class MainWindow(QMainWindow):
         row("Length ≥", spin("min_length_px", "", 5, 100000, 10, 0, "Shortest stain along the edge (image px)"),
             "Merge r", spin("merge_radius_px", "", 0, 1000, 1, 0, "Dark specks this close (image px, across the edge) are one line"),
             "Along ×", spin("merge_along", "", 1, 20, 0.5, 1, "... and this many times farther along the edge (a sparse rim joins into one line)"),
-            "Link gap", spin("link_gap_px", "", 0, 100000, 5, 0, "Pieces of a line this far apart along the edge (image px) are one stain"))
+            "Link gap", spin("link_gap_px", "", 0, 100000, 5, 0, "Pieces of a line this far apart along the edge (image px) are one stain"),
+            "Piece ≥", spin("min_piece_px", "", 0, 100000, 5, 0, "Line pieces shorter than this along the edge (image px) are dropped: a lone dark\n"
+                                                                 "speck does not pull the area inward (0 = keep all)"))
         row("Depth %", spin("depth_frac", "", 1, 50, 1, 0, "Edge zone searched: this share of the chip size from the edge inward"),
             "Dark", spin("dark_threshold", "", 0.5, 50, 0.5, 1, "A dark speck: darker than the median chip's local min by this many chip-to-chip spreads"),
             "Density", spin("speck_density", "", 0.0, 1.0, 0.01, 2, "Specks around a speck (merge radius box), at least this share:\n"
