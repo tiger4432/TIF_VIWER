@@ -845,13 +845,16 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                         return None
                 def cleanest(j):
                     """The chips cleanest by dirt[.][j]: those within 1.5 x the 10 % quantile (the clean cluster:
-                    stained chips are well above it), at least 8, at most n_clean"""
+                    stained chips are well above it), at least a quarter of the chips (16+), at most n_clean"""
                     order_ = sorted(keys, key=lambda k: dirt[k][j])
                     if not auto: # Clean % set: exactly that share of the chips (at most 64)
                         return order_[:n_clean]
                     q = dirt[order_[max(0, int(0.1 * len(order_)) - 1)]][j]
                     n = sum(1 for k in order_ if dirt[k][j] <= 1.5 * q + 1e-6)
-                    return order_[:max(min(8, len(order_)), min(n_clean, n))]
+                    # At least a quarter of the chips (16 or more): with only a few the median chip is noisy and leans
+                    # to the chips whose pads sit like the first reference's
+                    lo_n = min(len(order_), n_clean, max(16, len(order_) // 4))
+                    return order_[:max(lo_n, min(n_clean, n))]
                 clean = cleanest(0)
                 new = reference(gold or clean, sample)
                 strip_clean = {}
