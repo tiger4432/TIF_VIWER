@@ -2443,6 +2443,8 @@ class MainWindow(QMainWindow):
         row("Texture", spin("texture_px", "", 0, 50, 1, 0, "Pad grid pitch (image px): every chip is averaged over a box of it before the\n"
                                                            "comparison, so the pads do not read as a darker grid (pads every other px: 2; 0 = off)"),
             self.chk_stain_shading, self.chk_stain_lines,
+            "Tex σ", spin("texture_blur", "", 0, 20, 0.5, 1, "Gaussian blur (sigma, image px) at the image resolution after the Texture box: takes off\n"
+                                                             "the beat pattern of a pad grid whose pitch changes (2 .. 3 px) or is turned. 0 = off"),
             "Fourier", spin("fourier", "", 0, 100, 0.5, 1, "Fourier filter: periodic patterns that differ from chip to chip (interference fringes,\n"
                                                            "pad grid beating with the pixels) are narrow spectrum peaks of (chip - median chip);\n"
                                                            "peaks this many times above their surroundings are brought down. 0 = off; lower = more"),
@@ -2939,9 +2941,9 @@ class MainWindow(QMainWindow):
         info.append(f"this chip in the reference: {'yes' if cell in store['clean'] else 'no'}" +
                     "".join(f"; {side}: {'yes' if cell in sel else 'no'}" for side, sel in store["strip_clean"].items()))
         try: # How far this chip sits off the reference after the cut (from the kept images)
-            from sat_widgets.void_detect import _phase_shift
+            from sat_widgets.edge_band import outline_offset
             g_ref = store["ref"][0][1].astype(np.float32)
-            rdx, rdy = _phase_shift(d["chip"].astype(np.float32), g_ref)
+            rdx, rdy = outline_offset(d["chip"].astype(np.float32), g_ref)
             k_ = store["f"] * max(1, int(np.ceil(max(H, W) / 256.0)))
             info.append(f"this chip against the reference after the cut: off by ({rdx * k_:+.1f}, {rdy * k_:+.1f}) image px"
                         + (" - the layout shows in the deviation: Align bbox (after Edge BBOX) or Align tol up"

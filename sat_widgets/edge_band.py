@@ -63,6 +63,8 @@ DEFAULTS = {
     "link_gap_px": 40,      # Pieces of a dark line this far apart along the edge (image px) are one stain
     "texture_px": 2.0,      # Pad grid pitch (image px, whole): every chip averaged over a box of it at the image
                             # resolution, before the reduction (no beat pattern) (0 / 1 = off). Pads every other px: 2
+    "texture_blur": 1.5,    # ... and a Gaussian blur of this sigma (image px) at the image resolution (pitch changing /
+                            # pad grid turned: the beat pattern the box leaves); 0 = off
     "shading": True,
     "background": 0.08,     # Shading: brightness differences larger than this share of the chip (smoothed, stains left
                             # out) are taken off every chip against the reference (blotches, vignetting); 0 = a quadratic        # Brightness gradient across each chip (plane of chip - median chip) taken off
@@ -494,8 +496,25 @@ def _notch(d, ratio, r_min=2.0):
     return np.fft.irfft2(F, s=(h, w)).astype(np.float32), n
 
 
+def _hp(a, sigma=4.0):
+    """High-pass for comparing alignments: a minus its Gaussian blur (fringes, blotches off)."""
+    a = np.asarray(a, np.float32)
+    return a - _gauss(a, sigma)
+
+
+def outline_offset(a, ref, lim=10):
+    """How far a sits off ref (working px, x / y), from the chip outline: the gradients of the mean column / row
+    profiles through the middle, correlated (fringes, blotches and pad beats hardly move the outline's steps)."""
+    h, w = a.shape
+    def prof(m):
+        return (np.diff(m[int(0.3 * h):int(0.7 * h)].mean(axis=0).astype(np.float64)),
+                np.diff(m[:, int(0.3 * w):int(0.7 * w)].mean(axis=1).astype(np.float64)))
+    (ax, ay), (bx, by) = prof(np.asarray(a, np.float32)), prof(np.asarray(ref, np.float32))
+    return _corr1(ax, bx, lim), _corr1(ay, by, lim)
+
+
 def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tick=None, texture_k=0, plain=False, align=True,
-               subpixel=False, rot=None):
+               subpixel=False, rot=None, texture_blur=0.0):
     """
     Chips cut from the raw image as they lie (no rotation, no resampling: a pad grid of about 1 px at
     a small angle gives no moire), moved onto the median chip by whole image px only (measured by
@@ -539,6 +558,8 @@ def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tic
         px: before the reduction, so it is flat wherever the pads fall in the blocks: no beat pattern), reduced."""
         sx, sy = int(np.clip(sx, -M, M)), int(np.clip(sy, -M, M))
         src = _box_sum(win, texture_k) if (avg and texture_k > 1) else win
+        if avg and texture_blur > 0: # Pad pitch changing (2 .. 3 px) or a turned pad grid: a box of one pitch leaves a
+            src = _gauss(src.astype(np.float32), texture_blur) # beat pattern; a Gaussian takes the rest off
         if rot is None:
             return _reduce(src[M + sy:M + sy + Hr, M + sx:M + sx + Wr], f).astype(np.float32)
         # Turned upright (grid angle) after the reduction: the chip edges run along the rows / columns. With the pad
@@ -559,13 +580,25 @@ def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tic
         a = _gauss(_reduce(win, f).astype(np.float32)[:hw, :ww], sig)
         return (a - a.mean()) * taper
 
+    p_sig = max(2.0, max(Hr, Wr) / 150.0) # Raw px: blur of the outline profiles
+
+    def profiles(win):
+        """Gradients of the window's mean column / row profiles through the chip's middle: the chip outline
+        against the street (sharp steps) decides; broad fringes / blotches hardly change a step's place."""
+        h0, h1 = M + int(0.3 * Hr), M + int(0.7 * Hr)
+        w0, w1 = M + int(0.3 * Wr), M + int(0.7 * Wr)
+        return (np.diff(_blur1(win[h0:h1].mean(axis=0).astype(np.float64), p_sig)),
+                np.diff(_blur1(win[:, w0:w1].mean(axis=1).astype(np.float64), p_sig)))
+
     def shift(win, ref):
-        refb, refc = ref
+        """Whole px shift of the chip in its window, from the blurred window (chip outline and its large structures,
+        subpixel): a finer step on the chip centre locked onto the pad grid's beat pattern (each chip its own) and
+        moved chips by up to 4 px, so there is none."""
+        refb = ref[0]
         dx, dy = _peak_near(whole(win), refb, 0, 0, None, hann=False)
-        sx, sy = int(round(dx * f)), int(round(dy * f))
-        a = crop(win, sx, sy)
-        fx, fy = _peak_near(cen(a), refc, 0, 0, 1) # Fine: the centre, within 1 working px
-        return int(np.clip(round(sx + fx * f), -M, M)), int(np.clip(round(sy + fy * f), -M, M))
+        if not (math.isfinite(dx) and math.isfinite(dy)):
+            return 0, 0
+        return int(np.clip(round(dx * f), -M, M)), int(np.clip(round(dy * f), -M, M))
 
     def make_ref(items):
         """items: [(window, (sx, sy))] -> (median whole window, median centre), moved by the shifts."""
@@ -573,8 +606,13 @@ def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tic
         for w, (sx, sy) in items:
             m = np.pad(w, M, mode="edge")[M + sy:M + sy + w.shape[0], M + sx:M + sx + w.shape[1]]
             wh.append(whole(m))
+        prof = []
+        for w, (sx, sy) in items:
+            m = np.pad(w, M, mode="edge")[M + sy:M + sy + w.shape[0], M + sx:M + sx + w.shape[1]]
+            prof.append(profiles(m))
         return (np.median(np.stack(wh), axis=0),
-                np.median(np.stack([cen(crop(w, sx, sy)) for w, (sx, sy) in items]), axis=0))
+                np.median(np.stack([cen(crop(w, sx, sy)) for w, (sx, sy) in items]), axis=0),
+                (np.median(np.stack([q[0] for q in prof]), axis=0), np.median(np.stack([q[1] for q in prof]), axis=0)))
 
     cells = sorted(origin)
     pick = [cells[i] for i in sorted(set(np.linspace(0, len(cells) - 1, min(len(cells), sample_n)).astype(int)))]
@@ -730,7 +768,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
         rot = (math.cos(math.radians(ang)), math.sin(math.radians(ang))) if (p["upright"] and texture_k > 1 and abs(ang) > 1e-4) else None
         key = (id(stack), getattr(stack, "path", None), stack.width, stack.height, z,
                hash(tuple(sorted(origin.items()))), Wr, Hr, f, M, p["register_frac"], texture_k, plain, p["align"],
-               p["subpixel"], rot)
+               p["subpixel"], rot, p["texture_blur"])
         hit = _CUT_CACHE.get(key)
         if hit is not None:
             cut = dict(hit)
@@ -744,7 +782,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             cut = _raw_chips(stack, z, origin, Wr, Hr, f, M, p["register_frac"], keep=trace,
                              tick=lambda stage, i, n, li=li, layer=layer: tick(li, layer, stage, i, n),
                              texture_k=texture_k, plain=plain, align=p["align"] != "bbox",
-                             subpixel=bool(p["subpixel"]) and texture_k > 1, rot=rot)
+                             subpixel=bool(p["subpixel"]) and texture_k > 1, rot=rot, texture_blur=p["texture_blur"])
             if cut is None:
                 return None
             if len(_CUT_CACHE) >= 4: # A few layers at most (memory)
@@ -1066,7 +1104,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                                  "".join(f"; {side}: {'in' if tk in sel else 'not in'}" for side, sel in strip_clean.items())]
             if tk in chips:
                 from .void_detect import _phase_shift
-                rdx, rdy = _phase_shift(chips[tk], ref[0])
+                rdx, rdy = outline_offset(chips[tk], ref[0])
                 trace.setdefault("info", []).append(
                     f"this chip against the reference after the cut: off by ({rdx * f:+.1f}, {rdy * f:+.1f}) image px"
                     + (" - more than Align tol: the layout shows in the deviation (Align: bbox after Edge BBOX, or Align tol up)"
