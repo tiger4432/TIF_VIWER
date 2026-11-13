@@ -18,17 +18,17 @@ Per loaded layer:
 
 Parameters: config.json "void_detect": {"edge_band": {...}} (DEFAULTS below).
 
-Status: experimental, not wired into the viewer yet. On the synthetic wafers (chips that differ
-from each other by design) it finds 45 % of injected stains with ~300 false marks per clean wafer;
-to be validated on a wafer whose chips look alike (a single-layer image can only be compared chip
-to chip) before a button is added.
+Viewer: "Edge Stains" (Void Detection). Synthetic single-layer wafer with alike chips, crescent
+stains on half of them (100 .. 270 px of a 280 px chip, 20 .. 60 px deep, specked rim): 97 % found,
+5 false over 3 wafers (0 on the clean one), about 3 s per 196 chips. Chips must look alike (it is a
+chip-to-chip comparison).
 """
 import math
 
 import numpy as np
 
 DEFAULTS = {
-    "depth_frac": 0.2,      # Edge zone: this share of the chip size from the edge inward
+    "depth_frac": 0.25,     # Edge zone: this share of the chip size from the edge inward
     "edge_skip_px": 4,      # Outermost px of the chip left out (bbox / package edge)
     "min_length_px": 100,   # Shortest stain (image px, its longer side)
     "min_width_px": 12,     # Averaging box (image px); about the narrowest stain

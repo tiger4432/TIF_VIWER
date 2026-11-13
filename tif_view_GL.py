@@ -533,6 +533,12 @@ class MainWindow(QMainWindow):
         v_det = QVBoxLayout(self.gb_detect)
         h_detect.addWidget(btn_detect, 1)
         h_detect.addWidget(self.sb_detect_thr)
+        btn_stain = QPushButton("Edge Stains")
+        btn_stain.setToolTip("Contamination along the inside of the chip edges (long, dark ragged rim, bright inside):\n"
+                             "each chip compared with the median chip; marked as dashed boxes with the selected void type\n"
+                             "(config void_detect.edge_band, sat_widgets/edge_band.py). Chips must look alike.")
+        btn_stain.clicked.connect(self.detect_edge_stains)
+        h_detect.addWidget(btn_stain)
         v_det.addLayout(h_detect)
         h_review = QHBoxLayout()
         h_review.addWidget(btn_prev_det)
@@ -2202,6 +2208,63 @@ class MainWindow(QMainWindow):
         self.glw.refresh_hover()
         self.update_void_ui()
         self.statusBar().showMessage(f"Results API: {n} voids loaded ({'replaced' if replace else 'added'}; Ctrl+Z undoes)")
+
+    def detect_edge_stains(self):
+        """Edge Stains button: sat_widgets/edge_band.py on the loaded layers, dashed boxes of the selected type."""
+        from sat_widgets import edge_band
+        if self._detect_busy():
+            return
+        setup = self._detect_setup("Edge Stains")
+        if setup is None:
+            return
+        type_name, cells, refs, params, layers = setup
+        ep = dict(params.get("edge_band") or {})
+        type_name = ep.get("type") or type_name
+        if type_name not in self.void_manager.types:
+            QMessageBox.warning(self, "Edge Stains", f"Void type {type_name!r} (void_detect.edge_band.type) is not declared.")
+            return
+        skip = set(params.get("skip_layers") or []) if len(layers) > 1 else set() # A single-layer image: always searched
+        zs = [z for z, l in enumerate(layers) if l not in skip]
+        pd = QProgressDialog("Edge stains...", "Cancel", 0, max(1, 2 * len(zs)), self)
+        pd.setWindowModality(Qt.WindowModal)
+        pd.show()
+
+        def progress(i, n, text):
+            pd.setMaximum(n)
+            pd.setValue(i)
+            pd.setLabelText(text)
+            QApplication.processEvents()
+            return not pd.wasCanceled()
+
+        try:
+            found = edge_band.detect(self.full_data, zs, [layers[z] for z in zs], self.glw.grid_cfg,
+                                     self.glw.coord_transform, refs, cells, ep, progress)
+        finally:
+            pd.close()
+        if found is None:
+            self.statusBar().showMessage("Edge stains: canceled")
+            return
+        vm, to_raw, to_deskew = self.void_manager, self.glw.deskew_to_raw, self.glw.raw_to_deskew
+        added = 0
+        vm.begin_change()
+        try:
+            for layer, gx, gy, rx, ry, cell, score in found:
+                # Skip what is marked already (any layer): a rerun does not double the marks
+                if any(not vm.is_bbox(v) and abs(to_deskew(v["globalCX"], v["globalCY"])[0] - gx) < rx + v["radiusX"]
+                       and abs(to_deskew(v["globalCX"], v["globalCY"])[1] - gy) < ry + v["radiusY"]
+                       for vs in vm.voids.values() for v in vs):
+                    continue
+                v = vm.add_void(layer, *to_raw(gx, gy), rx, ry, type_name)
+                v["auto"] = "detected" # Dashed until reviewed (Next Detected)
+                v["score"] = score
+                added += 1
+        finally:
+            vm.end_change()
+        self.glw.update()
+        self.update_void_ui()
+        msg = f"Edge stains: {added} marked ({type_name}, dashed: review with Next Detected), {len(found) - added} already marked"
+        self.statusBar().showMessage(msg)
+        print(msg)
 
     def _detect_setup(self, title):
         """Inputs of Detect Voids / Evaluate: (type, cells, refs, params, layers), or None."""
