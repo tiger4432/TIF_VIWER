@@ -61,8 +61,8 @@ DEFAULTS = {
     "min_speck_px": 0,      # Before the merge: specks (connected dark px) smaller than this area (image px2) dropped (0 = off)
     "min_piece_px": 0,      # Before the merge: speck pieces shorter than this along the edge (image px) dropped (0 = off)
     "link_gap_px": 40,      # Pieces of a dark line this far apart along the edge (image px) are one stain
-    "texture_px": 2.0,      # Pad grid pitch (image px): every chip averaged over a box of it before the comparison
-                            # (0 = off). Pads every other px: 2
+    "texture_px": 2.0,      # Pad grid pitch (image px, whole): every chip averaged over a box of it at the image
+                            # resolution, before the reduction (no beat pattern) (0 / 1 = off). Pads every other px: 2
     "shading": True,        # Brightness gradient across each chip (plane of chip - median chip) taken off
     "edge_tol_px": 1.0,     # Next to the chip edge a chip may sit this far (image px) across the edge off the
                             # median chip (it is cut on whole px): no dark / bright line along the edge
@@ -343,7 +343,18 @@ def _peak_near(a, b, dx0, dy0, rad, hann=True):
             iy + sub(c0, r[(iy - 1) % h, ix % w], r[(iy + 1) % h, ix % w]))
 
 
-def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tick=None):
+def _box_sum(a, k):
+    """Mean over a k x k box (k small, edges extended), same shape as a: the pad grid averaged out."""
+    if k <= 1:
+        return a
+    lo, hi = k // 2, k - 1 - k // 2
+    p = np.pad(a.astype(np.float32), ((lo, hi), (lo, hi)), mode="edge")
+    h, w = a.shape
+    rows = sum(p[i:i + h, :] for i in range(k))
+    return sum(rows[:, j:j + w] for j in range(k)) / float(k * k)
+
+
+def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tick=None, texture_k=0, plain=False):
     """
     Chips cut from the raw image as they lie (no rotation, no resampling: a pad grid of about 1 px at
     a small angle gives no moire), moved onto the median chip by whole image px only (measured by
@@ -381,9 +392,16 @@ def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tic
                     yield c, (None if big is None else big[y:y + Hr + 2 * M, x:x + Wr + 2 * M])
                 i = j
 
-    def crop(win, sx, sy):
+    def crop(win, sx, sy, avg=True):
+        """The chip moved by (sx, sy) whole px, the pad grid averaged out at the raw resolution (box of texture_k
+        px: before the reduction, so it is flat wherever the pads fall in the blocks: no beat pattern), reduced."""
         sx, sy = int(np.clip(sx, -M, M)), int(np.clip(sy, -M, M))
-        return _reduce(win[M + sy:M + sy + Hr, M + sx:M + sx + Wr], f).astype(np.float32)
+        if avg and texture_k > 1:
+            y0, x0 = M + sy - texture_k // 2, M + sx - texture_k // 2
+            a = _box_sum(win, texture_k)[y0 + texture_k // 2:y0 + texture_k // 2 + Hr, x0 + texture_k // 2:x0 + texture_k // 2 + Wr]
+        else:
+            a = win[M + sy:M + sy + Hr, M + sx:M + sx + Wr]
+        return _reduce(a, f).astype(np.float32)
 
     sig = max(1.5, max(H, W) / 100.0) # Working px: blur for the coarse alignment (a pad grid is gone)
     hw, ww = Hr // f + 2 * (M // f), Wr // f + 2 * (M // f)
@@ -432,6 +450,8 @@ def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tic
             continue
         sx, sy = shift(win, ref)
         out[c] = (crop(win, sx, sy), (origin[c][0] + sx, origin[c][1] + sy))
+        if plain: # Also without the pad grid averaged (SSIM / texture)
+            out[c] = out[c] + (crop(win, sx, sy, avg=False),)
         if keep is not None and c == keep.get("cell"): # Debug trace: the raw window and what was cut
             keep["window"] = win.copy()
             keep["shift"] = (sx, sy)
@@ -540,8 +560,11 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
         tk = trace.get("cell") if trace is not None else None
         # The cut chips are kept for the next run on the same image / layer / bboxes / size (settings changed and
         # run again: no reading and aligning again)
+        use_ssim = p["compare"] in ("ssim", "both")
+        texture_k = int(round(p["texture_px"])) if p["texture_px"] >= 1.5 else 0
+        plain = use_ssim and texture_k > 1
         key = (id(stack), getattr(stack, "path", None), stack.width, stack.height, z,
-               hash(tuple(sorted(origin.items()))), Wr, Hr, f, M, p["register_frac"])
+               hash(tuple(sorted(origin.items()))), Wr, Hr, f, M, p["register_frac"], texture_k, plain)
         hit = _CUT_CACHE.get(key)
         if hit is not None:
             cut = dict(hit)
@@ -553,7 +576,8 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             tick(li, layer, "cut", N, N, True)
         else:
             cut = _raw_chips(stack, z, origin, Wr, Hr, f, M, p["register_frac"], keep=trace,
-                             tick=lambda stage, i, n, li=li, layer=layer: tick(li, layer, stage, i, n))
+                             tick=lambda stage, i, n, li=li, layer=layer: tick(li, layer, stage, i, n),
+                             texture_k=texture_k, plain=plain)
             if cut is None:
                 return None
             if len(_CUT_CACHE) >= 4: # A few layers at most (memory)
@@ -564,24 +588,18 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
         keys = [k for k in order if k in cut]
         at = {k: cut[k][1] for k in keys} # Raw top-left of every chip as cut
         chips = {k: _normalize(cut[k][0]) for k in keys}
+        cut_plain = {k: cut[k][2] for k in keys} if plain else None
         if tk in cut and "window" in trace:
             Mw = trace["M"]
             win = trace.pop("window")
             steps.append(("1 raw window (margin %d px, image px)" % Mw, win, "gray"))
             steps.append(("2 cut: moved %+d, %+d px (whole px, no resampling)" % trace["shift"],
                           win[Mw + trace["shift"][1]:Mw + trace["shift"][1] + Hr, Mw + trace["shift"][0]:Mw + trace["shift"][0] + Wr], "gray"))
-            steps.append(("3 reduced %dx%d blocks, normalised" % (f, f), chips[tk], "gray"))
+            steps.append(("3 pad grid averaged (Texture %d px, at the image resolution), reduced %dx%d, normalised"
+                          % (texture_k, f, f), chips[tk], "gray"))
         del cut
-        use_ssim = p["compare"] in ("ssim", "both")
-        # SSIM looks at the texture (pads covered / smeared): it gets the chips before the pad grid is averaged
-        tex = {k: c.astype(np.float16) for k, c in chips.items()} if use_ssim and p["texture_px"] > 0 else None
-        if p["texture_px"] > 0:
-            # Pad grid averaged out (box of the pad pitch): the median chip has the pads smeared (chips sit a fraction
-            # of a px apart), a single chip has them sharp, so between its pads it read darker everywhere, in a grid
-            kt = max(2, int(round(p["texture_px"] / f)))
-            chips = {k: _box(c, kt, kt) for k, c in chips.items()}
-            if tk in chips:
-                steps.append(("3b pad grid averaged (Texture %g px)" % p["texture_px"], chips[tk], "gray"))
+        # SSIM looks at the texture (pads covered / smeared): it gets the chips cut without the pad grid averaged
+        tex = {k: _normalize(cut_plain[k]).astype(np.float16) for k in keys} if plain else None
         if p["blur_px"] > 0: # Gaussian blur (noise down; specks of the rim spread, keep it below their spacing)
             sig = p["blur_px"] / min(sx, sy)
             chips = {k: _gauss(c, sig) for k, c in chips.items()}
