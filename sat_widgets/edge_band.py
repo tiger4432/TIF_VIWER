@@ -70,7 +70,7 @@ DEFAULTS = {
                             # (spreads, mean) to be a stain; 0 = not checked (the dark line decides)
     "speck_density": 0.06,  # Segmentation: share of specks around a speck (merge radius box), at least:
                             # the rim's specks are dense, scattered noise / layout specks are not
-    "clean_ref": 0.5,       # Reference (median chip, spread) from this share of the chips that differ least
+    "clean_ref": 0.0,       # Reference (median chip, spread) from this share of the chips that differ least
                             # (at most 64; 1 = a sample of all): stains at the same place on many chips
                             # (long ones, corners) do not get into the reference
     "golden_cells": None,   # [(row, col)] golden chips picked by hand for the median chip (None: automatic)
@@ -630,7 +630,11 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                 B0 = np.stack([chips[k] for k in spread_from])
             if fn is not None:
                 B0 = np.stack([fn(a, golden, centre) for a in B0])
-            spread = np.median(np.abs(B0 - golden), axis=0) * 1.4826
+            # Chip-to-chip spread: from a sample of ALL chips (the cleanest ones are also the ones whose pads sit like
+            # the reference's: their spread is too small at the pads, and every other chip's pads read dark), with
+            # the 25 % quantile of |difference| (a normal spread from it holds while up to ~70 % of the chips are
+            # stained at a pixel)
+            spread = np.quantile(np.abs(B0 - golden), 0.25, axis=0) / 0.3186
             spread = _filt(spread, ImageFilter.MaxFilter(3))
             spread = np.maximum(spread, 0.5 * float(np.median(spread)) + 1e-3)
             if p["shift_tol_px"] <= 0:
@@ -716,14 +720,15 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
         # Golden chips picked by hand (golden_cells): the median chip is theirs; the spread still comes from
         # the cleanest chips (a few golden chips cannot tell the chip-to-chip spread)
         gold = [k for k in (tuple(c) for c in (p.get("golden_cells") or [])) if k in chips]
-        ref = reference(gold or sample, None if gold else sample)
+        ref = reference(gold or sample, sample)
         clean = sample
         strip_clean = {}
-        if p["clean_ref"] < 1.0:
+        if p["clean_ref"] < 1.0: # 0: automatic (the clean cluster), 0 < x < 1: exactly that share, 1: a sample of all
             # Cleanest chips per edge strip (a chip stained at the top may be clean at the bottom): each strip's part
             # of the reference comes from the chips cleanest there, the rest from the chips cleanest overall.
             # Twice: the second pass measures against the reference of the first
-            n_clean = min(64, max(min(8, len(keys)), int(round(p["clean_ref"] * len(keys)))))
+            auto = p["clean_ref"] <= 0
+            n_clean = min(64, max(min(8, len(keys)), int(round((0.5 if auto else p["clean_ref"]) * len(keys)))))
             regions = [(side, strip) for _, strip, side in strips]
             for it in range(2):
                 dirt = {k: [] for k in keys}
@@ -736,18 +741,20 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                     """The chips cleanest by dirt[.][j]: those within 1.5 x the 10 % quantile (the clean cluster:
                     stained chips are well above it), at least 8, at most n_clean"""
                     order_ = sorted(keys, key=lambda k: dirt[k][j])
+                    if not auto: # Clean % set: exactly that share of the chips (at most 64)
+                        return order_[:n_clean]
                     q = dirt[order_[max(0, int(0.1 * len(order_)) - 1)]][j]
                     n = sum(1 for k in order_ if dirt[k][j] <= 1.5 * q + 1e-6)
                     return order_[:max(min(8, len(order_)), min(n_clean, n))]
                 clean = cleanest(0)
-                new = reference(gold or clean, clean)
+                new = reference(gold or clean, sample)
                 strip_clean = {}
                 for j, (side, m) in enumerate(regions):
                     sel = cleanest(j + 1)
                     strip_clean[side] = sel
                     if gold:
                         continue # Golden chips picked: their median everywhere, only the spread per strip
-                    r_s = reference(sel, sel)
+                    r_s = reference(sel, sample)
                     new = tuple(np.where(m, a_s, a_all) for a_s, a_all in zip(r_s, new))
                 ref = new
         ref = with_ssim(ref, gold or clean, None if gold else

@@ -2455,9 +2455,10 @@ class MainWindow(QMainWindow):
                                        "none (default), linear (gain / offset), curve (contrast / gamma too)")
         h4b.addWidget(self.cb_stain_match)
         h4b.addWidget(QLabel("Clean %"))
-        h4b.addWidget(spin("clean_ref", "", 5, 100, 5, 0, "Reference (median chip, spread) from this share of the chips that differ least\n"
-                                                         "(at most 64; 100 = a sample of all): stains at the same place on many chips\n"
-                                                         "(long ones, corners) do not get into the reference. Golden chips picked: their median"))
+        h4b.addWidget(spin("clean_ref", "", 0, 100, 5, 0, "Reference (median chip, spread) per edge from the chips cleanest at that edge:\n"
+                                                         "0 = automatic (the clean group: within 1.5 x the cleanest 10 %, 8 .. half of the chips),\n"
+                                                         "5..95 = exactly this share of the chips, 100 = a sample of all (at most 64 chips).\n"
+                                                         "Golden chips picked: their median, the spread from the clean ones"))
         form.addRow(h4b)
         h5 = QHBoxLayout()
         h5.addWidget(QLabel("Mark as"))
