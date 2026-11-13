@@ -804,7 +804,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             if k == tk:
                 steps.append(("9 deviation (spreads): blue darker, red brighter", dev, "signed"))
                 if use_ssim:
-                    lim_s = max(1.0, float(np.percentile(sdev[edges], 99.5)))
+                    lim_s = max(2.0 * p["ssim_threshold"], float(np.percentile(sdev[edges], 99.5)))
                     steps.append(("9b SSIM change: full yellow = %.1f spreads (threshold %.1f)" % (lim_s, p["ssim_threshold"]),
                                   np.clip(sdev / lim_s, 0, 1), "unit"))
                 steps.append(("10 dark specks (Dark %.1f%s)" % (p["dark_threshold"], ", SSIM %.1f" % p["ssim_threshold"] if use_ssim else ""), dark & edges, "mask"))
@@ -910,8 +910,8 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                 store["chips"][k] = {
                     "at": at[k], "chip": q8(chips[k], cl, ch),
                     "dev": q8(dev, -lim, lim), "dev_lim": lim,
-                    "sdev": q8(sdev, 0, max(1.0, float(np.percentile(sdev[edges], 99.5)))) if use_ssim else None,
-                    "sdev_lim": max(1.0, float(np.percentile(sdev[edges], 99.5))) if use_ssim else None,
+                    "sdev": q8(sdev, 0, max(2.0 * p["ssim_threshold"], float(np.percentile(sdev[edges], 99.5)))) if use_ssim else None,
+                    "sdev_lim": max(2.0 * p["ssim_threshold"], float(np.percentile(sdev[edges], 99.5))) if use_ssim else None,
                     "dark": np.packbits(dark & edges), "specks": np.packbits(specks & edges),
                     "lines": np.packbits(lines), "area": np.packbits(area_all),
                     "why": [d for d in (dbg or []) if d[0] == k], "found": len(groups)}
