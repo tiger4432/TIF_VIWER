@@ -2443,6 +2443,9 @@ class MainWindow(QMainWindow):
         row("Texture", spin("texture_px", "", 0, 50, 1, 0, "Pad grid pitch (image px): every chip is averaged over a box of it before the\n"
                                                            "comparison, so the pads do not read as a darker grid (pads every other px: 2; 0 = off)"),
             self.chk_stain_shading, self.chk_stain_lines,
+            "Fourier", spin("fourier", "", 0, 100, 0.5, 1, "Fourier filter: periodic patterns that differ from chip to chip (interference fringes,\n"
+                                                           "pad grid beating with the pixels) are narrow spectrum peaks of (chip - median chip);\n"
+                                                           "peaks this many times above their surroundings are brought down. 0 = off; lower = more"),
             "Warp", spin("warp_tiles", "", 0, 32, 1, 0, "Local alignment: each chip moved onto the reference in Warp x Warp pieces (a chip\n"
                                                          "bent a little: pads closer here, farther there, the layout stays in Debug 9). 0 = off; 4 .. 8"),
             "Warp px", spin("warp_px", "", 0.5, 100, 0.5, 1, "A piece is moved at most this far (image px)"),

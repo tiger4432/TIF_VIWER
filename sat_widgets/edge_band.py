@@ -68,6 +68,8 @@ DEFAULTS = {
                             # out) are taken off every chip against the reference (blotches, vignetting); 0 = a quadratic        # Brightness gradient across each chip (plane of chip - median chip) taken off
     "upright": True,        # Chips turned upright by the grid angle after the pad grid is averaged (Texture >= 2): the
                             # edges run along the rows / columns of the work image
+    "fourier": 4.0,         # Fourier filter: spectrum peaks of (chip - median chip) this many times above their
+                            # surroundings (interference fringes, beating pad grid) brought down; 0 = off
     "scan_lines": True,     # Row to row brightness jitter (scan lines) taken off: horizontal lines in the deviation
     "warp_tiles": 0,        # Local alignment: every chip moved onto the reference in n x n tiles (a chip bent a little:
                             # the pads closer here, farther there, the layout shows in the deviation); 0 = off
@@ -88,7 +90,7 @@ DEFAULTS = {
                             # (at most 64; 1 = a sample of all): stains at the same place on many chips
                             # (long ones, corners) do not get into the reference
     "golden_cells": None,   # [(row, col)] golden chips picked by hand for the median chip (None: automatic)
-    "compare": "both",      # What differs from the median chip: "intensity" (darker), "ssim" (local structure /
+    "compare": "intensity",      # What differs from the median chip: "intensity" (darker), "ssim" (local structure /
                             # texture changed: pads covered or smeared, the mean brightness hardly), "both"
     "ssim_sigma_px": 3.0,   # SSIM window (Gaussian sigma, image px)
     "ssim_threshold": 8.0,   # SSIM: a speck where the structure differs by this many chip-to-chip spreads
@@ -473,6 +475,25 @@ def _rotate_bilinear(a, out_h, out_w, c, s):
             (a[y1c, x0c] * (1 - fx) + a[y1c, x1c] * fx) * fy).astype(np.float32)
 
 
+def _notch(d, ratio, r_min=2.0):
+    """d with the narrow peaks of its spectrum (ratio x above the smoothed spectrum around them, beyond r_min
+    frequency bins from zero) brought down to that level, phase kept. Returns (filtered d, number of peaks)."""
+    h, w = d.shape
+    F = np.fft.rfft2(d.astype(np.float64))
+    L = np.log(np.abs(F) + 1e-9)
+    bg = _gauss(L.astype(np.float32), 2.0).astype(np.float64)
+    fy = np.fft.fftfreq(h)[:, None] * h
+    fx = np.fft.rfftfreq(w)[None, :] * w
+    far = np.hypot(fy, fx) >= r_min
+    peak = far & (L - bg > math.log(ratio))
+    n = int(peak.sum())
+    if n:
+        peak = _box(peak.astype(np.float32), 3, 3) > 0 # The neighbours of a peak too (it spreads over a bin or two)
+        peak &= far
+        F = np.where(peak, F * np.exp(np.minimum(bg - L, 0.0)), F)
+    return np.fft.irfft2(F, s=(h, w)).astype(np.float32), n
+
+
 def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tick=None, texture_k=0, plain=False, align=True,
                subpixel=False, rot=None):
     """
@@ -815,6 +836,20 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                     tex[k] = (tex[k].astype(np.float32) - plane).astype(np.float16)
             if tk in chips:
                 steps.append(("4b brightness gradient taken off (Shading)", chips[tk], "gray"))
+        if p["fourier"] > 0:
+            # Fourier filter: periodic patterns that differ from chip to chip (interference fringes, a pad grid beating
+            # with the pixels) are narrow peaks in the spectrum of (chip - median chip); a stain spreads over many
+            # frequencies. The peaks (fourier x above their surroundings) are brought down to their surroundings
+            samp = [keys[i] for i in sorted(set(np.linspace(0, len(keys) - 1, min(len(keys), 64)).astype(int)))]
+            g0 = np.median(np.stack([chips[k] for k in samp]), axis=0)
+            nf = 0
+            for k in keys:
+                d_, n_ = _notch(chips[k] - g0, p["fourier"])
+                chips[k] = (g0 + d_).astype(np.float32)
+                nf += n_
+            if tk in chips:
+                steps.append(("4d periodic patterns taken off (Fourier)", chips[tk], "gray"))
+                trace.setdefault("info", []).append(f"Fourier: {nf / max(1, len(keys)):.0f} peaks per chip taken off")
         mode = p["match"]
         fn = None if mode == "none" else (_match_centre if mode == "curve" else _match_linear)
         k_tol = max(3, 2 * int(round(p["shift_tol_px"] / min(sx, sy))) + 1)

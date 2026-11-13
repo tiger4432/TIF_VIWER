@@ -34,7 +34,7 @@
 | Dark | `dark_threshold` | 3 | 어두운 점 기준(칩끼리 흩어짐 배수) | 띠가 덜 잡히면 ↓, 엉뚱한 점이 많으면 ↑ |
 | Density | `speck_density` | 0.06 | 점이 모여 있어야 하는 비율 | 띠가 듬성하면 ↓ |
 | Aspect | `min_aspect` | 1.5 | 길이 ÷ 깊이 최소 | 짧고 두꺼운 오염이면 ↓ |
-| Compare | `compare` | "both" | 점 기준: 어두움 + SSIM("both") / 어두움("intensity") / SSIM("ssim") | 눈으로 차이가 거의 없는 띠: both / ssim |
+| Compare | `compare` | "intensity" (dark) | 점 기준: 어두움 + SSIM("both") / 어두움("intensity") / SSIM("ssim") | 눈으로 차이가 거의 없는 띠: both / ssim |
 | SSIM thr | `ssim_threshold` | 8 | 구조가 다른 점 기준(흩어짐 배수) | 미검이면 ↓, 과검이면 ↑ |
 | SSIM σ | `ssim_sigma_px` | 3 | SSIM 창(가우시안 σ, px) | 띠가 굵으면 ↑ |
 | Blur σ | `blur_px` | 0 | 비교 전 가우시안 블러(px, 0=끔) | 노이즈가 심할 때 |
@@ -46,6 +46,7 @@
 | Along | `edge_along_px` | 4 | 칩 경계에서 이 거리(px) 안은 기준 범위를 변 방향으로만(0=끔) | 경계 바로 옆 오염을 놓치면 ↑ |
 | Shift tol | `shift_tol_px` | 0 | 칩끼리 어긋남 허용(px; 0이어도 3×3) | 패드·틈이 잡히면 ↑ |
 | Align | `align` | "image" | 칩 위치: image = 영상으로 맞춤(정수 px), bbox = bbox 위치 그대로(Edge BBOX 후) | Debug에 "off by"가 크고 9번에 레이아웃이 보이면 Edge BBOX → bbox |
+| Fourier | `fourier` | 4 | (칩 − 기준 칩) 스펙트럼에서 주변보다 이 배수 이상 튀는 봉우리(간섭 무늬·패드 격자 맥놀이)를 깎음(0=끔) | 9번에 줄무늬·물결이 남으면 ↓(3), 오염이 깎이면 ↑ |
 | Scan lines | `scan_lines` | 켬 | 줄마다 밝기가 다른 스캔선(차이 맵의 가로줄)을 빼고 비교, 줄 사이 변화만 빼서 오염 띠는 남음 | 9번에 가로줄이 많으면 켬 |
 | Warp | `warp_tiles` | 0 | 국부 위치 맞춤: 칩을 Warp×Warp 조각으로 나눠 조각마다 기준 칩에 맞춤(칩이 국부적으로 휘어 패드 간격이 다를 때) | 9번에 레이아웃이 곳곳에 남으면 4~8 |
 | Warp px | `warp_px` | 3 | 한 조각이 움직일 최대 거리(px) | 휨이 크면 ↑ |
@@ -110,6 +111,7 @@
 | 〃 9번에 칩 변을 따라 얇은 선 | 경계에서 조금 어긋남 | Align tol ↑, Skip ↑ |
 | 〃 9번에 기울기·비네팅 | 칩마다 조명 다름 | Shading 켬, Bg % 5~10 |
 | 〃 9번에 큰 얼룩 | 칩마다 배경 밝기 다름 | Bg % 5~10 |
+| 〃 9번에 가로 줄무늬·물결(간섭 무늬)이 칩 전체에 | 칩마다 위상이 다른 간섭 무늬 | Fourier ↓(4 → 3) |
 | 〃 9b에 물결(간섭) 무늬가 점으로 잡힘 | 그리드 회전 × 1 px 패드(원리적) | Compare = dark, 또는 SSIM thr ↑ |
 | 〃 튀는 점이 영역을 안쪽으로 끔 | 떨어진 점이 띠에 붙음 | Piece ≥ ↑(2~5부터), Speck ≥ ↑ |
 | 〃 영역 경계가 찌글거림 | | Smooth ↑ |
