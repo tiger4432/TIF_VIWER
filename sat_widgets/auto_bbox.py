@@ -705,12 +705,14 @@ def fit_edges(stack, z, grid_cfg, coord_transform, void_manager, bbox_type, size
     that (5 %), else the median of the measured sizes. A chip whose fitted size is off the median by more than size_tol keeps the side
     with the steeper step and the median size. Bboxes placed by hand ("hand") stay.
     params: "edge_search" (share of the size searched each way, default 0.06), "edge_band" (share of
-    the chip through its middle the profile is taken over, default 0.3), "size_tol" (0.02).
+    the chip through its middle the profile is taken over, default 0.3), "size_tol" (0.02),
+    "edge_pick" ("steepest" step, or the "outer" / "inner" one of the steps at least "pick_frac" (0.5)
+    of the steepest), "apply" (False: nothing changed, for "trace": {"cell": (r, c)} debug).
     Returns {"fitted", "one_side", "failed": [(r, c)], "hand", "moved_px"} or None (no bboxes).
     """
     from .core_data import to_gray
     from .void_detect import _blur
-    p = {"edge_search": 0.06, "edge_band": 0.3, "size_tol": 0.02}
+    p = {"edge_search": 0.06, "edge_band": 0.3, "size_tol": 0.02, "edge_pick": "steepest", "pick_frac": 0.5}
     p.update(params or {})
     to_raw = coord_transform.deskew_to_raw if coord_transform else (lambda x, y: (x, y))
     to_deskew = coord_transform.raw_to_deskew if coord_transform else (lambda x, y: (x, y))
@@ -731,15 +733,25 @@ def fit_edges(stack, z, grid_cfg, coord_transform, void_manager, bbox_type, size
         k = np.exp(-0.5 * (np.arange(-r, r + 1) / s) ** 2)
         return np.convolve(np.pad(v, r, mode="edge"), k / k.sum(), mode="valid")
 
-    def step_at(prof, lo, hi, sign):
-        """Steepest step of prof in [lo, hi) rising (sign +1) / falling (-1), 0: either way: (raw position of
-        the boundary between the two px, strength, its sign) or None."""
+    def step_at(prof, lo, hi, sign, outward=0):
+        """Step of prof in [lo, hi) rising (sign +1) / falling (-1), 0: either way: (raw position of the
+        boundary between the two px, strength, its sign) or None. edge_pick "steepest": the steepest;
+        "outer" / "inner": the outermost / innermost one at least pick_frac of the steepest (outward: -1
+        the outside is at lower index (left / top), +1 at higher)."""
         g = np.diff(prof)
         lo, hi = max(1, int(lo)), min(len(g) - 1, int(hi))
         if hi <= lo:
             return None
         gs = g * sign if sign else np.abs(g)
         i = lo + int(np.argmax(gs[lo:hi]))
+        if outward and p["edge_pick"] in ("outer", "inner") and gs[i] > 0:
+            seg = gs[lo:hi]
+            # Local maxima at least pick_frac of the steepest
+            pk = [j for j in range(len(seg)) if seg[j] >= p["pick_frac"] * gs[i]
+                  and (j == 0 or seg[j] >= seg[j - 1]) and (j == len(seg) - 1 or seg[j] >= seg[j + 1])]
+            if pk:
+                far_low = (p["edge_pick"] == "outer") == (outward < 0) # Pick the lowest index
+                i = lo + (pk[0] if far_low else pk[-1])
         cm, c0, cp = gs[i - 1], gs[i], gs[i + 1]
         if c0 <= 0:
             return None
@@ -747,6 +759,8 @@ def fit_edges(stack, z, grid_cfg, coord_transform, void_manager, bbox_type, size
         d = float(np.clip(0.5 * (cm - cp) / den, -0.5, 0.5)) if den < 0 else 0.0
         return i + 1 + d, float(c0), 1 if g[i] > 0 else -1 # Pixel k covers [k, k + 1): the boundary is at i + 1
 
+    trace = p.get("trace") # Debug: {"cell": (r, c)} gets the profiles, the steps and the result of that chip
+    windows = {}
     profs = {}
     order = sorted(boxes)
     for n, cell in enumerate(order):
@@ -765,6 +779,8 @@ def fit_edges(stack, z, grid_cfg, coord_transform, void_manager, bbox_type, size
         if X1 - X0 < 16 or Y1 - Y0 < 16:
             continue
         a = to_gray(stack.read_region(z, X0, Y0, X1 - X0, Y1 - Y0)).astype(np.float32)
+        if trace is not None and cell == trace.get("cell"):
+            windows[cell] = a
         s = max(1.0, 0.002 * max(w, h)) # Blur of the profiles: pad grids and noise go, the outline stays
         bh, bw = p["edge_band"] * h / 2, p["edge_band"] * w / 2
         rows = slice(max(0, int(cy - bh) - Y0), max(1, int(cy + bh) - Y0))
@@ -785,11 +801,14 @@ def fit_edges(stack, z, grid_cfg, coord_transform, void_manager, bbox_type, size
         signs.append(1 if sum(votes) >= 0 else -1)
     fits = {}
     for cell, (px, py, ex, ey, mx, my, X0, Y0) in profs.items():
-        L = step_at(px, ex[0] - mx, ex[0] + mx, signs[0])
-        Rr = step_at(px, ex[1] - mx, ex[1] + mx, signs[1])
-        T = step_at(py, ey[0] - my, ey[0] + my, signs[2])
-        B = step_at(py, ey[1] - my, ey[1] + my, signs[3])
+        L = step_at(px, ex[0] - mx, ex[0] + mx, signs[0], -1)
+        Rr = step_at(px, ex[1] - mx, ex[1] + mx, signs[1], 1)
+        T = step_at(py, ey[0] - my, ey[0] + my, signs[2], -1)
+        B = step_at(py, ey[1] - my, ey[1] + my, signs[3], 1)
         fits[cell] = None if None in (L, Rr, T, B) else (L, Rr, T, B, X0, Y0)
+        if trace is not None and cell == trace.get("cell"):
+            trace.update(px=px, py=py, ex=ex, ey=ey, mx=mx, my=my, X0=X0, Y0=Y0, signs=signs, steps=(L, Rr, T, B),
+                         window=windows.get(cell))
     good = {k: f for k, f in fits.items() if f is not None}
     if not good:
         return {"fitted": 0, "one_side": 0, "failed": [k for k in fits], "hand": 0, "moved_px": 0.0}
@@ -800,6 +819,7 @@ def fit_edges(stack, z, grid_cfg, coord_transform, void_manager, bbox_type, size
     W, H = (size if size is not None and abs(size[0] - mw) <= 0.05 * mw and abs(size[1] - mh) <= 0.05 * mh
             else (mw, mh))
     moves, one_side, failed = [], 0, [k for k, f in fits.items() if f is None]
+    apply = p.get("apply", True)
     vm.begin_change()
     try:
         for cell, (L, Rr, T, B, X0, Y0) in good.items():
@@ -816,6 +836,11 @@ def fit_edges(stack, z, grid_cfg, coord_transform, void_manager, bbox_type, size
                 one_side += 1
             layer, v = boxes[cell][0]
             moves.append(math.hypot(nx - v["globalCX"], ny - v["globalCY"]))
+            if trace is not None and cell == trace.get("cell"):
+                trace["old"] = (v["globalCX"], v["globalCY"], 2 * v["radiusX"], 2 * v["radiusY"])
+                trace["new"] = (nx, ny, W, H)
+            if not apply:
+                continue
             for ly, old in boxes[cell]:
                 vm.remove_void(ly, old)
             nv = vm.add_void(layer, nx, ny, W / 2.0, H / 2.0, bbox_type)

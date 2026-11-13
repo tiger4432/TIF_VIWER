@@ -5,6 +5,12 @@
 - **git checkout(git bundle로 업데이트):** `defaults\` 폴더는 없습니다. `plugins\results_api.py`도 업데이트(merge)로 새 버전이 되고, 현장에서 고친 내용은 `--autostash`가 그 위에 다시 얹습니다(같은 줄을 고쳤으면 git이 충돌로 알림). 아래 노트의 "`defaults\`에서 옮겨 붙이세요"는 zip 설치에만 해당합니다.
 - **zip 설치:** 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다(새 기본값은 zip 안의 `defaults\`).
 
+## 1.1.39
+
+- **Edge debug(Auto Calibration):** 화면 가운데 칩에 Edge BBOX를 바꾸지 않고 돌려, 창 이미지(노랑 지금 bbox / 초록 맞춘 bbox / 빨강 고른 단차)와 네 변의 밝기 단면·단차를 그림으로 보여 줍니다. bbox가 밀리면 어느 단차를 잡았는지 바로 보입니다.
+- **Edge pick:** 칩 경계로 칠 단차를 steepest(가장 가파른) / outer(가장 바깥) / inner(가장 안쪽) 중에서 고름. 경계 옆 밝은 테두리·헤일로·스캔 꼬리 때문에 bbox가 한쪽으로 밀릴 때.
+- **옵션 설명표 문서:** [docs/EDGE_STAINS.md](EDGE_STAINS.md) — Edge Stains 입력칸 전부, Debug chip 이미지 번호별로 볼 것, Edge BBOX 설정.
+
 ## 1.1.38
 
 - **Edge Stains, 무아레 오검출 해결:** 칩을 각도만큼 회전·보간하지 않고 영상에 놓인 그대로 정수 px로 잘라 비교합니다(위치도 정수 px로만 맞춤). 1 px 패드 격자 + 각도에서 생기던 물결무늬 때문에 깨끗한 칩의 패드 영역이 빨갛게 잡히던 문제: 합성 0.3° 웨이퍼 과검 101 → 0.

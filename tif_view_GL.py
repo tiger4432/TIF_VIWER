@@ -774,8 +774,27 @@ class MainWindow(QMainWindow):
         h_auto2.addWidget(btn_grid_bbox)
         h_auto2.addWidget(self.chk_lock_bbox)
         h_auto2.addWidget(btn_fit_grid)
+        h_edge = QHBoxLayout()
+        h_edge.addWidget(QLabel("Edge pick"))
+        self.cb_edge_pick = QComboBox()
+        for key, label in (("steepest", "steepest"), ("outer", "outer"), ("inner", "inner")):
+            self.cb_edge_pick.addItem(label, key)
+        self.cb_edge_pick.setCurrentIndex(max(0, self.cb_edge_pick.findData(
+            ((self._config().get("auto_bbox") or {}).get("edges") or {}).get("edge_pick", "steepest"))))
+        self.cb_edge_pick.setToolTip("Edge BBOX: which brightness step near each bbox edge is the chip edge: the steepest,\n"
+                                     "or the outermost / innermost of the steps at least half as steep (a bright rim, a halo\n"
+                                     "or a scan tail next to the outline)")
+        h_edge.addWidget(self.cb_edge_pick)
+        btn_edge_dbg = QPushButton("Edge debug")
+        btn_edge_dbg.setToolTip("Edge BBOX on the chip at the view centre without changing anything: the window with the\n"
+                                "bbox now (yellow) and fitted (green), and the brightness profiles across the chip with the\n"
+                                "search ranges and the steps taken")
+        btn_edge_dbg.clicked.connect(self.edge_bbox_debug)
+        h_edge.addWidget(btn_edge_dbg)
+        h_edge.addStretch(1)
         h_auto2.addWidget(btn_next_est)
         form_calib.addRow(h_auto2)
+        form_calib.addRow(h_edge)
 
         # Panel order: ... Bonding Map, Auto Calibration, Coordinates, Void Marking, Extraction
         dock_layout.insertWidget(dock_layout.indexOf(gb_map) + 1, gb_calib)
@@ -1870,6 +1889,7 @@ class MainWindow(QMainWindow):
         tid, size, cells = setup
         cfg, vm = self.glw.grid_cfg, self.void_manager
         params = dict((self._config().get("auto_bbox") or {}).get("edges") or {})
+        params["edge_pick"] = self.cb_edge_pick.currentData()
         progress = QProgressDialog("Fitting the bboxes to the chip edges...", "Cancel", 0, max(1, len(cells)), self)
         progress.setWindowModality(Qt.WindowModal)
         progress.show()
@@ -1905,6 +1925,90 @@ class MainWindow(QMainWindow):
                f"{len(result['failed'])} without a clear edge (unchanged); {result['hand']} hand-placed kept. Ctrl+Z undoes")
         self.statusBar().showMessage(msg)
         print(msg)
+
+    def edge_bbox_debug(self):
+        """Edge BBOX on the chip at the view centre, nothing changed: window + profiles with the steps taken."""
+        from PIL import Image, ImageDraw
+        setup = self._bbox_setup("Edge debug")
+        if setup is None:
+            return
+        tid, size, cells = setup
+        glw, vm = self.glw, self.void_manager
+        cell = glw.grid_cfg.cell_at(*glw.get_image_coords(QPointF(glw.width() / 2, glw.height() / 2)))
+        params = dict((self._config().get("auto_bbox") or {}).get("edges") or {})
+        params.update(edge_pick=self.cb_edge_pick.currentData(), apply=False, trace={"cell": cell})
+        z = glw.current_layer - self.layer_offset if 0 <= glw.current_layer - self.layer_offset < len(self.full_data) else 0
+        res = fit_edges(self.full_data, z, glw.grid_cfg, glw.coord_transform, vm, tid, size, cells, params)
+        tr = params["trace"]
+        if res is None or "px" not in tr:
+            QMessageBox.information(self, "Edge debug", f"Chip X{cell[1]:02d}_Y{cell[0]:02d}: no bbox to fit (or placed by hand).")
+            return
+        L, Rr, T, B = tr["steps"]
+        X0, Y0 = tr["X0"], tr["Y0"]
+        win = tr["window"]
+        lo, hi = np.percentile(win, [1, 99])
+        g = np.clip((win - lo) / max(hi - lo, 1e-6) * 255, 0, 255).astype(np.uint8)
+        k = max(1, int(900 // max(win.shape)))
+        im = Image.fromarray(g).convert("RGB").resize((win.shape[1] * k, win.shape[0] * k), Image.NEAREST)
+        d = ImageDraw.Draw(im)
+
+        def box(b, color):
+            if b is None:
+                return
+            cx, cy, w, h = b
+            d.rectangle([(cx - w / 2 - X0) * k, (cy - h / 2 - Y0) * k, (cx + w / 2 - X0) * k, (cy + h / 2 - Y0) * k], outline=color, width=2)
+        box(tr.get("old"), (255, 220, 0))
+        box(tr.get("new"), (0, 255, 80))
+        for st, axis in ((L, "x"), (Rr, "x"), (T, "y"), (B, "y")): # The steps taken (thin red)
+            if st is None:
+                continue
+            if axis == "x":
+                d.line([(st[0] * k, 0), (st[0] * k, im.size[1])], fill=(255, 40, 40), width=1)
+            else:
+                d.line([(0, st[0] * k), (im.size[0], st[0] * k)], fill=(255, 40, 40), width=1)
+
+        def plot(prof, e, m, st, title):
+            """The profile around one bbox edge (+- 2 x the search range), zoomed."""
+            i0, i1 = max(0, int(e - 2 * m)), min(len(prof), int(e + 2 * m) + 2)
+            seg = prof[i0:i1]
+            n = len(seg)
+            kx = max(1, int(560 // max(n, 1)))
+            W, H = n * kx, 260
+            pim = Image.new("RGB", (W, H), (20, 20, 20))
+            pd_ = ImageDraw.Draw(pim)
+            pd_.rectangle([(e - m - i0) * kx, 0, (e + m - i0) * kx, H], fill=(45, 45, 45)) # Search range
+            gr = np.abs(np.diff(seg))
+            for arr, color, top, x_off in ((seg, (230, 230, 230), 20, 0.5), (gr, (255, 150, 0), 140, 1.0)):
+                if len(arr) < 2:
+                    continue
+                a0, a1 = float(arr.min()), float(arr.max())
+                pts = [((j + x_off) * kx, top + 100 - (v - a0) / max(a1 - a0, 1e-6) * 100) for j, v in enumerate(arr)]
+                pd_.line(pts, fill=color, width=2)
+            pd_.line([((e - i0) * kx, 0), ((e - i0) * kx, H)], fill=(255, 220, 0), width=1)
+            if st is not None:
+                pd_.line([((st[0] - i0) * kx, 0), ((st[0] - i0) * kx, H)], fill=(0, 255, 80), width=2)
+            pd_.text((4, 2), title, fill=(255, 255, 255))
+            return np.asarray(pim)
+        cap = "profile (white) and step size (orange): search range (gray), bbox now (yellow), step taken (green)"
+        steps = [("1 window: bbox now (yellow), fitted (green), steps taken (red)", np.asarray(im), "rgb"),
+                 ("2 left edge: " + cap, plot(tr["px"], tr["ex"][0], tr["mx"], L, "left"), "rgb"),
+                 ("3 right edge", plot(tr["px"], tr["ex"][1], tr["mx"], Rr, "right"), "rgb"),
+                 ("4 top edge", plot(tr["py"], tr["ey"][0], tr["my"], T, "top"), "rgb"),
+                 ("5 bottom edge", plot(tr["py"], tr["ey"][1], tr["my"], B, "bottom"), "rgb")]
+        old, new = tr.get("old"), tr.get("new")
+        info = [f"Chip X{cell[1]:02d}_Y{cell[0]:02d}, layer {self.abs_layer(z)}, Edge pick {params['edge_pick']}"]
+        if old and new:
+            info.append(f"bbox now: centre ({old[0]:.2f}, {old[1]:.2f}), {old[2]:.1f} x {old[3]:.1f} px; fitted: centre "
+                        f"({new[0]:.2f}, {new[1]:.2f}) = moved ({new[0] - old[0]:+.2f}, {new[1] - old[1]:+.2f}) px, {new[2]:.1f} x {new[3]:.1f}")
+        names = ("left", "right", "top", "bottom")
+        def step_txt(i, n, st):
+            if st is None:
+                return f"{n} -"
+            pos = st[0] + (X0 if i < 2 else Y0)
+            return f"{n} {pos:.2f} ({'rising' if st[2] > 0 else 'falling'}, {st[1]:.1f})"
+        info.append("steps (raw px): " + ", ".join(step_txt(i, n, st) for i, (n, st) in enumerate(zip(names, (L, Rr, T, B)))))
+        info.append(f"step direction of each side (majority of the chips): {tr['signs']}; measured size {res.get('measured')}")
+        self._show_trace(f"Edge BBOX debug: X{cell[1]:02d}_Y{cell[0]:02d}", info, steps, {})
 
     def refine_bbox(self):
         """Aligns the bboxes on the layout again; hand-placed ones stay and set the place (auto_bbox.py)."""
@@ -2589,6 +2693,8 @@ class MainWindow(QMainWindow):
         from PySide6.QtGui import QPixmap
 
         def to_rgb(a, kind):
+            if kind == "rgb":
+                return np.asarray(a, np.uint8)
             a = np.asarray(a, np.float32)
             if kind == "mask":
                 g = (a > 0).astype(np.uint8) * 255
@@ -2623,8 +2729,9 @@ class MainWindow(QMainWindow):
         area = QScrollArea()
         inner = QWidget()
         grid = QGridLayout(inner)
-        side = 300
+        kinds = [k for _, _, k in steps]
         for i, (name, im) in enumerate(imgs):
+            side = 420 if kinds[i] == "rgb" else 300
             rgb = np.ascontiguousarray(np.asarray(im.convert("RGB")))
             q = QImage(rgb.data, rgb.shape[1], rgb.shape[0], 3 * rgb.shape[1], QImage.Format_RGB888).copy()
             pix = QPixmap.fromImage(q).scaled(side, side, Qt.KeepAspectRatio, Qt.FastTransformation)
