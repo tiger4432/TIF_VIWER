@@ -2661,6 +2661,17 @@ class MainWindow(QMainWindow):
                     joined.append((layer, v))
                     strokes += [[to_deskew(x, y) for x, y in st] for st in pl["strokes"]]
                     width = max(width, float(pl.get("width", width)))
+                elif not pl and v.get("seg_fill") and v.get("outline") and v.get("outline_r") and not vm.is_bbox(v) and \
+                        cfg.cell_at(*to_deskew(v["globalCX"], v["globalCY"])) == cell:
+                    # A detected stain on the same edge within Merge r: the painted line is added to it (its outline is
+                    # taken as a line, the area redone from the chip edge)
+                    kx = v["radiusX"] / max(v["outline_r"][0], 1e-6)
+                    ky = v["radiusY"] / max(v["outline_r"][1], 1e-6)
+                    pts = [to_deskew(v["globalCX"] + dx * kx, v["globalCY"] + dy * ky) for dx, dy in v["outline"]]
+                    got = edge_band.stain_from_strokes([pts], rect, 1.0) if len(pts) >= 3 else None
+                    if got and got[2] == side and got[3][0] - gap <= t1 and t0 <= got[3][1] + gap:
+                        joined.append((layer, v))
+                        strokes.append(pts + pts[:1])
         outline, (gx0, gy0, gx1, gy1), side, (t0, t1) = edge_band.stain_from_strokes(strokes, rect, width, side)
         type_name = (self.cb_stain_type.currentData() if getattr(self, "cb_stain_type", None) is not None else None) \
             or glw.active_type
@@ -2682,7 +2693,7 @@ class MainWindow(QMainWindow):
         glw.update()
         self.update_void_ui()
         self.statusBar().showMessage(f"Painted stain on X{cell[1]:02d}_Y{cell[0]:02d} ({side} edge, {t1 - t0:.0f} px long"
-                                     f"{', joined with %d' % len(joined) if joined else ''}); Ctrl+Z undoes")
+                                     f"{', joined with %d (painted / detected)' % len(joined) if joined else ''}); Ctrl+Z undoes")
 
     def debug_stain_chip(self, at_centre=False):
         """Edge Stains debug: every processing step of one chip (no marking)."""
