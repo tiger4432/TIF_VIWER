@@ -14,7 +14,7 @@
 
 1. **칩 자르기:** bbox마다 영상에 놓인 그대로(회전·보간 없이) 정수 px로 자름 → 칩 외곽으로 대략, 칩 가운데로 ±1 px 미세 위치 맞춤 → 작업 해상도(`work_size`)로 블록 평균 축소 → 칩마다 밝기 정규화.
 2. **기준 칩:** Golden 칩의 중앙값, 없으면 가장 깨끗한 칩들(Clean %)의 중앙값. 픽셀마다 칩끼리 흩어짐과 기준의 최솟값~최댓값 범위.
-3. **점:** 기준 최솟값보다 Dark × 흩어짐만큼 어두운 곳, 또는(Compare) SSIM이 SSIM thr × 흩어짐만큼 다른 곳. Density 이상 모인 것만.
+3. **점:** 기준 최솟값보다 Dark × 흩어짐만큼 어두운 곳, 또는(Compare) 질감 세기(SSIM의 대비 항: 국소 대비)가 SSIM thr × 흩어짐만큼 다른 곳(패드가 조금 어긋나는 건 무시). Density 이상 모인 것만.
 4. **띠:** 변마다 점을 변 방향으로 길게 이음(Merge r × Along ×), Link gap 이내 조각은 한 띠.
 5. **영역:** 칩 경계부터 띠의 가장 먼 점까지(깊이는 변을 따라 중앙값으로 다듬어 튀는 점 무시). Length ≥, Min depth, Aspect를 넘으면 오염. 모서리를 도는 조각은 합침.
 
@@ -33,7 +33,7 @@
 | Density | `speck_density` | 0.06 | 점이 모여 있어야 하는 비율 | 띠가 듬성하면 ↓ |
 | Aspect | `min_aspect` | 1.5 | 길이 ÷ 깊이 최소 | 짧고 두꺼운 오염이면 ↓ |
 | Compare | `compare` | "both" | 점 기준: 어두움 + SSIM("both") / 어두움("intensity") / SSIM("ssim") | 눈으로 차이가 거의 없는 띠: both / ssim |
-| SSIM thr | `ssim_threshold` | 25 | 구조가 다른 점 기준(흩어짐 배수) | 미검이면 ↓, 과검이면 ↑ |
+| SSIM thr | `ssim_threshold` | 8 | 구조가 다른 점 기준(흩어짐 배수) | 미검이면 ↓, 과검이면 ↑ |
 | SSIM σ | `ssim_sigma_px` | 3 | SSIM 창(가우시안 σ, px) | 띠가 굵으면 ↑ |
 | Blur σ | `blur_px` | 0 | 비교 전 가우시안 블러(px, 0=끔) | 노이즈가 심할 때 |
 | Skip | `edge_skip_px` | 4 | 칩 맨 바깥에서 제외하는 폭(px) | 칩 테두리가 잡히면 ↑ |

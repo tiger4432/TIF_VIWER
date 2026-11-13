@@ -75,7 +75,7 @@ DEFAULTS = {
     "compare": "both",     # What differs from the median chip: "intensity" (darker), "ssim" (local structure /
                             # texture changed: pads covered or smeared, the mean brightness hardly), "both"
     "ssim_sigma_px": 3.0,   # SSIM window (Gaussian sigma, image px)
-    "ssim_threshold": 25.0,  # SSIM: a speck where the structure differs by this many chip-to-chip spreads
+    "ssim_threshold": 8.0,   # SSIM: a speck where the structure differs by this many chip-to-chip spreads
     "work_size": 384,       # Longest side of the working chip image
     "type": None,           # Void type of the marks (None: the selected type)
 }
@@ -623,17 +623,18 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             return chips[k] if tex is None else tex[k].astype(np.float32)
 
         def dissim(k, golden):
-            """1 - local SSIM of the chip (pad grid not averaged) against the median of such chips (Gaussian window
-            ssim_sigma_px): texture / structure changed (pads covered, smeared) even where the mean brightness hardly is."""
+            """Texture change: 1 - the contrast part of SSIM (local std of the chip, pad grid not averaged, against the
+            median of such chips; Gaussian window ssim_sigma_px). Pads covered or smeared lower the local contrast;
+            pads a fraction of a px off (chips are cut on whole px) do not change it, while the structure part of
+            SSIM read them as a change everywhere on the pads."""
             a = tex_of(k)
             L = float(np.percentile(golden, 99) - np.percentile(golden, 1)) + 1e-3
-            c1, c2 = (0.01 * L) ** 2, (0.03 * L) ** 2
+            c2 = (0.03 * L) ** 2
             ma, mb = _gauss(a, ss_sig), _gauss(golden, ss_sig)
-            va = _gauss(a * a, ss_sig) - ma * ma
-            vb = _gauss(golden * golden, ss_sig) - mb * mb
-            cov = _gauss(a * golden, ss_sig) - ma * mb
-            ss = ((2 * ma * mb + c1) * (2 * cov + c2)) / ((ma * ma + mb * mb + c1) * (va + vb + c2))
-            return (1.0 - ss).astype(np.float32)
+            va = np.maximum(_gauss(a * a, ss_sig) - ma * ma, 0)
+            vb = np.maximum(_gauss(golden * golden, ss_sig) - mb * mb, 0)
+            con = (2 * np.sqrt(va * vb) + c2) / (va + vb + c2)
+            return (1.0 - con).astype(np.float32)
 
         def with_ssim(ref, sel, per_strip=None):
             """ref + (median, spread) of the chips' dissimilarity (the SSIM map in chip-to-chip spreads) + the median
