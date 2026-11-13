@@ -2474,8 +2474,8 @@ class MainWindow(QMainWindow):
         self.btn_stain_paint = QPushButton("Paint line")
         self.btn_stain_paint.setCheckable(True)
         self.btn_stain_paint.setToolTip("Mark a stain by hand: paint over its dark line on the image (left drag). The stain is the\n"
-                                        "nearest chip edge up to the painted line; strokes on the same edge within Link gap are\n"
-                                        "joined into one stain. Esc or this button ends painting. Ctrl+Z undoes")
+                                        "nearest chip edge up to the painted line; strokes on the same edge within Merge r are\n"
+                                        "joined into one stain (the gap filled). Esc or this button ends painting. Ctrl+Z undoes")
         self.btn_stain_paint.toggled.connect(self.toggle_paint_line)
         h6.addWidget(self.btn_stain_paint)
         h6.addWidget(QLabel("Brush"))
@@ -2587,7 +2587,7 @@ class MainWindow(QMainWindow):
 
     def on_paint_stroke(self, stroke):
         """A painted stroke (Paint line): the stain from the nearest chip edge up to the line, joined with the painted
-        stains on the same edge within Link gap."""
+        stains on the same edge within Merge r."""
         from sat_widgets import edge_band
         if not stroke: # Esc: paint mode ended
             self.btn_stain_paint.setChecked(False)
@@ -2611,7 +2611,8 @@ class MainWindow(QMainWindow):
         if res is None:
             return
         side, (t0, t1) = res[2], res[3]
-        gap = self._stain_inputs["link_gap_px"].value() if "link_gap_px" in self._stain_inputs else 40.0
+        # Strokes on the same edge within Merge r (along the edge) are one stain, the gap between them filled
+        gap = self._stain_inputs["merge_radius_px"].value() if "merge_radius_px" in self._stain_inputs else 8.0
         to_raw, to_deskew = glw.deskew_to_raw, glw.raw_to_deskew
         strokes = [stroke]
         joined = []
