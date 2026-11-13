@@ -5,6 +5,12 @@
 - **git checkout(git bundle로 업데이트):** `defaults\` 폴더는 없습니다. `plugins\results_api.py`도 업데이트(merge)로 새 버전이 되고, 현장에서 고친 내용은 `--autostash`가 그 위에 다시 얹습니다(같은 줄을 고쳤으면 git이 충돌로 알림). 아래 노트의 "`defaults\`에서 옮겨 붙이세요"는 zip 설치에만 해당합니다.
 - **zip 설치:** 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다(새 기본값은 zip 안의 `defaults\`).
 
+## 1.1.33
+
+- **Edge Stains 분할 → 박스:** 어두운 점(경계)과 안쪽 밝은 부분을 분할해 Merge r 안이면 이어 붙이고, 그 영역의 사각형을 박스로(변에서 경계까지 전체). 변마다 따로 처리해 모서리 부근도 잡습니다. 합성: 찾음 97 → 99%, 과검 5 → 0, 박스가 오염 길이의 ~99%.
+- **Edge Stains 별도 그룹 + 입력칸:** Length ≥, Merge r, Depth %, Thr, Dark.
+- **A 키:** 영상 위에서 A → 그 칩의 감지된(점선) 마킹 일괄 리뷰 완료.
+
 ## 1.1.32
 
 - **Edge Stains 버튼(가장자리 오염):** 칩 안쪽 가장자리에 붙어 길게 생기는 오염(경계는 점점이 어둡고 찌글찌글, 안쪽은 밝음)을 칩끼리 비교로 찾아 점선 사각형으로 마킹(선택한 타입). 합성 단일 레이어 웨이퍼에서 97% 찾음, 과검 웨이퍼당 0~5개. 칩끼리 비슷해야 합니다. 설정 config `void_detect.edge_band`(README "가장자리 오염").

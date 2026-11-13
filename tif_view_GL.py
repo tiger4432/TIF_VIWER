@@ -394,6 +394,12 @@ class MainWindow(QMainWindow):
         act_copy.setShortcutContext(Qt.WidgetShortcut)
         act_copy.triggered.connect(self.copy_chip_image)
         self.glw.addAction(act_copy)
+        # A on the image: the detected (dashed) markings of the chip under the mouse are reviewed
+        act_review = QAction("Review Chip", self.glw)
+        act_review.setShortcut(QKeySequence(Qt.Key_A))
+        act_review.setShortcutContext(Qt.WidgetShortcut)
+        act_review.triggered.connect(self.review_chip)
+        self.glw.addAction(act_review)
         
         # 3.5 Void Marking Control
         self.void_manager = VoidManager(declaration_path("config.json"))
@@ -533,12 +539,6 @@ class MainWindow(QMainWindow):
         v_det = QVBoxLayout(self.gb_detect)
         h_detect.addWidget(btn_detect, 1)
         h_detect.addWidget(self.sb_detect_thr)
-        btn_stain = QPushButton("Edge Stains")
-        btn_stain.setToolTip("Contamination along the inside of the chip edges (long, dark ragged rim, bright inside):\n"
-                             "each chip compared with the median chip; marked as dashed boxes with the selected void type\n"
-                             "(config void_detect.edge_band, sat_widgets/edge_band.py). Chips must look alike.")
-        btn_stain.clicked.connect(self.detect_edge_stains)
-        h_detect.addWidget(btn_stain)
         v_det.addLayout(h_detect)
         h_review = QHBoxLayout()
         h_review.addWidget(btn_prev_det)
@@ -658,6 +658,7 @@ class MainWindow(QMainWindow):
         
         dock_layout.addWidget(self.gb_void)
         dock_layout.addWidget(self.gb_detect)
+        self._build_edge_stain_group(dock_layout)
         
         # Init Types
         self.populate_void_types()
@@ -2209,6 +2210,78 @@ class MainWindow(QMainWindow):
         self.update_void_ui()
         self.statusBar().showMessage(f"Results API: {n} voids loaded ({'replaced' if replace else 'added'}; Ctrl+Z undoes)")
 
+    def _build_edge_stain_group(self, dock_layout):
+        """Edge Stains group: the button and its settings (start values: config void_detect.edge_band)."""
+        from sat_widgets import edge_band
+        cfg = dict(edge_band.DEFAULTS)
+        cfg.update((self._config().get("void_detect") or {}).get("edge_band") or {})
+        gb = QGroupBox("Edge Stains")
+        form = QFormLayout(gb)
+        btn = QPushButton("Detect Edge Stains")
+        btn.setToolTip("Contamination along the inside of the chip edges (long, dark specked rim, bright inside):\n"
+                       "each chip compared with the median chip, the stain segmented (rim + inside) and marked as a\n"
+                       "dashed box with the selected void type (sat_widgets/edge_band.py). Chips must look alike.")
+        btn.clicked.connect(self.detect_edge_stains)
+        form.addRow(btn)
+        self._stain_inputs = {}
+
+        def spin(key, label, lo, hi, step, decimals, tip):
+            sb = QDoubleSpinBox()
+            sb.setRange(lo, hi); sb.setSingleStep(step); sb.setDecimals(decimals)
+            sb.setValue(float(cfg[key]) * (100.0 if key == "depth_frac" else 1.0))
+            sb.setToolTip(tip)
+            self._stain_inputs[key] = sb
+            return sb
+
+        h1 = QHBoxLayout()
+        h1.addWidget(QLabel("Length ≥"))
+        h1.addWidget(spin("min_length_px", "", 5, 100000, 10, 0, "Shortest stain along the edge (image px)"))
+        h1.addWidget(QLabel("Merge r"))
+        h1.addWidget(spin("merge_radius_px", "", 0, 1000, 1, 0, "Dark specks / bright parts this close (image px) are one stain:\n"
+                                                                  "larger joins a rim of sparse dots into one long line"))
+        form.addRow(h1)
+        h2 = QHBoxLayout()
+        h2.addWidget(QLabel("Depth %"))
+        h2.addWidget(spin("depth_frac", "", 1, 50, 1, 0, "Edge zone searched: this share of the chip size from the edge inward"))
+        h2.addWidget(QLabel("Thr"))
+        h2.addWidget(spin("threshold", "", 0.5, 100, 0.5, 1, "Finding a stain: averaged difference / noise (lower finds more)"))
+        h2.addWidget(QLabel("Dark"))
+        h2.addWidget(spin("dark_threshold", "", 0.5, 50, 0.5, 1, "A dark speck of the rim: darker than the median chip by this many spreads"))
+        form.addRow(h2)
+        dock_layout.addWidget(gb)
+
+    def _edge_stain_params(self):
+        out = {k: sb.value() for k, sb in getattr(self, "_stain_inputs", {}).items()}
+        if "depth_frac" in out:
+            out["depth_frac"] /= 100.0
+        return out
+
+    def review_chip(self):
+        """A on the image: every detected (dashed) marking of the chip under the mouse is reviewed (one undo step)."""
+        from PySide6.QtGui import QCursor
+        glw, vm = self.glw, self.void_manager
+        if self.full_data is None:
+            return
+        cfg = glw.grid_cfg
+        pos = glw.mapFromGlobal(QCursor.pos())
+        at = QPointF(pos) if glw.rect().contains(pos) else QPointF(glw.width() / 2, glw.height() / 2)
+        cell = cfg.cell_at(*glw.get_image_coords(at))
+        todo = [v for vs in vm.voids.values() for v in vs
+                if v.get("auto") == "detected" and cfg.cell_at(*glw.raw_to_deskew(v["globalCX"], v["globalCY"])) == cell]
+        if not todo:
+            self.statusBar().showMessage(f"A: no detected markings to review in chip X{cell[1]:02d}_Y{cell[0]:02d}")
+            return
+        vm.begin_change()
+        try:
+            for v in todo:
+                v.pop("auto", None)
+            vm.touch()
+        finally:
+            vm.end_change()
+        glw.update()
+        self.update_void_ui()
+        self.statusBar().showMessage(f"A: {len(todo)} detected marking(s) of chip X{cell[1]:02d}_Y{cell[0]:02d} reviewed (Ctrl+Z undoes)")
+
     def detect_edge_stains(self):
         """Edge Stains button: sat_widgets/edge_band.py on the loaded layers, dashed boxes of the selected type."""
         from sat_widgets import edge_band
@@ -2219,6 +2292,7 @@ class MainWindow(QMainWindow):
             return
         type_name, cells, refs, params, layers = setup
         ep = dict(params.get("edge_band") or {})
+        ep.update(self._edge_stain_params()) # The group's inputs
         type_name = ep.get("type") or type_name
         if type_name not in self.void_manager.types:
             QMessageBox.warning(self, "Edge Stains", f"Void type {type_name!r} (void_detect.edge_band.type) is not declared.")
@@ -2248,7 +2322,7 @@ class MainWindow(QMainWindow):
         added = 0
         vm.begin_change()
         try:
-            for layer, gx, gy, rx, ry, cell, score in found:
+            for layer, gx, gy, rx, ry, cell, score, outline in found:
                 # Skip what is marked already (any layer): a rerun does not double the marks
                 if any(not vm.is_bbox(v) and abs(to_deskew(v["globalCX"], v["globalCY"])[0] - gx) < rx + v["radiusX"]
                        and abs(to_deskew(v["globalCX"], v["globalCY"])[1] - gy) < ry + v["radiusY"]
@@ -2257,6 +2331,10 @@ class MainWindow(QMainWindow):
                 v = vm.add_void(layer, *to_raw(gx, gy), rx, ry, type_name)
                 v["auto"] = "detected" # Dashed until reviewed (Next Detected)
                 v["score"] = score
+                if outline: # Segmented stain (Shapes, debug): raw px offsets from the centre
+                    cx, cy = v["globalCX"], v["globalCY"]
+                    v["outline"] = [[round(px - cx, 1), round(py - cy, 1)] for px, py in (to_raw(x, y) for x, y in outline)]
+                    v["outline_r"] = [round(v["radiusX"], 2), round(v["radiusY"], 2)]
                 added += 1
         finally:
             vm.end_change()
