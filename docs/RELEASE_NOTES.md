@@ -5,6 +5,10 @@
 - **git checkout(git bundle로 업데이트):** `defaults\` 폴더는 없습니다. `plugins\results_api.py`도 업데이트(merge)로 새 버전이 되고, 현장에서 고친 내용은 `--autostash`가 그 위에 다시 얹습니다(같은 줄을 고쳤으면 git이 충돌로 알림). 아래 노트의 "`defaults\`에서 옮겨 붙이세요"는 zip 설치에만 해당합니다.
 - **zip 설치:** 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다(새 기본값은 zip 안의 `defaults\`).
 
+## 1.1.41
+
+- **Edge Stains 진행 표시 촘촘히:** 단계(위치 맞춤 표본 / 칩 자르기 / 기준 칩 / 띠 찾기)와 칩 번호(예: "cutting chips 77 / 196")를 칩마다 갱신하고, 어느 단계에서든 Cancel이 바로 먹습니다. Edge BBOX도 두 번째 절반(단차 고르기)까지 진행 표시.
+
 ## 1.1.40
 
 - **Paint line:** 붓질끼리는 **Merge r** 이내면 한 오염으로 이어집니다(사이 구간도 채움; 이전엔 Link gap).

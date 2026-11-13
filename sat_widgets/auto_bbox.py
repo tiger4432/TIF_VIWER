@@ -800,7 +800,9 @@ def fit_edges(stack, z, grid_cfg, coord_transform, void_manager, bbox_type, size
                 votes.append(st[2])
         signs.append(1 if sum(votes) >= 0 else -1)
     fits = {}
-    for cell, (px, py, ex, ey, mx, my, X0, Y0) in profs.items():
+    for n, (cell, (px, py, ex, ey, mx, my, X0, Y0)) in enumerate(profs.items()):
+        if progress is not None and not progress(len(order) * 0.5 + n * 0.5 * len(order) / max(1, len(profs))):
+            return None
         L = step_at(px, ex[0] - mx, ex[0] + mx, signs[0], -1)
         Rr = step_at(px, ex[1] - mx, ex[1] + mx, signs[1], 1)
         T = step_at(py, ey[0] - my, ey[0] + my, signs[2], -1)

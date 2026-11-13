@@ -288,14 +288,15 @@ def _peak_near(a, b, dx0, dy0, rad, hann=True):
             iy + sub(c0, r[(iy - 1) % h, ix % w], r[(iy + 1) % h, ix % w]))
 
 
-def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None):
+def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tick=None):
     """
     Chips cut from the raw image as they lie (no rotation, no resampling: a pad grid of about 1 px at
     a small angle gives no moire), moved onto the median chip by whole image px only (measured by
     phase correlation on the centre part, frac of the size), then reduced by f x f block means (the
     blocks sit on the same layout place in every chip).
     origin: {cell: (x, y)} raw top-left of the chip window (Wr x Hr, nominal). Returns
-    {cell: (chip (Hr // f, Wr // f) float32, (x, y) raw top-left actually cut)}.
+    {cell: (chip (Hr // f, Wr // f) float32, (x, y) raw top-left actually cut)}, or None when
+    tick(stage, i, n) (called per chip: "sample", "cut") returned False.
     """
     from .void_detect import _blur, _phase_shift
     H, W = Hr // f, Wr // f
@@ -358,13 +359,20 @@ def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None):
 
     cells = sorted(origin)
     pick = [cells[i] for i in sorted(set(np.linspace(0, len(cells) - 1, min(len(cells), sample_n)).astype(int)))]
-    sample = {c: w for c, w in windows(pick, 1) if w is not None}
+    sample = {}
+    for i, (c, w) in enumerate(windows(pick, 1)):
+        if w is not None:
+            sample[c] = w
+        if tick is not None and not tick("sample", i + 1, len(pick)):
+            return None
     if len(sample) < 4:
         return {}
     ref = make_ref([(w, (0, 0)) for w in sample.values()])
     ref = make_ref([(w, shift(w, ref)) for w in sample.values()])
     out = {}
-    for c, win in windows(cells, 16):
+    for i, (c, win) in enumerate(windows(cells, 16)):
+        if tick is not None and not tick("cut", i + 1, len(cells)):
+            return None
         if win is None:
             continue
         sx, sy = shift(win, ref)
@@ -444,14 +452,38 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
     order = sorted(rects)
     found = []
     taken = {} # cell -> [(x0, y0, x1, y1)] Deskewed boxes already marked (first layer wins)
-    n_steps = len(zs) * 2
+    # Progress per layer: sample (<= 48 chips), cut (every chip), reference (every chip), detect (every chip)
+    N = len(order)
+    n_samp = min(N, 48)
+    per_layer = n_samp + 3 * N + 2
+    n_steps = len(zs) * per_layer
+    stage_at = {"sample": 0, "cut": n_samp, "reference": n_samp + N, "detect": n_samp + 2 * N + 1}
+    stage_txt = {"sample": "aligning (sample chips)", "cut": "cutting chips", "reference": "reference chip",
+                 "detect": "finding lines"}
+    import time as _time
+    last = [0.0]
+
+    def tick(li, layer, stage, i, n, force=False):
+        """progress(...) at most every 0.05 s (and at the end of a stage): False cancels."""
+        if progress is None:
+            return True
+        now = _time.monotonic()
+        if not force and i < n and now - last[0] < 0.05:
+            return True
+        last[0] = now
+        lay = f"layer {layer} ({li + 1}/{len(zs)}), " if len(zs) > 1 else f"layer {layer}, "
+        return progress(li * per_layer + stage_at[stage] + i, n_steps,
+                        f"Edge stains: {lay}{stage_txt[stage]} {i} / {n}")
     for li, (z, layer) in enumerate(zip(zs, layer_numbers)):
-        if progress is not None and not progress(2 * li, n_steps, f"Edge stains: layer {layer}"):
+        if not tick(li, layer, "sample", 0, n_samp, True):
             return None
         trace = p.get("trace") if li == 0 else None # Debug: every step of one chip ({"cell": (row, col)})
         steps = trace.setdefault("steps", []) if trace is not None else None
         tk = trace.get("cell") if trace is not None else None
-        cut = _raw_chips(stack, z, origin, Wr, Hr, f, M, p["register_frac"], keep=trace)
+        cut = _raw_chips(stack, z, origin, Wr, Hr, f, M, p["register_frac"], keep=trace,
+                         tick=lambda stage, i, n, li=li, layer=layer: tick(li, layer, stage, i, n))
+        if cut is None:
+            return None
         if len(cut) < 4:
             continue
         keys = [k for k in order if k in cut]
@@ -557,7 +589,11 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
         ref = reference(gold or sample, None if gold else sample)
         clean = sample
         if p["clean_ref"] < 1.0:
-            dirt = {k: float(np.clip(np.abs(dev_of(k, ref)[edges]), 0, 10).mean()) for k in keys}
+            dirt = {}
+            for i, k in enumerate(keys):
+                dirt[k] = float(np.clip(np.abs(dev_of(k, ref)[edges]), 0, 10).mean())
+                if not tick(li, layer, "reference", i + 1, len(keys)):
+                    return None
             n_clean = max(min(8, len(keys)), int(round(p["clean_ref"] * len(keys))))
             clean = sorted(keys, key=lambda k: dirt[k])[:min(64, n_clean)]
         ref = reference(gold or clean, clean)
@@ -572,12 +608,14 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             steps.append(("6 chip-to-chip spread", ref[1], "gray"))
             steps.append(("7 reference min (envelope)", ref[2], "gray"))
             steps.append(("8 reference max (envelope)", ref[3], "gray"))
-        if progress is not None and not progress(2 * li + 1, n_steps, f"Edge stains: layer {layer}"):
+        if not tick(li, layer, "detect", 0, len(keys), True):
             return None
 
         dbg = p.get("debug")
         shown = masks is not None and li == 0
-        for k in keys:
+        for ki, k in enumerate(keys):
+            if not tick(li, layer, "detect", ki + 1, len(keys)):
+                return None
             dev = dev_of(k, ref)
             dark = dev <= -p["dark_threshold"] if p["compare"] != "ssim" else np.zeros((H, W), bool)
             if use_ssim: # Structure changed (SSIM), in chip-to-chip spreads, counts as a speck too
