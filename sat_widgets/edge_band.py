@@ -57,8 +57,9 @@ DEFAULTS = {
     "bright_threshold": 1.5,  # Segmentation: the bright inside (3x3 average), in spreads
     "merge_radius_px": 8,   # Segmentation: dark specks this close (image px, across the edge) are one line
     "merge_along": 2.0,     # ... and this many times farther along the edge (a sparse rim joined into one line)
+    "smooth_px": 40,        # Area boundary fitted: its depth smoothed along the edge over this (image px; 0 = off)
     "min_speck_px": 0,      # Before the merge: specks (connected dark px) smaller than this area (image px2) dropped (0 = off)
-    "min_piece_px": 5,      # Line pieces shorter than this along the edge (image px: lone specks) are dropped
+    "min_piece_px": 0,      # Before the merge: speck pieces shorter than this along the edge (image px) dropped (0 = off)
     "link_gap_px": 40,      # Pieces of a dark line this far apart along the edge (image px) are one stain
     "texture_px": 2.0,      # Pad grid pitch (image px): every chip averaged over a box of it before the comparison
                             # (0 = off). Pads every other px: 2
@@ -789,21 +790,28 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                 steps.append(("10 dark specks (Dark %.1f%s)" % (p["dark_threshold"], ", SSIM %.1f" % p["ssim_threshold"] if use_ssim else ""), dark & edges, "mask"))
                 steps.append(("11 specks kept (Density %.2f, Speck >= %g px2)" % (p["speck_density"], p["min_speck_px"]), specks & edges, "mask"))
             lines = np.zeros((H, W), bool)
+            pieces = np.zeros((H, W), bool) # Specks left by Piece >= (debug)
             cands = []
             for along, strip, side in strips:
                 # The dark specks of the rim joined into lines, longer along the edge than across: a sparse,
                 # ragged rim becomes one line. A line long enough is a stain: the chip edge up to the line
                 # (bright parts are not added: the area does not run past the rim into the chip)
-                line = line_closing(specks & strip, along) & strip
+                sp = specks & strip
                 if p["min_piece_px"] > 0:
-                    # Pieces shorter along the edge than min_piece_px (a lone dark speck, a small blob) are not part
-                    # of a line: they would pull the area inward
-                    lim_c = p["min_piece_px"] / (sx if along == "x" else sy)
-                    keep = np.zeros_like(line)
-                    for r0, r1, c0, c1, _a in _components(line):
-                        if ((c1 - c0) if along == "x" else (r1 + 1 - r0)) >= lim_c:
-                            keep[r0:r1 + 1, c0:c1] |= line[r0:r1 + 1, c0:c1]
-                    line = keep
+                    # Before the merge: speck pieces (connected) shorter along the edge than min_piece_px are dropped
+                    # (lone specks, small blobs: they would join into the line and pull the area inward)
+                    lab, _areas = _label(sp)
+                    n_lab = len(_areas)
+                    if n_lab > 1:
+                        ys_, xs_ = np.nonzero(lab)
+                        cc = xs_ if along == "x" else ys_
+                        lo = np.full(n_lab, 1 << 30); hi = np.full(n_lab, -1)
+                        np.minimum.at(lo, lab[ys_, xs_], cc)
+                        np.maximum.at(hi, lab[ys_, xs_], cc)
+                        ext = (hi - lo + 1) * (sx if along == "x" else sy)
+                        sp &= (ext >= p["min_piece_px"])[lab]
+                    pieces |= sp
+                line = line_closing(sp, along) & strip
                 lines |= line
                 # Pieces of the line are linked along the edge across gaps up to link_gap_px: a stain is a run
                 # along the edge with line pixels, its area the chip edge up to the farthest line pixel
@@ -829,6 +837,10 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                     if km > 1 and len(dep) > km:
                         pad_ = np.pad(dep, km // 2, mode="edge")
                         dep = np.median(np.lib.stride_tricks.sliding_window_view(pad_, km), axis=1)
+                    # Fitted: the depth averaged along the edge over smooth_px (Gaussian), so the boundary does not
+                    # jag in and out across the edge
+                    if p["smooth_px"] > 0 and len(dep) > 2:
+                        dep = _blur1(np.asarray(dep, np.float64), p["smooth_px"] / s_al / 2.0)
                     fill = np.arange(seg.shape[0])[:, None] < np.round(dep)[None, :]
                     fill[:skip] = False
                     d_px = (int(np.nonzero(fill.any(axis=1))[0][-1]) + 1 - skip) * s_al if fill.any() else 0
@@ -867,6 +879,8 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                 for full, _ in groups:
                     area_all |= full
             if k == tk:
+                if p["min_piece_px"] > 0:
+                    steps.append(("11b specks left by Piece >= %g px (before the merge)" % p["min_piece_px"], pieces, "mask"))
                 steps.append(("12 joined lines (Merge %g px, x%g along)" % (p["merge_radius_px"], p["merge_along"]), lines, "mask"))
                 steps.append(("13 stain areas: chip edge up to the line", area_all, "mask"))
                 trace.setdefault("info", []).extend(f"dropped: {d[1]} (length {d[2]}, depth {d[3]} px)" for d in (dbg or []) if d[0] == k)

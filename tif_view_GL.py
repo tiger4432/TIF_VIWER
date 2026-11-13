@@ -2402,13 +2402,15 @@ class MainWindow(QMainWindow):
             "Link gap", spin("link_gap_px", "", 0, 100000, 5, 0, "Pieces of a line this far apart along the edge (image px) are one stain"),
             "Speck ≥", spin("min_speck_px", "", 0, 100000, 1, 0, "Before the merge: dark specks (connected px) smaller than this area (image px²)\n"
                                                                   "are dropped (0 = off; Density also drops lone specks)"),
-            "Piece ≥", spin("min_piece_px", "", 0, 100000, 5, 0, "Line pieces shorter than this along the edge (image px) are dropped: a lone dark\n"
-                                                                 "speck does not pull the area inward (0 = keep all)"))
+            "Piece ≥", spin("min_piece_px", "", 0, 100000, 5, 0, "Before the merge: speck pieces shorter than this along the edge (image px) are\n"
+                                                                 "dropped, so a lone speck does not join the line and pull the area inward (0 = off)"))
         row("Depth %", spin("depth_frac", "", 1, 50, 1, 0, "Edge zone searched: this share of the chip size from the edge inward"),
             "Dark", spin("dark_threshold", "", 0.5, 50, 0.5, 1, "A dark speck: darker than the median chip's local min by this many chip-to-chip spreads"),
             "Density", spin("speck_density", "", 0.0, 1.0, 0.01, 2, "Specks around a speck (merge radius box), at least this share:\n"
                                                                      "dense rim specks stay, scattered noise specks go (lower if the rim is sparse)"),
-            "Aspect", spin("min_aspect", "", 0.5, 50, 0.1, 1, "Length along the edge / depth, at least"))
+            "Aspect", spin("min_aspect", "", 0.5, 50, 0.1, 1, "Length along the edge / depth, at least"),
+            "Smooth", spin("smooth_px", "", 0, 100000, 5, 0, "The area's boundary fitted: its depth smoothed along the edge over this many\n"
+                                                              "image px, so it does not jag in and out across the edge (0 = off)"))
         self.cb_stain_compare = QComboBox()
         for key, label in (("both", "dark + SSIM"), ("intensity", "dark"), ("ssim", "SSIM")):
             self.cb_stain_compare.addItem(label, key)
