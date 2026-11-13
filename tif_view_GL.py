@@ -2248,12 +2248,47 @@ class MainWindow(QMainWindow):
         h2.addWidget(QLabel("Dark"))
         h2.addWidget(spin("dark_threshold", "", 0.5, 50, 0.5, 1, "A dark speck of the rim: darker than the median chip by this many spreads"))
         form.addRow(h2)
+        h3 = QHBoxLayout()
+        h3.addWidget(QLabel("Bright"))
+        h3.addWidget(spin("bright_threshold", "", 0.1, 50, 0.1, 1, "The bright inside (3x3 average): brighter than the median chip by this many spreads"))
+        h3.addWidget(QLabel("Density"))
+        h3.addWidget(spin("speck_density", "", 0.0, 1.0, 0.01, 2, "Dark specks around a speck (merge radius box), at least this share:\n"
+                                                                     "dense rim specks stay, scattered noise specks go (lower if the rim is sparse)"))
+        h3.addWidget(QLabel("Aspect"))
+        h3.addWidget(spin("min_aspect", "", 0.5, 50, 0.1, 1, "Length along the edge / depth, at least"))
+        form.addRow(h3)
+        h4 = QHBoxLayout()
+        h4.addWidget(QLabel("Touch"))
+        h4.addWidget(spin("touch_px", "", 0, 1000, 1, 0, "Attached to the chip edge: its pixels within this many image px of the edge ..."))
+        h4.addWidget(QLabel("Contact"))
+        h4.addWidget(spin("contact", "", 0.0, 1.0, 0.05, 2, "... along at least this share of its length (else inside the chip: not a stain)"))
+        h4.addWidget(QLabel("Skip"))
+        h4.addWidget(spin("edge_skip_px", "", 0, 1000, 1, 0, "Outermost image px of the chip left out (bbox / package edge)"))
+        h4.addWidget(QLabel("Box"))
+        h4.addWidget(spin("min_width_px", "", 1, 1000, 1, 0, "Averaging box (image px) for finding stains: about the narrowest stain"))
+        form.addRow(h4)
+        h5 = QHBoxLayout()
+        h5.addWidget(QLabel("Mark as"))
+        self.cb_stain_type = QComboBox()
+        self.cb_stain_type.setToolTip("Void type of the stain marks (selected: the type selected for marking)")
+        self.cb_stain_type.addItem("(selected type)", None)
+        for name in self.void_manager.types:
+            if not self.void_manager.is_bbox({"type": name}):
+                self.cb_stain_type.addItem(name, name)
+        if cfg.get("type"):
+            i = self.cb_stain_type.findData(cfg["type"])
+            if i >= 0:
+                self.cb_stain_type.setCurrentIndex(i)
+        h5.addWidget(self.cb_stain_type, 1)
+        form.addRow(h5)
         dock_layout.addWidget(gb)
 
     def _edge_stain_params(self):
         out = {k: sb.value() for k, sb in getattr(self, "_stain_inputs", {}).items()}
         if "depth_frac" in out:
             out["depth_frac"] /= 100.0
+        if getattr(self, "cb_stain_type", None) is not None and self.cb_stain_type.currentData():
+            out["type"] = self.cb_stain_type.currentData()
         return out
 
     def review_chip(self):
@@ -2335,6 +2370,7 @@ class MainWindow(QMainWindow):
                     cx, cy = v["globalCX"], v["globalCY"]
                     v["outline"] = [[round(px - cx, 1), round(py - cy, 1)] for px, py in (to_raw(x, y) for x, y in outline)]
                     v["outline_r"] = [round(v["radiusX"], 2), round(v["radiusY"], 2)]
+                    v["seg_fill"] = True # Drawn filled (the stain area)
                 added += 1
         finally:
             vm.end_change()

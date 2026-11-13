@@ -5,6 +5,12 @@
 - **git checkout(git bundle로 업데이트):** `defaults\` 폴더는 없습니다. `plugins\results_api.py`도 업데이트(merge)로 새 버전이 되고, 현장에서 고친 내용은 `--autostash`가 그 위에 다시 얹습니다(같은 줄을 고쳤으면 git이 충돌로 알림). 아래 노트의 "`defaults\`에서 옮겨 붙이세요"는 zip 설치에만 해당합니다.
 - **zip 설치:** 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다(새 기본값은 zip 안의 `defaults\`).
 
+## 1.1.34
+
+- **Edge Stains = 칩 경계부터 어두운 띠까지 칠한 영역:** 영역을 칩 경계에서 어두운 띠(가장 먼 어두운 점)까지 채우고(끊긴 구간은 이어 채움), 화면에 반투명하게 칠해 보여 줍니다. 박스는 그 영역의 사각형.
+- **칩 경계에 붙은 것만:** 영역이 칩 경계에 닿아 있어야(Touch, Contact) 오염으로 인정 → 칩 안쪽의 엉뚱한 곳을 잡지 않습니다.
+- **모든 설정을 입력칸으로:** Bright, Density, Aspect, Touch, Contact, Skip, Box, Mark as(타입) 추가.
+
 ## 1.1.33
 
 - **Edge Stains 분할 → 박스:** 어두운 점(경계)과 안쪽 밝은 부분을 분할해 Merge r 안이면 이어 붙이고, 그 영역의 사각형을 박스로(변에서 경계까지 전체). 변마다 따로 처리해 모서리 부근도 잡습니다. 합성: 찾음 97 → 99%, 과검 5 → 0, 박스가 오염 길이의 ~99%.

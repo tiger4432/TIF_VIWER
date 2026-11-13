@@ -983,6 +983,11 @@ class GLImageWidget(QOpenGLWidget):
         if len(pts) < 3:
             return
         painter.save()
+        if v.get("seg_fill"): # Segmented stain (Edge Stains): the area in the type colour, translucent
+            c = QColor(*self.void_manager.types.get(v.get("type"), {}).get("color", (255, 80, 255)))
+            c.setAlpha(90)
+            painter.setPen(Qt.NoPen); painter.setBrush(c)
+            painter.drawPolygon(pts)
         for color, width in ((QColor(0, 0, 0, 150), 3.0), (QColor(255, 80, 255, 230), 1.5)):
             pen = QPen(color); pen.setWidthF(width)
             painter.setPen(pen); painter.setBrush(Qt.NoBrush)
@@ -1117,8 +1122,8 @@ class GLImageWidget(QOpenGLWidget):
                  vm.paint_void(painter, v, sx, sy, self.zoom, style=style, quadrant=quadrant, badges=True,
                                width=1.0 if ghost else self.void_line_width, halo=not ghost,
                                min_radius=0.0 if vm.is_bbox(v) else self.void_min_px)
-                 if self.show_outlines and not ghost and v.get("outline") and v.get("outline_r"):
-                     self._paint_outline(painter, v)
+                 if not ghost and v.get("outline") and v.get("outline_r") and (self.show_outlines or v.get("seg_fill")):
+                     self._paint_outline(painter, v) # Edge stains: always, filled
 
              for layer_idx, v_list in vm.voids.items():
                  if layer_idx == self.current_layer:
