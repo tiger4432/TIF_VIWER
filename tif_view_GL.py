@@ -32,7 +32,7 @@ from sat_widgets.exporter import ExportManager
 from sat_widgets.patch_viewer import PatchViewer
 from sat_widgets.roi_inspector import ROIInspector
 from sat_widgets.angle_preview import AnglePreview
-from sat_widgets.auto_bbox import place_bboxes, refine_bboxes, detect_layout, fit_grid
+from sat_widgets.auto_bbox import place_bboxes, refine_bboxes, detect_layout, fit_grid, fit_edges
 from sat_widgets import void_detect
 from sat_widgets.detect_job import DetectJob, read_only_copy
 from sat_widgets import void_layer_change
@@ -734,6 +734,11 @@ class MainWindow(QMainWindow):
         btn_refine_bbox.setToolTip("Align the bboxes on the layout again. Bboxes placed or moved by hand stay\n"
                                    "and set the absolute place for the others")
         btn_refine_bbox.clicked.connect(self.refine_bbox)
+        btn_edge_bbox = QPushButton("Edge BBOX")
+        btn_edge_bbox.setToolTip("Move every bbox onto the chip outline: the steepest brightness step near each of its four\n"
+                                 "edges (profile through the chip middle, raw image, sub px). Size: the declared one.\n"
+                                 "A chip with one side off (stain, chipped edge) keeps the steeper side. Hand-placed stay.")
+        btn_edge_bbox.clicked.connect(self.edge_bbox)
         self.chk_bbox_from_grid = QCheckBox("From grid")
         self.chk_bbox_from_grid.setToolTip("Detect / Refine BBOX keep the grid's place: the bboxes are aligned with each other\n"
                                            "around the cell centres, not moved as a whole by the package edges.\n"
@@ -762,6 +767,7 @@ class MainWindow(QMainWindow):
         form_calib.addRow(btn_bbox_grid)
         h_auto.addWidget(btn_auto_bbox)
         h_auto.addWidget(btn_refine_bbox)
+        h_auto.addWidget(btn_edge_bbox)
         h_auto.addWidget(self.chk_bbox_from_grid)
         form_calib.addRow(h_auto)
         h_auto2 = QHBoxLayout()
@@ -1854,6 +1860,52 @@ class MainWindow(QMainWindow):
         cells = [(r, c) for r in range(cfg.rows) for c in range(cfg.cols) if bmap is None or bmap.get_key(r, c)]
         return tid, size, cells
 
+    def edge_bbox(self):
+        """Edge BBOX: every bbox moved onto the chip outline (auto_bbox.fit_edges), one undo step."""
+        if self._detect_busy():
+            return
+        setup = self._bbox_setup("Edge BBOX")
+        if setup is None:
+            return
+        tid, size, cells = setup
+        cfg, vm = self.glw.grid_cfg, self.void_manager
+        params = dict((self._config().get("auto_bbox") or {}).get("edges") or {})
+        progress = QProgressDialog("Fitting the bboxes to the chip edges...", "Cancel", 0, max(1, len(cells)), self)
+        progress.setWindowModality(Qt.WindowModal)
+        progress.show()
+        shown = [0.0]
+
+        def step(i):
+            now = time.monotonic()
+            if now - shown[0] >= 0.1:
+                shown[0] = now
+                progress.setValue(min(int(i), progress.maximum()))
+                QApplication.processEvents()
+            return not progress.wasCanceled()
+        z = self.glw.current_layer - self.layer_offset if 0 <= self.glw.current_layer - self.layer_offset < len(self.full_data) else 0
+        vm.begin_change()
+        try:
+            result = fit_edges(self.full_data, z, cfg, self.glw.coord_transform, vm, tid, size, cells, params, step)
+            if result is not None:
+                vm.resnap(cfg, self.glw.coord_transform)
+        finally:
+            vm.end_change()
+            progress.close()
+        if result is None:
+            if not progress.wasCanceled():
+                QMessageBox.warning(self, "Edge BBOX", "Draw or detect the bboxes first.")
+            return
+        self.glw.update()
+        self.update_void_ui()
+        sz = result.get("size")
+        size_txt = "" if not sz else (f", size {sz[0]:.1f} x {sz[1]:.1f} px" + ("" if size and abs(size[0] - sz[0]) < 1e-6 else
+                                      f" (measured; declared {size[0]:.0f} x {size[1]:.0f} is off)" if size else " (measured)"))
+        msg = (f"Edge BBOX (layer {self.abs_layer(z)}){size_txt}: {result['fitted']} fitted to the chip edges, moved "
+               f"{result['moved_px']:.1f} px (median); {result['one_side']} sides off (kept the steeper side); "
+               f"{len(result['failed'])} without a clear edge (unchanged); {result['hand']} hand-placed kept. Ctrl+Z undoes")
+        self.statusBar().showMessage(msg)
+        print(msg)
+
     def refine_bbox(self):
         """Aligns the bboxes on the layout again; hand-placed ones stay and set the place (auto_bbox.py)."""
         if self._detect_busy():
@@ -2218,9 +2270,10 @@ class MainWindow(QMainWindow):
         gb = QGroupBox("Edge Stains")
         form = QFormLayout(gb)
         btn = QPushButton("Detect Edge Stains")
-        btn.setToolTip("Contamination along the inside of the chip edges (long, dark specked rim, bright inside):\n"
-                       "each chip compared with the median chip, the stain segmented (rim + inside) and marked as a\n"
-                       "dashed box with the selected void type (sat_widgets/edge_band.py). Chips must look alike.")
+        btn.setToolTip("Contamination along the inside of the chip edges (a long, dark, specked line with the chip edge):\n"
+                       "every chip compared with the median chip (cut as it lies in the image, whole px, no resampling),\n"
+                       "the dark specks joined into a line along the edge, the stain = chip edge up to the line, marked\n"
+                       "as a dashed, filled shape of the selected void type (sat_widgets/edge_band.py). Chips must look alike.")
         btn.clicked.connect(self.detect_edge_stains)
         form.addRow(btn)
         self._stain_inputs = {}
@@ -2228,51 +2281,45 @@ class MainWindow(QMainWindow):
         def spin(key, label, lo, hi, step, decimals, tip):
             sb = QDoubleSpinBox()
             sb.setRange(lo, hi); sb.setSingleStep(step); sb.setDecimals(decimals)
-            sb.setValue(float(cfg[key]) * (100.0 if key == "depth_frac" else 1.0))
+            sb.setValue(float(cfg[key]) * (100.0 if key in ("depth_frac", "clean_ref") else 1.0))
             sb.setToolTip(tip)
             self._stain_inputs[key] = sb
             return sb
 
-        h1 = QHBoxLayout()
-        h1.addWidget(QLabel("Length ≥"))
-        h1.addWidget(spin("min_length_px", "", 5, 100000, 10, 0, "Shortest stain along the edge (image px)"))
-        h1.addWidget(QLabel("Merge r"))
-        h1.addWidget(spin("merge_radius_px", "", 0, 1000, 1, 0, "Dark specks / bright parts this close (image px) are one stain:\n"
-                                                                  "larger joins a rim of sparse dots into one long line"))
-        form.addRow(h1)
-        h2 = QHBoxLayout()
-        h2.addWidget(QLabel("Depth %"))
-        h2.addWidget(spin("depth_frac", "", 1, 50, 1, 0, "Edge zone searched: this share of the chip size from the edge inward"))
-        h2.addWidget(QLabel("Thr"))
-        h2.addWidget(spin("threshold", "", 0.5, 100, 0.5, 1, "Finding a stain: averaged difference / noise (lower finds more)"))
-        h2.addWidget(QLabel("Dark"))
-        h2.addWidget(spin("dark_threshold", "", 0.5, 50, 0.5, 1, "A dark speck of the rim: darker than the median chip by this many spreads"))
-        form.addRow(h2)
-        h3 = QHBoxLayout()
-        h3.addWidget(QLabel("Bright"))
-        h3.addWidget(spin("bright_threshold", "", 0.1, 50, 0.1, 1, "The bright inside (3x3 average): brighter than the median chip by this many spreads"))
-        h3.addWidget(QLabel("Density"))
-        h3.addWidget(spin("speck_density", "", 0.0, 1.0, 0.01, 2, "Dark specks around a speck (merge radius box), at least this share:\n"
-                                                                     "dense rim specks stay, scattered noise specks go (lower if the rim is sparse)"))
-        h3.addWidget(QLabel("Aspect"))
-        h3.addWidget(spin("min_aspect", "", 0.5, 50, 0.1, 1, "Length along the edge / depth, at least"))
-        form.addRow(h3)
-        h4 = QHBoxLayout()
-        h4.addWidget(QLabel("Touch"))
-        h4.addWidget(spin("touch_px", "", 0, 1000, 1, 0, "Attached to the chip edge: its pixels within this many image px of the edge ..."))
-        h4.addWidget(QLabel("Contact"))
-        h4.addWidget(spin("contact", "", 0.0, 1.0, 0.05, 2, "... along at least this share of its length (else inside the chip: not a stain)"))
-        h4.addWidget(QLabel("Skip"))
-        h4.addWidget(spin("edge_skip_px", "", 0, 1000, 1, 0, "Outermost image px of the chip left out (bbox / package edge)"))
-        h4.addWidget(QLabel("Box"))
-        h4.addWidget(spin("min_width_px", "", 1, 1000, 1, 0, "Averaging box (image px) for finding stains: about the narrowest stain"))
-        form.addRow(h4)
+        def row(*items):
+            h = QHBoxLayout()
+            for it in items:
+                h.addWidget(QLabel(it) if isinstance(it, str) else it)
+            form.addRow(h)
+
+        row("Length ≥", spin("min_length_px", "", 5, 100000, 10, 0, "Shortest stain along the edge (image px)"),
+            "Merge r", spin("merge_radius_px", "", 0, 1000, 1, 0, "Dark specks this close (image px, across the edge) are one line"),
+            "Along ×", spin("merge_along", "", 1, 20, 0.5, 1, "... and this many times farther along the edge (a sparse rim joins into one line)"),
+            "Link gap", spin("link_gap_px", "", 0, 100000, 5, 0, "Pieces of a line this far apart along the edge (image px) are one stain"))
+        row("Depth %", spin("depth_frac", "", 1, 50, 1, 0, "Edge zone searched: this share of the chip size from the edge inward"),
+            "Dark", spin("dark_threshold", "", 0.5, 50, 0.5, 1, "A dark speck: darker than the median chip's local min by this many chip-to-chip spreads"),
+            "Density", spin("speck_density", "", 0.0, 1.0, 0.01, 2, "Specks around a speck (merge radius box), at least this share:\n"
+                                                                     "dense rim specks stay, scattered noise specks go (lower if the rim is sparse)"),
+            "Aspect", spin("min_aspect", "", 0.5, 50, 0.1, 1, "Length along the edge / depth, at least"))
+        self.cb_stain_compare = QComboBox()
+        for key, label in (("both", "dark + SSIM"), ("intensity", "dark"), ("ssim", "SSIM")):
+            self.cb_stain_compare.addItem(label, key)
+        self.cb_stain_compare.setCurrentIndex(max(0, self.cb_stain_compare.findData(cfg.get("compare", "both"))))
+        self.cb_stain_compare.setToolTip("What counts as a speck of the line: darker than the median chip (dark), the local\n"
+                                         "structure / texture changed (SSIM: pads covered or smeared while the mean brightness\n"
+                                         "hardly changes), or both")
+        row("Compare", self.cb_stain_compare,
+            "SSIM thr", spin("ssim_threshold", "", 0.5, 500, 1, 1, "SSIM: a speck where the structure differs from the median chip by this many chip-to-chip spreads"),
+            "SSIM σ", spin("ssim_sigma_px", "", 0.5, 100, 0.5, 1, "SSIM window (Gaussian sigma, image px)"),
+            "Blur σ", spin("blur_px", "", 0, 100, 0.5, 1, "Gaussian blur of every chip before the comparison (sigma, image px; 0 = off)"))
+        row("Skip", spin("edge_skip_px", "", 0, 1000, 1, 0, "Outermost image px of the chip left out (bbox / package edge)"),
+            "Min depth", spin("min_depth_px", "", 0, 10000, 1, 0, "Shallowest stain (image px from the edge)"),
+            "Edge tol", spin("edge_tol_px", "", 0, 10, 0.5, 1, "Next to the chip edge, a chip may sit this far (image px) across the edge off the\n"
+                                                                 "median chip (chips are cut on whole px): no line along the edge from that"),
+            "Along", spin("edge_along_px", "", 0, 1000, 1, 0, "Within this many image px of the chip edge the median chip's range is taken along the\n"
+                                                              "edge only (the steep package edge does not hide a stain there; 0 = off)"),
+            "Shift tol", spin("shift_tol_px", "", 0, 100, 1, 0, "A pixel inside the median chip's min..max over +- this (image px) is no difference"))
         h4b = QHBoxLayout()
-        h4b.addWidget(QLabel("Blur σ"))
-        h4b.addWidget(spin("blur_px", "", 0, 100, 0.5, 1, "Gaussian blur of every chip before the comparison (sigma, image px; 0 = off):\n"
-                                                           "less pixel noise; keep it below the spacing of the rim's dark specks"))
-        h4b.addWidget(QLabel("Min depth"))
-        h4b.addWidget(spin("min_depth_px", "", 0, 10000, 1, 0, "Shallowest stain (image px from the edge): thinner lines along the edge are not stains"))
         h4b.addWidget(QLabel("Edges"))
         self._stain_edges = {}
         for key, label in (("t", "T"), ("b", "B"), ("l", "L"), ("r", "R")):
@@ -2287,15 +2334,12 @@ class MainWindow(QMainWindow):
             self.cb_stain_match.addItem(label, key)
         self.cb_stain_match.setCurrentIndex(max(0, self.cb_stain_match.findData(cfg.get("match", "none"))))
         self.cb_stain_match.setToolTip("Per-chip brightness matching onto the median chip, measured on the chip centre:\n"
-                                       "none (default), linear (gain / offset: chips brighter / darker overall),\n"
-                                       "curve (contrast / gamma too)")
+                                       "none (default), linear (gain / offset), curve (contrast / gamma too)")
         h4b.addWidget(self.cb_stain_match)
-        h4b.addWidget(QLabel("Along"))
-        h4b.addWidget(spin("edge_along_px", "", 0, 1000, 1, 0, "Within this many image px of the chip edge, the median chip's range is taken along the\n"
-                                                                 "edge only: the steep step at the package edge does not hide a stain right at the edge (0 = off)"))
-        h4b.addWidget(QLabel("Shift tol"))
-        h4b.addWidget(spin("shift_tol_px", "", 0, 100, 1, 0, "Chips may sit this far (image px) off each other: a pixel inside the median chip's\n"
-                                                                "min..max over +- this is no difference (pads / gaps a little off are not stains)"))
+        h4b.addWidget(QLabel("Clean %"))
+        h4b.addWidget(spin("clean_ref", "", 5, 100, 5, 0, "Reference (median chip, spread) from this share of the chips that differ least\n"
+                                                         "(at most 64; 100 = a sample of all): stains at the same place on many chips\n"
+                                                         "(long ones, corners) do not get into the reference. Golden chips picked: their median"))
         form.addRow(h4b)
         h5 = QHBoxLayout()
         h5.addWidget(QLabel("Mark as"))
@@ -2311,17 +2355,56 @@ class MainWindow(QMainWindow):
                 self.cb_stain_type.setCurrentIndex(i)
         h5.addWidget(self.cb_stain_type, 1)
         self.chk_stain_mask = QCheckBox("Show mask")
-        self.chk_stain_mask.setToolTip("What the last run took as dark specks (red) and bright inside (cyan) in the\n"
-                                       "edge strips of every chip (first searched layer), to tune Dark / Bright / Density")
+        self.chk_stain_mask.setToolTip("Last run, every chip (first searched layer): dark specks (red), the specks joined into\n"
+                                       "lines (yellow) and the stain areas found (cyan, = the marks' shapes)")
         self.chk_stain_mask.toggled.connect(lambda on: (setattr(self.glw, "show_stain_masks", on), self.glw.update()))
         h5.addWidget(self.chk_stain_mask)
         form.addRow(h5)
+        h6 = QHBoxLayout()
+        self.btn_stain_golden = QPushButton("Golden (0)")
+        self.btn_stain_golden.setToolTip("Golden chips for the median chip: Ctrl+G on the image adds / removes the chip under\n"
+                                         "the mouse (gold frame). None picked: the cleanest chips are taken automatically.\n"
+                                         "Click: clear the picked golden chips")
+        self.btn_stain_golden.clicked.connect(self.clear_golden_chips)
+        h6.addWidget(self.btn_stain_golden)
+        self.btn_stain_paint = QPushButton("Paint line")
+        self.btn_stain_paint.setCheckable(True)
+        self.btn_stain_paint.setToolTip("Mark a stain by hand: paint over its dark line on the image (left drag). The stain is the\n"
+                                        "nearest chip edge up to the painted line; strokes on the same edge within Link gap are\n"
+                                        "joined into one stain. Esc or this button ends painting. Ctrl+Z undoes")
+        self.btn_stain_paint.toggled.connect(self.toggle_paint_line)
+        h6.addWidget(self.btn_stain_paint)
+        h6.addWidget(QLabel("Brush"))
+        self.sb_paint_width = QDoubleSpinBox()
+        self.sb_paint_width.setRange(1, 200); self.sb_paint_width.setDecimals(0); self.sb_paint_width.setValue(6)
+        self.sb_paint_width.setToolTip("Brush width (image px)")
+        h6.addWidget(self.sb_paint_width)
+        btn_dbg = QPushButton("Debug chip")
+        btn_dbg.setToolTip("Every processing step of one chip (Ctrl+Shift+D on the image: the chip under the mouse;\n"
+                           "this button: the chip at the view centre): raw window, cut, reference, deviation, specks,\n"
+                           "lines, areas, and why places were dropped. Runs the detection without marking")
+        btn_dbg.clicked.connect(lambda: self.debug_stain_chip(at_centre=True))
+        h6.addWidget(btn_dbg)
+        form.addRow(h6)
+        self.glw.golden_cells = set()
+        self.glw.paint_done.connect(self.on_paint_stroke)
+        for key, slot in ((QKeySequence("Ctrl+G"), self.toggle_golden_chip), (QKeySequence("Ctrl+Shift+D"), self.debug_stain_chip)):
+            act = QAction(self.glw)
+            act.setShortcut(key)
+            act.setShortcutContext(Qt.WidgetShortcut)
+            act.triggered.connect(slot)
+            self.glw.addAction(act)
         dock_layout.addWidget(gb)
 
     def _edge_stain_params(self):
         out = {k: sb.value() for k, sb in getattr(self, "_stain_inputs", {}).items()}
-        if "depth_frac" in out:
-            out["depth_frac"] /= 100.0
+        for k in ("depth_frac", "clean_ref"):
+            if k in out:
+                out[k] /= 100.0
+        if getattr(self, "cb_stain_compare", None) is not None:
+            out["compare"] = self.cb_stain_compare.currentData()
+        if getattr(self.glw, "golden_cells", None):
+            out["golden_cells"] = sorted(self.glw.golden_cells)
         if getattr(self, "cb_stain_match", None) is not None:
             out["match"] = self.cb_stain_match.currentData()
         if getattr(self, "_stain_edges", None):
@@ -2355,6 +2438,227 @@ class MainWindow(QMainWindow):
         glw.update()
         self.update_void_ui()
         self.statusBar().showMessage(f"A: {len(todo)} detected marking(s) of chip X{cell[1]:02d}_Y{cell[0]:02d} reviewed (Ctrl+Z undoes)")
+
+    def _cell_under_mouse(self):
+        """Grid cell under the mouse on the image (else at the view centre)."""
+        from PySide6.QtGui import QCursor
+        glw = self.glw
+        pos = glw.mapFromGlobal(QCursor.pos())
+        at = QPointF(pos) if glw.rect().contains(pos) else QPointF(glw.width() / 2, glw.height() / 2)
+        return glw.grid_cfg.cell_at(*glw.get_image_coords(at))
+
+    def _update_golden_label(self):
+        if getattr(self, "btn_stain_golden", None) is not None:
+            self.btn_stain_golden.setText(f"Golden ({len(self.glw.golden_cells)})")
+
+    def toggle_golden_chip(self):
+        """Ctrl+G on the image: the chip under the mouse becomes / stops being a golden chip (Edge Stains reference)."""
+        if self.full_data is None:
+            return
+        cell = self._cell_under_mouse()
+        if not self.glw.grid_cfg.contains(*cell):
+            return
+        g = self.glw.golden_cells
+        g.symmetric_difference_update({cell})
+        self._update_golden_label()
+        self.glw.update()
+        self.statusBar().showMessage(f"Golden chip X{cell[1]:02d}_Y{cell[0]:02d} {'added' if cell in g else 'removed'}: "
+                                     f"{len(g)} golden chip(s) (Edge Stains median chip)")
+
+    def clear_golden_chips(self):
+        self.glw.golden_cells.clear()
+        self._update_golden_label()
+        self.glw.update()
+        self.statusBar().showMessage("Golden chips cleared: Edge Stains takes the cleanest chips automatically (Ctrl+G picks one)")
+
+    def toggle_paint_line(self, on):
+        if on and self.full_data is None:
+            self.btn_stain_paint.setChecked(False)
+            return
+        if on:
+            self.glw.start_paint(self.sb_paint_width.value())
+            self.statusBar().showMessage("Paint line: drag over the dark line of a stain (the chip edge up to it becomes the stain); Esc ends")
+        elif getattr(self.glw, "paint_width", None) is not None:
+            self.glw.stop_paint()
+
+    def on_paint_stroke(self, stroke):
+        """A painted stroke (Paint line): the stain from the nearest chip edge up to the line, joined with the painted
+        stains on the same edge within Link gap."""
+        from sat_widgets import edge_band
+        if not stroke: # Esc: paint mode ended
+            self.btn_stain_paint.setChecked(False)
+            return
+        glw, vm = self.glw, self.void_manager
+        glw.paint_width = self.sb_paint_width.value()
+        cfg = glw.grid_cfg
+        mx = sum(q[0] for q in stroke) / len(stroke)
+        my = sum(q[1] for q in stroke) / len(stroke)
+        cell = cfg.cell_at(mx, my)
+        if not cfg.contains(*cell):
+            return
+        refs = vm.reference_bboxes(cfg, glw.coord_transform)
+        if cell in refs:
+            rect = refs[cell]
+        else:
+            x0, y0 = cfg.cell_origin(*cell)
+            rect = (x0, y0, cfg.pitch_x, cfg.pitch_y)
+        width = self.sb_paint_width.value()
+        res = edge_band.stain_from_strokes([stroke], rect, width)
+        if res is None:
+            return
+        side, (t0, t1) = res[2], res[3]
+        gap = self._stain_inputs["link_gap_px"].value() if "link_gap_px" in self._stain_inputs else 40.0
+        to_raw, to_deskew = glw.deskew_to_raw, glw.raw_to_deskew
+        strokes = [stroke]
+        joined = []
+        for layer, vs in vm.voids.items():
+            for v in vs:
+                pl = v.get("paint_line")
+                if pl and tuple(pl["cell"]) == tuple(cell) and pl["side"] == side and \
+                        pl["t"][0] - gap <= t1 and t0 <= pl["t"][1] + gap:
+                    joined.append((layer, v))
+                    strokes += [[to_deskew(x, y) for x, y in st] for st in pl["strokes"]]
+                    width = max(width, float(pl.get("width", width)))
+        outline, (gx0, gy0, gx1, gy1), side, (t0, t1) = edge_band.stain_from_strokes(strokes, rect, width, side)
+        type_name = (self.cb_stain_type.currentData() if getattr(self, "cb_stain_type", None) is not None else None) \
+            or glw.active_type
+        layer = joined[0][0] if joined else glw.current_layer
+        vm.begin_change()
+        try:
+            for ly, v in joined:
+                vm.remove_void(ly, v)
+            v = vm.add_void(layer, *to_raw((gx0 + gx1) / 2, (gy0 + gy1) / 2), (gx1 - gx0) / 2, (gy1 - gy0) / 2, type_name)
+            cx, cy = v["globalCX"], v["globalCY"]
+            v["outline"] = [[round(px - cx, 1), round(py - cy, 1)] for px, py in (to_raw(x, y) for x, y in outline)]
+            v["outline_r"] = [round(v["radiusX"], 2), round(v["radiusY"], 2)]
+            v["seg_fill"] = True
+            v["paint_line"] = {"cell": list(cell), "side": side, "t": [t0, t1], "width": width,
+                               "strokes": [[list(to_raw(x, y)) for x, y in st] for st in strokes]}
+            vm.touch()
+        finally:
+            vm.end_change()
+        glw.update()
+        self.update_void_ui()
+        self.statusBar().showMessage(f"Painted stain on X{cell[1]:02d}_Y{cell[0]:02d} ({side} edge, {t1 - t0:.0f} px long"
+                                     f"{', joined with %d' % len(joined) if joined else ''}); Ctrl+Z undoes")
+
+    def debug_stain_chip(self, at_centre=False):
+        """Edge Stains debug: every processing step of one chip (no marking)."""
+        from sat_widgets import edge_band
+        if self._detect_busy():
+            return
+        glw = self.glw
+        cell = glw.grid_cfg.cell_at(*glw.get_image_coords(QPointF(glw.width() / 2, glw.height() / 2))) if at_centre \
+            else self._cell_under_mouse()
+        setup = self._detect_setup("Edge Stains")
+        if setup is None:
+            return
+        type_name, cells, refs, params, layers = setup
+        if cell not in cells:
+            QMessageBox.information(self, "Edge Stains debug", f"Chip X{cell[1]:02d}_Y{cell[0]:02d} is not among the inspected chips.")
+            return
+        ep = dict(params.get("edge_band") or {})
+        ep.update(self._edge_stain_params())
+        skip = set(params.get("skip_layers") or []) if len(layers) > 1 else set()
+        zs = [z for z, l in enumerate(layers) if l not in skip]
+        z = glw.current_layer if glw.current_layer in zs else zs[0]
+        trace = ep["trace"] = {"cell": cell}
+        ep["debug"] = []
+        pd = QProgressDialog("Edge stains debug...", "Cancel", 0, 2, self)
+        pd.setWindowModality(Qt.WindowModal)
+        pd.show()
+
+        def progress(i, n, text):
+            pd.setMaximum(n); pd.setValue(i); pd.setLabelText(text)
+            QApplication.processEvents()
+            return not pd.wasCanceled()
+        try:
+            found = edge_band.detect(self.full_data, [z], [layers[z]], glw.grid_cfg, glw.coord_transform, refs, cells, ep, progress)
+        finally:
+            pd.close()
+        if found is None:
+            return
+        mine = [f for f in found if tuple(f[5]) == tuple(cell)]
+        info = [f"Chip X{cell[1]:02d}_Y{cell[0]:02d}, layer {layers[z]}: {len(mine)} stain(s) found"] + (trace.get("info") or [])
+        self._show_trace(f"Edge Stains debug: X{cell[1]:02d}_Y{cell[0]:02d}", info, trace.get("steps") or [], ep)
+
+    def _show_trace(self, title, info, steps, ep):
+        """Dialog with the images of the steps (gray / signed / mask), Save writes them as PNGs."""
+        from PIL import Image
+        from PySide6.QtWidgets import QDialog, QScrollArea, QGridLayout, QWidget, QVBoxLayout
+        from PySide6.QtGui import QPixmap
+
+        def to_rgb(a, kind):
+            a = np.asarray(a, np.float32)
+            if kind == "mask":
+                g = (a > 0).astype(np.uint8) * 255
+                return np.stack([g, g, g], -1)
+            if kind == "signed": # Blue darker, red brighter (+- 2 x Dark)
+                lim = 2.0 * float(ep.get("dark_threshold", 3.0))
+                t = np.clip(a / lim, -1, 1)
+                rgb = np.full(a.shape + (3,), 255.0, np.float32)
+                rgb[..., 0] -= 255 * np.clip(-t, 0, 1); rgb[..., 1] -= 255 * np.abs(t); rgb[..., 2] -= 255 * np.clip(t, 0, 1)
+                return rgb.astype(np.uint8)
+            if kind == "pos":
+                lim = 2.0 * float(ep.get("ssim_threshold", 25.0))
+                t = np.clip(a / lim, 0, 1)
+                return np.stack([255 * np.clip(2 * t, 0, 1), 255 * np.clip(2 * t - 1, 0, 1), 0 * t], -1).astype(np.uint8)
+            lo, hi = np.percentile(a, [1, 99])
+            g = np.clip((a - lo) / max(hi - lo, 1e-6) * 255, 0, 255).astype(np.uint8)
+            return np.stack([g, g, g], -1)
+
+        imgs = []
+        for name, a, kind in steps:
+            im = Image.fromarray(to_rgb(a, kind))
+            if max(im.size) > 900:
+                k = 900.0 / max(im.size)
+                im = im.resize((max(1, int(im.size[0] * k)), max(1, int(im.size[1] * k))), Image.BILINEAR)
+            imgs.append((name, im))
+        dlg = QDialog(self)
+        dlg.setWindowTitle(title)
+        lay = QVBoxLayout(dlg)
+        lab = QLabel("\n".join(info))
+        lab.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        lay.addWidget(lab)
+        area = QScrollArea()
+        inner = QWidget()
+        grid = QGridLayout(inner)
+        side = 300
+        for i, (name, im) in enumerate(imgs):
+            rgb = np.ascontiguousarray(np.asarray(im.convert("RGB")))
+            q = QImage(rgb.data, rgb.shape[1], rgb.shape[0], 3 * rgb.shape[1], QImage.Format_RGB888).copy()
+            pix = QPixmap.fromImage(q).scaled(side, side, Qt.KeepAspectRatio, Qt.FastTransformation)
+            cell = QWidget()
+            v = QVBoxLayout(cell)
+            pl = QLabel(); pl.setPixmap(pix)
+            pl.setToolTip(name)
+            cap = QLabel(name); cap.setWordWrap(True); cap.setMaximumWidth(side)
+            v.addWidget(pl); v.addWidget(cap)
+            grid.addWidget(cell, i // 4, i % 4)
+        area.setWidget(inner)
+        area.setWidgetResizable(True)
+        lay.addWidget(area, 1)
+        btns = QHBoxLayout()
+        bsave = QPushButton("Save PNGs...")
+
+        def save():
+            folder = QFileDialog.getExistingDirectory(dlg, "Save debug images")
+            if not folder:
+                return
+            for i, (name, im) in enumerate(imgs):
+                safe = "".join(ch if ch.isalnum() or ch in "-_." else "_" for ch in name)[:60]
+                im.save(os.path.join(folder, f"{i:02d}_{safe}.png"))
+            with open(os.path.join(folder, "info.txt"), "w", encoding="utf-8") as f:
+                f.write("\n".join(info) + "\n")
+            self.statusBar().showMessage(f"Debug images saved to {folder}")
+        bsave.clicked.connect(save)
+        bclose = QPushButton("Close")
+        bclose.clicked.connect(dlg.close)
+        btns.addStretch(1); btns.addWidget(bsave); btns.addWidget(bclose)
+        lay.addLayout(btns)
+        dlg.resize(1300, 900)
+        dlg.show()
+        self._trace_dialog = dlg
 
     def detect_edge_stains(self):
         """Edge Stains button: sat_widgets/edge_band.py on the loaded layers, dashed boxes of the selected type."""
@@ -2420,21 +2724,16 @@ class MainWindow(QMainWindow):
         self.glw.update()
         self.update_void_ui()
         msg = f"Edge stains: {added} marked ({type_name}, dashed: review with Next Detected), {len(found) - added} already marked"
-        # Where the others were lost: chips without a found place, and the found places dropped by a filter
-        n_chips = len(cells)
-        no_seed = sum(1 for w in why if w[1] == "no seed")
+        # Where the others were lost: the lines dropped by a filter (the longest one of each: most likely a stain)
         drops = {}
         for w in why:
-            if w[1] != "no seed":
-                drops.setdefault(w[1], []).append(w)
-        parts = [f"{no_seed} of {n_chips} chips: nothing above Thr"]
-        hints = {"short": "Length ≥", "not elongated": "Aspect", "thin": "Min depth", "not on the edge": "Touch / Contact"}
+            drops.setdefault(w[1], []).append(w)
+        hints = {"short": "Length ≥ / Link gap", "not elongated": "Aspect", "thin": "Min depth", "not bright inside": "bright_min"}
+        parts = []
         for k, ws in drops.items():
-            if k in ("short", "not elongated", "thin"):
-                big = max(ws, key=lambda w: w[2]) # The longest one dropped: the one most likely a stain
-                parts.append(f"{len(ws)} dropped as {k} (longest {big[2]} px long, {big[3]} px deep: {hints[k]})")
-            else:
-                parts.append(f"{len(ws)} dropped as {k} (best contact {max(w[2] for w in ws):.2f}: {hints[k]})")
+            big = max(ws, key=lambda w: w[2])
+            parts.append(f"{len(ws)} lines dropped as {k} (longest {big[2]} px long, {big[3]} px deep: {hints.get(k, k)})")
+        parts = parts or ["no other dark lines"]
         msg += " | " + "; ".join(parts)
         self.statusBar().showMessage(msg)
         print(msg)

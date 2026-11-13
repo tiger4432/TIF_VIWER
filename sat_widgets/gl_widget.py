@@ -167,6 +167,7 @@ class GLImageWidget(QOpenGLWidget):
     navigation_requested = Signal(int, int) # Col, Row (Request to move view)
     voids_changed = Signal() # Void data edited (count labels etc.)
     measure_done = Signal(float) # Measure (scale): distance in image pixels between the two clicked points
+    paint_done = Signal(list) # Paint line (Edge Stains): one stroke, [(gx, gy)] Deskewed points
     cell_step_requested = Signal(int) # Right click without dragging: +1 next / -1 previous (Shift) cell
 
     def __init__(self):
@@ -971,13 +972,13 @@ class GLImageWidget(QOpenGLWidget):
             self.setCursor(shape)
 
     def _draw_stain_masks(self, painter):
-        """Edge Stains debug: what the last run took as dark specks (red) / bright inside (cyan), per chip."""
+        """Edge Stains debug: dark specks (red), joined lines (yellow), stain areas (cyan) of the last run, per chip."""
         cache = self.__dict__.setdefault("_stain_mask_cache", {})
         if cache.get("_src") is not self.stain_masks:
             cache.clear()
             cache["_src"] = self.stain_masks
         vw, vh = self.width(), self.height()
-        for cell, ((x0, y0, w, h), (H, W), dk, br) in self.stain_masks.items():
+        for cell, ((x0, y0, w, h), (H, W), dk, br, *more) in self.stain_masks.items():
             sx0, sy0 = self.deskew_to_screen(x0, y0)
             sx1, sy1 = self.deskew_to_screen(x0 + w, y0 + h)
             if sx1 < 0 or sy1 < 0 or sx0 > vw or sy0 > vh:
@@ -987,8 +988,10 @@ class GLImageWidget(QOpenGLWidget):
                 d = np.unpackbits(dk)[:H * W].reshape(H, W).astype(bool)
                 b = np.unpackbits(br)[:H * W].reshape(H, W).astype(bool)
                 rgba = np.zeros((H, W, 4), np.uint8)
-                rgba[b] = (0, 220, 255, 90)
-                rgba[d] = (255, 30, 30, 200)
+                rgba[b] = (0, 220, 255, 90) # Stain area (as segmented)
+                if more: # Joined lines (yellow), under the specks
+                    rgba[np.unpackbits(more[0])[:H * W].reshape(H, W).astype(bool)] = (255, 220, 0, 150)
+                rgba[d] = (255, 30, 30, 220) # Dark specks
                 img = QImage(rgba.data, W, H, 4 * W, QImage.Format_RGBA8888).copy()
                 cache[cell] = img
             painter.drawImage(QRectF(sx0, sy0, sx1 - sx0, sy1 - sy0), img)
@@ -1122,6 +1125,10 @@ class GLImageWidget(QOpenGLWidget):
              self._draw_layout(painter)
              if getattr(self, "show_stain_masks", False) and getattr(self, "stain_masks", None):
                  self._draw_stain_masks(painter)
+             if getattr(self, "golden_cells", None):
+                 self._draw_golden(painter)
+             if getattr(self, "paint_width", None) is not None:
+                 self._paint_strokes(painter)
 
              # First Pass: Ghost Voids (Other Layers), then Current Layer Voids on top
              vm = self.void_manager
@@ -1149,6 +1156,8 @@ class GLImageWidget(QOpenGLWidget):
                                min_radius=0.0 if vm.is_bbox(v) else self.void_min_px)
                  if not ghost and v.get("outline") and v.get("outline_r") and (self.show_outlines or v.get("seg_fill")):
                      self._paint_outline(painter, v) # Edge stains: always, filled
+                 if not ghost and v.get("paint_line"): # Hand-painted dark line of an edge stain
+                     self._paint_line_of(painter, v)
 
              for layer_idx, v_list in vm.voids.items():
                  if layer_idx == self.current_layer:
@@ -1292,6 +1301,67 @@ class GLImageWidget(QOpenGLWidget):
         
         return gx, gy
 
+    # ---- Golden chips (Edge Stains): gold frame around the cells picked for the reference ----
+    def _draw_golden(self, painter):
+        cfg = self.grid_cfg
+        painter.save()
+        painter.setBrush(Qt.NoBrush)
+        for r, c in self.golden_cells:
+            x0, y0 = cfg.cell_origin(r, c)
+            pts = [QPointF(*self.deskew_to_screen(x, y)) for x, y in
+                   ((x0 + 2, y0 + 2), (x0 + cfg.pitch_x - 2, y0 + 2), (x0 + cfg.pitch_x - 2, y0 + cfg.pitch_y - 2), (x0 + 2, y0 + cfg.pitch_y - 2))]
+            for color, width in ((QColor(0, 0, 0, 180), 5), (QColor(255, 200, 0), 3)):
+                painter.setPen(QPen(color, width))
+                painter.drawPolygon(pts)
+            painter.setPen(QColor(255, 200, 0))
+            painter.drawText(pts[0] + QPointF(6, 16), "GOLDEN")
+        painter.restore()
+
+    # ---- Paint line (Edge Stains): strokes over the dark line of a stain -> paint_done(points) ----
+    def start_paint(self, width_px):
+        self.paint_width = float(width_px)
+        self._stroke = None
+        self.setCursor(Qt.CrossCursor)
+        self.setFocus()
+        self.update()
+
+    def stop_paint(self):
+        self.paint_width = None
+        self._stroke = None
+        self.update_cursor_style()
+        self.update()
+
+    def _paint_strokes(self, painter):
+        pts = getattr(self, "_stroke", None)
+        if not pts:
+            return
+        painter.save()
+        pen = QPen(QColor(255, 30, 30, 200), max(2.0, self.paint_width * self.zoom))
+        pen.setCapStyle(Qt.RoundCap); pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        sp = [QPointF(*self.deskew_to_screen(x, y)) for x, y in pts]
+        if len(sp) == 1:
+            painter.drawPoint(sp[0])
+        else:
+            painter.drawPolyline(sp)
+        painter.restore()
+
+    def _paint_line_of(self, painter, v):
+        """The hand-painted line of a stain (raw points), red."""
+        if not v["paint_line"].get("strokes"):
+            return
+        painter.save()
+        pen = QPen(QColor(255, 30, 30, 170), max(1.5, float(v["paint_line"].get("width", 4)) * self.zoom))
+        pen.setCapStyle(Qt.RoundCap); pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(pen)
+        for stroke in v["paint_line"]["strokes"]:
+            sp = [QPointF(*self.deskew_to_screen(*self.raw_to_deskew(x, y))) for x, y in stroke]
+            if len(sp) == 1:
+                painter.drawPoint(sp[0])
+            elif sp:
+                painter.drawPolyline(sp)
+        painter.restore()
+
     # ---- Measure: two clicked points -> their distance in image pixels (Scale from a known length) ----
     def start_measure(self):
         self.measure_points = []
@@ -1336,6 +1406,10 @@ class GLImageWidget(QOpenGLWidget):
             painter.drawText(sp[1] + QPointF(10, -10), f"{d:.1f} px")
 
     def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and getattr(self, "paint_width", None) is not None:
+            self._stroke = [self.get_image_coords(e.position())]
+            self.update()
+            return
         if e.button() == Qt.LeftButton and getattr(self, "measure_points", None) is not None:
             self.measure_points.append(self.get_image_coords(e.position()))
             self.update()
@@ -1441,6 +1515,10 @@ class GLImageWidget(QOpenGLWidget):
     def mouseMoveEvent(self, e):
         # 0. Always calculate grid pos and emit signal
         gx, gy = self.get_image_coords(e.position())
+        if getattr(self, "paint_width", None) is not None and getattr(self, "_stroke", None) is not None:
+            self._stroke.append((gx, gy))
+            self.update()
+            return
         if getattr(self, "measure_points", None):
             self._measure_mouse = (gx, gy) # Rubber line from the first measure point
             self.update()
@@ -1696,6 +1774,11 @@ class GLImageWidget(QOpenGLWidget):
         return v is not None and self.void_manager.remove_void(layer, v)
 
     def mouseReleaseEvent(self, e):
+        if e.button() == Qt.LeftButton and getattr(self, "paint_width", None) is not None and getattr(self, "_stroke", None):
+            stroke, self._stroke = self._stroke, None
+            self.update()
+            self.paint_done.emit(stroke)
+            return
         # Clear interaction state
         self._last_mouse = None
         if getattr(self, '_pan_only', False):
@@ -1807,6 +1890,10 @@ class GLImageWidget(QOpenGLWidget):
     def keyPressEvent(self, e):
         if e.key() == Qt.Key_Escape and getattr(self, "measure_points", None) is not None:
             self.cancel_measure()
+            return
+        if e.key() == Qt.Key_Escape and getattr(self, "paint_width", None) is not None:
+            self.stop_paint()
+            self.paint_done.emit([]) # Empty: paint mode ended
             return
         modifiers = e.modifiers()
         

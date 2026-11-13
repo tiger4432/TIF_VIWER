@@ -694,3 +694,133 @@ def detect_layout(stack, zs, layer_number, grid_cfg, coord_transform, void_manag
     if res is not None:
         res["located"] = None if located is None else {"dx": located[0], "dy": located[1], "strength": located[2]}
     return res
+
+
+def fit_edges(stack, z, grid_cfg, coord_transform, void_manager, bbox_type, size, cells, params=None, progress=None):
+    """
+    Every bbox of `cells` moved onto the chip outline: the steepest brightness step (gradient of the
+    mean profile across a band through the middle of the chip, blurred) near each of its four edges,
+    in the raw image (whole and sub px, no resampling). The centre is the middle between the left /
+    right and top / bottom steps; the size is the declared one (`size`) when the chips measure about
+    that (5 %), else the median of the measured sizes. A chip whose fitted size is off the median by more than size_tol keeps the side
+    with the steeper step and the median size. Bboxes placed by hand ("hand") stay.
+    params: "edge_search" (share of the size searched each way, default 0.06), "edge_band" (share of
+    the chip through its middle the profile is taken over, default 0.3), "size_tol" (0.02).
+    Returns {"fitted", "one_side", "failed": [(r, c)], "hand", "moved_px"} or None (no bboxes).
+    """
+    from .core_data import to_gray
+    from .void_detect import _blur
+    p = {"edge_search": 0.06, "edge_band": 0.3, "size_tol": 0.02}
+    p.update(params or {})
+    to_raw = coord_transform.deskew_to_raw if coord_transform else (lambda x, y: (x, y))
+    to_deskew = coord_transform.raw_to_deskew if coord_transform else (lambda x, y: (x, y))
+    vm = void_manager
+    want = set(cells)
+    boxes = {}
+    for layer, vs in vm.voids.items():
+        for v in vs:
+            if vm.is_bbox(v):
+                cell = grid_cfg.cell_at(*to_deskew(v["globalCX"], v["globalCY"]))
+                if cell in want:
+                    boxes.setdefault(cell, []).append((layer, v))
+    if not boxes:
+        return None
+
+    def blur1(v, s):
+        r = max(1, int(math.ceil(3 * s)))
+        k = np.exp(-0.5 * (np.arange(-r, r + 1) / s) ** 2)
+        return np.convolve(np.pad(v, r, mode="edge"), k / k.sum(), mode="valid")
+
+    def step_at(prof, lo, hi, sign):
+        """Steepest step of prof in [lo, hi) rising (sign +1) / falling (-1), 0: either way: (raw position of
+        the boundary between the two px, strength, its sign) or None."""
+        g = np.diff(prof)
+        lo, hi = max(1, int(lo)), min(len(g) - 1, int(hi))
+        if hi <= lo:
+            return None
+        gs = g * sign if sign else np.abs(g)
+        i = lo + int(np.argmax(gs[lo:hi]))
+        cm, c0, cp = gs[i - 1], gs[i], gs[i + 1]
+        if c0 <= 0:
+            return None
+        den = cm - 2 * c0 + cp
+        d = float(np.clip(0.5 * (cm - cp) / den, -0.5, 0.5)) if den < 0 else 0.0
+        return i + 1 + d, float(c0), 1 if g[i] > 0 else -1 # Pixel k covers [k, k + 1): the boundary is at i + 1
+
+    profs = {}
+    order = sorted(boxes)
+    for n, cell in enumerate(order):
+        if progress is not None and not progress(n * 0.5):
+            return None
+        layer, v = boxes[cell][0]
+        if v.get("hand"):
+            continue
+        w, h = 2 * v["radiusX"], 2 * v["radiusY"]
+        cx, cy = v["globalCX"], v["globalCY"]
+        mx, my = max(6, int(p["edge_search"] * w)), max(6, int(p["edge_search"] * h))
+        x0, y0 = int(math.floor(cx - w / 2 - mx)), int(math.floor(cy - h / 2 - my))
+        x1, y1 = int(math.ceil(cx + w / 2 + mx)), int(math.ceil(cy + h / 2 + my))
+        X0, Y0 = max(0, x0), max(0, y0)
+        X1, Y1 = min(stack.width, x1), min(stack.height, y1)
+        if X1 - X0 < 16 or Y1 - Y0 < 16:
+            continue
+        a = to_gray(stack.read_region(z, X0, Y0, X1 - X0, Y1 - Y0)).astype(np.float32)
+        s = max(1.0, 0.002 * max(w, h)) # Blur of the profiles: pad grids and noise go, the outline stays
+        bh, bw = p["edge_band"] * h / 2, p["edge_band"] * w / 2
+        rows = slice(max(0, int(cy - bh) - Y0), max(1, int(cy + bh) - Y0))
+        cols = slice(max(0, int(cx - bw) - X0), max(1, int(cx + bw) - X0))
+        px = blur1(a[rows].mean(axis=0), s)
+        py = blur1(a[:, cols].mean(axis=1), s)
+        profs[cell] = (px, py, [cx - w / 2 - X0, cx + w / 2 - X0], [cy - h / 2 - Y0, cy + h / 2 - Y0], mx, my, X0, Y0)
+    # Each side's direction (street -> chip brighter or darker) from the majority of the chips: the
+    # neighbour chip's edge across the street, the other way, is not taken
+    signs = []
+    for side in range(4):
+        votes = []
+        for px, py, ex, ey, mx, my, X0, Y0 in profs.values():
+            prof, e, m = (px, ex[side % 2], mx) if side < 2 else (py, ey[side % 2], my)
+            st = step_at(prof, e - m, e + m, 0)
+            if st:
+                votes.append(st[2])
+        signs.append(1 if sum(votes) >= 0 else -1)
+    fits = {}
+    for cell, (px, py, ex, ey, mx, my, X0, Y0) in profs.items():
+        L = step_at(px, ex[0] - mx, ex[0] + mx, signs[0])
+        Rr = step_at(px, ex[1] - mx, ex[1] + mx, signs[1])
+        T = step_at(py, ey[0] - my, ey[0] + my, signs[2])
+        B = step_at(py, ey[1] - my, ey[1] + my, signs[3])
+        fits[cell] = None if None in (L, Rr, T, B) else (L, Rr, T, B, X0, Y0)
+    good = {k: f for k, f in fits.items() if f is not None}
+    if not good:
+        return {"fitted": 0, "one_side": 0, "failed": [k for k in fits], "hand": 0, "moved_px": 0.0}
+    mw = float(np.median([f[1][0] - f[0][0] for f in good.values()]))
+    mh = float(np.median([f[3][0] - f[2][0] for f in good.values()]))
+    # Size: the declared one when the chips measure about that (within 5 %), else the measured median (a
+    # declared size far off the outline would put every bbox on one side)
+    W, H = (size if size is not None and abs(size[0] - mw) <= 0.05 * mw and abs(size[1] - mh) <= 0.05 * mh
+            else (mw, mh))
+    moves, one_side, failed = [], 0, [k for k, f in fits.items() if f is None]
+    vm.begin_change()
+    try:
+        for cell, (L, Rr, T, B, X0, Y0) in good.items():
+            fw, fh = Rr[0] - L[0], B[0] - T[0]
+            if abs(fw - mw) <= p["size_tol"] * mw:
+                nx = X0 + (L[0] + Rr[0]) / 2
+            else: # One side is off (a stain, a chipped edge): the steeper side and the size
+                nx = X0 + (L[0] + W / 2 if L[1] >= Rr[1] else Rr[0] - W / 2)
+                one_side += 1
+            if abs(fh - mh) <= p["size_tol"] * mh:
+                ny = Y0 + (T[0] + B[0]) / 2
+            else:
+                ny = Y0 + (T[0] + H / 2 if T[1] >= B[1] else B[0] - H / 2)
+                one_side += 1
+            layer, v = boxes[cell][0]
+            moves.append(math.hypot(nx - v["globalCX"], ny - v["globalCY"]))
+            for ly, old in boxes[cell]:
+                vm.remove_void(ly, old)
+            nv = vm.add_void(layer, nx, ny, W / 2.0, H / 2.0, bbox_type)
+            nv["placed"] = "edges"
+    finally:
+        vm.end_change()
+    return {"fitted": len(good), "one_side": one_side, "failed": failed, "size": (W, H), "measured": (mw, mh),
+            "hand": sum(1 for k in boxes if boxes[k][0][1].get("hand")), "moved_px": float(np.median(moves)) if moves else 0.0}
