@@ -689,6 +689,8 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                     area_o = np.zeros(o.shape, bool)
                     area_o[:, c0:c1] = fill
                     area_full = _orient(area_o, side, back=True)
+                    if not area_full.any():
+                        continue # Nothing between the chip edge and the line (all inside Skip)
                     if p["bright_min"] > 0 and float(np.clip(dev[area_full], 0, None).mean()) < p["bright_min"]:
                         if dbg is not None:
                             dbg.append((k, "not bright inside", round(length), round(d_px)))
