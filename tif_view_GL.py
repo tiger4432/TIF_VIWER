@@ -2014,6 +2014,12 @@ class MainWindow(QMainWindow):
                 if want == "layer_change":
                     start = i
                 continue
+            if method == "ssim":
+                item.setToolTip("Experimental: die-to-die on the local structure (SSIM against the median chip), robust to\n"
+                                "a few px of misalignment; also for single-layer images. Thr in chip-to-chip spreads.")
+                if want == "ssim":
+                    start = i
+                continue
             if method == "segmentation":
                 reason = void_seg.available(model)
                 item.setEnabled(not reason)
