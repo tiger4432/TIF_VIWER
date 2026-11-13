@@ -64,7 +64,7 @@ DEFAULTS = {
     "texture_px": 2.0,      # Pad grid pitch (image px, whole): every chip averaged over a box of it at the image
                             # resolution, before the reduction (no beat pattern) (0 / 1 = off). Pads every other px: 2
     "shading": True,
-    "background": 0.0,      # Shading: brightness differences larger than this share of the chip (smoothed, stains left
+    "background": 0.08,     # Shading: brightness differences larger than this share of the chip (smoothed, stains left
                             # out) are taken off every chip against the reference (blotches, vignetting); 0 = a quadratic        # Brightness gradient across each chip (plane of chip - median chip) taken off
     "upright": True,        # Chips turned upright by the grid angle after the pad grid is averaged (Texture >= 2): the
                             # edges run along the rows / columns of the work image
