@@ -722,6 +722,10 @@ class MainWindow(QMainWindow):
         btn_fit_grid = QPushButton("Fit Grid")
         btn_fit_grid.setToolTip("Fit the grid origin, pitch and angle to the bbox centers (asks before applying)")
         btn_fit_grid.clicked.connect(self.fit_grid_to_bboxes)
+        btn_grid_bbox = QPushButton("Grid BBOX")
+        btn_grid_bbox.setToolTip("Put the bbox (declared size) of every bonded cell exactly at the grid cell centre:\n"
+                                 "no image analysis. For a grid fitted well by hand (Ctrl+Z undoes).")
+        btn_grid_bbox.clicked.connect(self.grid_bbox)
         btn_next_est = QPushButton("Next Estimated")
         btn_next_est.setToolTip("Go to the next bbox that was estimated because detection failed (drawn dashed)")
         btn_next_est.clicked.connect(self.next_estimated_bbox)
@@ -735,6 +739,7 @@ class MainWindow(QMainWindow):
         h_auto.addWidget(self.chk_bbox_from_grid)
         form_calib.addRow(h_auto)
         h_auto2 = QHBoxLayout()
+        h_auto2.addWidget(btn_grid_bbox)
         h_auto2.addWidget(btn_fit_grid)
         h_auto2.addWidget(btn_next_est)
         form_calib.addRow(h_auto2)
@@ -1843,6 +1848,40 @@ class MainWindow(QMainWindow):
         self.glw.update_grid_params()
         self.statusBar().showMessage(f"Fit Grid applied ({f['n']} bboxes, residual {f['rms']:.2f} px)")
         return dict(new, rms=f["rms"], n=f["n"])
+
+    def grid_bbox(self):
+        """Bbox of every bonded cell at the grid cell centre (declared size), no image analysis. One undo step."""
+        if self._detect_busy():
+            return
+        setup = self._bbox_setup("Grid BBOX")
+        if setup is None:
+            return
+        tid, size, cells = setup
+        if size is None:
+            QMessageBox.warning(self, "Grid BBOX", "The bbox size is not known: set the Scale (chip_size_um) or the "
+                                "bbox size of the product.")
+            return
+        cfg, vm = self.glw.grid_cfg, self.void_manager
+        to_raw = self.glw.deskew_to_raw
+        layer = self.abs_layer(0)
+        vm.begin_change()
+        try:
+            for l, vs in list(vm.voids.items()):
+                for v in [v for v in vs if vm.is_bbox(v)]:
+                    vm.remove_void(l, v)
+            for r, c in cells:
+                cx = cfg.start_x + (c + 0.5) * cfg.pitch_x
+                cy = cfg.start_y + (r + 0.5) * cfg.pitch_y
+                v = vm.add_void(layer, *to_raw(cx, cy), size[0] / 2.0, size[1] / 2.0, tid)
+                v["placed"] = "grid"
+            vm.resnap(cfg, self.glw.coord_transform)
+        finally:
+            vm.end_change()
+        self.glw.update()
+        self.update_void_ui()
+        msg = f"Grid BBOX: {len(cells)} bboxes at the grid cell centres ({size[0]:.0f} x {size[1]:.0f} px)"
+        self.statusBar().showMessage(msg)
+        print(msg)
 
     def next_estimated_bbox(self):
         """Navigates through the bboxes estimated by Detect BBOX (row-major order)."""
