@@ -514,6 +514,9 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                           win[Mw + trace["shift"][1]:Mw + trace["shift"][1] + Hr, Mw + trace["shift"][0]:Mw + trace["shift"][0] + Wr], "gray"))
             steps.append(("3 reduced %dx%d blocks, normalised" % (f, f), chips[tk], "gray"))
         del cut
+        use_ssim = p["compare"] in ("ssim", "both")
+        # SSIM looks at the texture (pads covered / smeared): it gets the chips before the pad grid is averaged
+        tex = {k: c.astype(np.float16) for k, c in chips.items()} if use_ssim and p["texture_px"] > 0 else None
         if p["texture_px"] > 0:
             # Pad grid averaged out (box of the pad pitch): the median chip has the pads smeared (chips sit a fraction
             # of a px apart), a single chip has them sharp, so between its pads it read darker everywhere, in a grid
@@ -544,7 +547,10 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                     res = d - A @ coef
                     mad = float(np.median(np.abs(res[keep]))) * 1.4826 + 1e-6
                     keep = np.abs(res) <= 2.5 * mad
-                chips[k] = (chips[k] - (coef[0] + coef[1] * Xf + coef[2] * Yf)).astype(np.float32)
+                plane = coef[0] + coef[1] * Xf + coef[2] * Yf
+                chips[k] = (chips[k] - plane).astype(np.float32)
+                if tex is not None:
+                    tex[k] = (tex[k].astype(np.float32) - plane).astype(np.float16)
             if tk in chips:
                 steps.append(("4b brightness gradient taken off (Shading)", chips[tk], "gray"))
         mode = p["match"]
@@ -613,10 +619,13 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
 
         ss_sig = max(0.8, p["ssim_sigma_px"] / min(sx, sy))
 
+        def tex_of(k):
+            return chips[k] if tex is None else tex[k].astype(np.float32)
+
         def dissim(k, golden):
-            """1 - local SSIM of the chip against the median chip (Gaussian window ssim_sigma_px): texture /
-            structure changed (pads covered, smeared) even where the mean brightness hardly is."""
-            a = chips[k] if fn is None else fn(chips[k], golden, centre)
+            """1 - local SSIM of the chip (pad grid not averaged) against the median of such chips (Gaussian window
+            ssim_sigma_px): texture / structure changed (pads covered, smeared) even where the mean brightness hardly is."""
+            a = tex_of(k)
             L = float(np.percentile(golden, 99) - np.percentile(golden, 1)) + 1e-3
             c1, c2 = (0.01 * L) ** 2, (0.03 * L) ** 2
             ma, mb = _gauss(a, ss_sig), _gauss(golden, ss_sig)
@@ -626,17 +635,19 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             ss = ((2 * ma * mb + c1) * (2 * cov + c2)) / ((ma * ma + mb * mb + c1) * (va + vb + c2))
             return (1.0 - ss).astype(np.float32)
 
-        use_ssim = p["compare"] in ("ssim", "both")
-
-        def with_ssim(ref, sel):
-            """ref + (median, spread) of the chips' dissimilarity: the SSIM map in chip-to-chip spreads."""
+        def with_ssim(ref, sel, per_strip=None):
+            """ref + (median, spread) of the chips' dissimilarity (the SSIM map in chip-to-chip spreads) + the median
+            chip of the un-averaged chips (per edge strip from that strip's cleanest chips, per_strip {mask: chips})."""
             if not use_ssim:
                 return ref
-            D = np.stack([dissim(k, ref[0]) for k in sel])
+            g_t = np.median(np.stack([tex_of(k) for k in sel]), axis=0)
+            for m, sel_s in (per_strip or []):
+                g_t = np.where(m, np.median(np.stack([tex_of(k) for k in sel_s]), axis=0), g_t)
+            D = np.stack([dissim(k, g_t) for k in sel])
             med = np.median(D, axis=0)
             spr = np.median(np.abs(D - med), axis=0) * 1.4826
             spr = np.maximum(_filt(spr, ImageFilter.MaxFilter(3)), 0.5 * float(np.median(spr)) + 1e-4)
-            return ref + (med, spr)
+            return ref + (med, spr, g_t)
 
         # Reference from a sample of the chips, then again from the cleanest of them (clean_ref share, at
         # most 64): where many chips are stained at the same place (long stains, corners) the median of
@@ -680,7 +691,8 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                     r_s = reference(sel, sel)
                     new = tuple(np.where(m, a_s, a_all) for a_s, a_all in zip(r_s, new))
                 ref = new
-        ref = with_ssim(ref, clean)
+        ref = with_ssim(ref, gold or clean, None if gold else
+                        [(m_, list(strip_clean[sd])) for _, m_, sd in strips if sd in strip_clean])
         if steps is not None:
             if trace.get("cell") in chips:
                 trace["info"] = [f"reduction {f} (image px per working px), chip {Wr} x {Hr} image px",
@@ -722,14 +734,16 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             dev = dev_of(k, ref)
             dark = dev <= -p["dark_threshold"] if p["compare"] != "ssim" else np.zeros((H, W), bool)
             if use_ssim: # Structure changed (SSIM), in chip-to-chip spreads, counts as a speck too
-                sdev = (dissim(k, ref[0]) - ref[4]) / ref[5]
+                sdev = (dissim(k, ref[6]) - ref[4]) / ref[5]
                 dark = dark | (sdev >= p["ssim_threshold"])
             specks = dark.astype(np.float32)
             specks = (specks > 0) & (_box(specks, k_dens, k_dens) >= p["speck_density"]) # Not lone noise specks
             if k == tk:
                 steps.append(("9 deviation (spreads): blue darker, red brighter", dev, "signed"))
                 if use_ssim:
-                    steps.append(("9b SSIM change (spreads)", sdev, "pos"))
+                    lim_s = max(1.0, float(np.percentile(sdev[edges], 99.5)))
+                    steps.append(("9b SSIM change: full yellow = %.1f spreads (threshold %.1f)" % (lim_s, p["ssim_threshold"]),
+                                  np.clip(sdev / lim_s, 0, 1), "unit"))
                 steps.append(("10 dark specks (Dark %.1f%s)" % (p["dark_threshold"], ", SSIM %.1f" % p["ssim_threshold"] if use_ssim else ""), dark & edges, "mask"))
                 steps.append(("11 specks kept (Density %.2f)" % p["speck_density"], specks & edges, "mask"))
             lines = np.zeros((H, W), bool)
@@ -820,7 +834,8 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                 store["chips"][k] = {
                     "at": at[k], "chip": q8(chips[k], cl, ch),
                     "dev": q8(dev, -lim, lim), "dev_lim": lim,
-                    "sdev": q8(sdev, 0, 2.0 * p["ssim_threshold"]) if use_ssim else None,
+                    "sdev": q8(sdev, 0, max(1.0, float(np.percentile(sdev[edges], 99.5)))) if use_ssim else None,
+                    "sdev_lim": max(1.0, float(np.percentile(sdev[edges], 99.5))) if use_ssim else None,
                     "dark": np.packbits(dark & edges), "specks": np.packbits(specks & edges),
                     "lines": np.packbits(lines), "area": np.packbits(area_all),
                     "why": [d for d in (dbg or []) if d[0] == k], "found": len(groups)}

@@ -2722,7 +2722,8 @@ class MainWindow(QMainWindow):
         steps.append(("9 deviation (spreads): blue darker, red brighter", d["dev"].astype(np.float32) / 255 * 2 * lim - lim, "signed"))
         prm = store["params"]
         if d["sdev"] is not None:
-            steps.append(("9b SSIM change (spreads)", d["sdev"].astype(np.float32) / 255 * 2 * prm["ssim_threshold"], "pos"))
+            steps.append(("9b SSIM change: full yellow = %.1f spreads (threshold %.1f)" % (d["sdev_lim"], prm["ssim_threshold"]),
+                          d["sdev"].astype(np.float32) / 255, "unit"))
         unpack = lambda b: np.unpackbits(b)[:H * W].reshape(H, W)
         steps.append(("10 dark specks (Dark %.1f%s)" % (prm["dark_threshold"], ", SSIM %.1f" % prm["ssim_threshold"] if store["use_ssim"] else ""),
                       unpack(d["dark"]), "mask"))
@@ -2755,6 +2756,9 @@ class MainWindow(QMainWindow):
                 rgb = np.full(a.shape + (3,), 255.0, np.float32)
                 rgb[..., 0] -= 255 * np.clip(-t, 0, 1); rgb[..., 1] -= 255 * np.abs(t); rgb[..., 2] -= 255 * np.clip(t, 0, 1)
                 return rgb.astype(np.uint8)
+            if kind == "unit": # 0..1: black -> red -> yellow
+                t = np.clip(a, 0, 1)
+                return np.stack([255 * np.clip(2 * t, 0, 1), 255 * np.clip(2 * t - 1, 0, 1), 0 * t], -1).astype(np.uint8)
             if kind == "pos":
                 lim = 2.0 * float(ep.get("ssim_threshold", 25.0))
                 t = np.clip(a / lim, 0, 1)

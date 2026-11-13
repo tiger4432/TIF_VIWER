@@ -65,7 +65,7 @@
 | 6 | chip-to-chip spread | 칩끼리 흩어짐. 밝을수록 그 자리는 둔감(패드·경계) |
 | 7, 8 | reference min / max | 이 범위 안이면 차이 아님 |
 | 9 | deviation | 파랑 = 기준보다 어두움, 빨강 = 밝음(±2×Dark에서 꽉 참). 띠가 파랗게 보여야 함 |
-| 9b | SSIM change | 구조가 달라진 정도(노랑 = 2×SSIM thr) |
+| 9b | SSIM change | 구조(질감)가 달라진 정도, 패드 평균 전 칩으로 계산. 그 칩의 값 범위에 맞춰 표시(캡션: 노랑 = 몇 배, 기준 몇). 노랗게 보이는데 10번에 안 나오면 SSIM thr를 캡션 값 근처로 ↓ |
 | 10 | dark specks | Dark / SSIM 기준을 넘은 점(가장자리 띠 안만) |
 | 11 | specks kept | Density를 통과한 점. 띠의 점이 여기서 사라지면 Density ↓ |
 | 12 | joined lines | 이은 띠. 끊겨 있으면 Merge r / Along × / Link gap ↑ |
