@@ -692,9 +692,29 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                 gmax = np.where(both, np.minimum(rmax, cmax), np.where(near_tb, rmax, np.where(near_lr, cmax, gmax)))
             return golden, spread, gmin, gmax
 
+        q_st = max(1, min(H, W) // 64)
+        qY, qX = np.mgrid[0:H:q_st, 0:W:q_st]
+        qx, qy = (qX.ravel() - W / 2) / W, (qY.ravel() - H / 2) / H
+        QA = np.stack([np.ones(qx.size), qx, qy, qx * qx, qx * qy, qy * qy], 1)
+        fx = (np.arange(W)[None, :] - W / 2) / W
+        fy = (np.arange(H)[:, None] - H / 2) / H
+
+        def deshade(a, golden):
+            """The chip with its brightness gradient against this reference taken off: a quadratic surface of
+            (chip - reference) fitted robustly (stains trimmed: beyond 2.5 x the residual spread)."""
+            d = (a - golden)[::q_st, ::q_st].ravel()
+            keep = np.ones(d.size, bool)
+            for _ in range(3):
+                c = np.linalg.lstsq(QA[keep], d[keep], rcond=None)[0]
+                res = d - QA @ c
+                keep = np.abs(res) <= 2.5 * (float(np.median(np.abs(res[keep]))) * 1.4826 + 1e-6)
+            return a - (c[0] + c[1] * fx + c[2] * fy + c[3] * fx * fx + c[4] * fx * fy + c[5] * fy * fy)
+
         def dev_of(k, ref):
             golden, spread, gmin, gmax = ref[:4]
             a = chips[k] if fn is None else fn(chips[k], golden, centre)
+            if p["shading"]:
+                a = deshade(a, golden)
             return (np.maximum(a - gmax, 0) - np.maximum(gmin - a, 0)) / spread # > 0 brighter, < 0 darker
 
         ss_sig = max(0.8, p["ssim_sigma_px"] / min(sx, sy))
