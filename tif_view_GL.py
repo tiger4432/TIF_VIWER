@@ -388,6 +388,12 @@ class MainWindow(QMainWindow):
         self.glw.navigation_requested.connect(self.on_navigation_requested)
         self.glw.cell_step_requested.connect(self.step_bonded_cell)
         self.glw.cursor_moved.connect(self.on_cursor_moved)
+        # Ctrl+C on the image: the chip under the mouse (else at the view centre) with its markings
+        act_copy = QAction("Copy Chip Image", self.glw)
+        act_copy.setShortcut(QKeySequence.Copy)
+        act_copy.setShortcutContext(Qt.WidgetShortcut)
+        act_copy.triggered.connect(self.copy_chip_image)
+        self.glw.addAction(act_copy)
         
         # 3.5 Void Marking Control
         self.void_manager = VoidManager(declaration_path("config.json"))
@@ -966,6 +972,47 @@ class MainWindow(QMainWindow):
         if self.void_manager.apply_bbox_size():
             self.void_manager.resnap(self.glw.grid_cfg, self.glw.coord_transform)
             self.glw.update()
+
+    def copy_chip_image(self):
+        """
+        Ctrl+C on the image: the chip under the mouse (else at the view centre) as the export's overlay
+        image (current layer, its markings solid, other layers' as ghosts, product layout, title bar)
+        into the clipboard.
+        """
+        from PySide6.QtGui import QCursor
+        glw = self.glw
+        if self.full_data is None or glw.tiled_image is None:
+            return
+        cfg, vm = glw.grid_cfg, self.void_manager
+        pos = glw.mapFromGlobal(QCursor.pos())
+        at = QPointF(pos) if glw.rect().contains(pos) else QPointF(glw.width() / 2, glw.height() / 2)
+        r, c = cfg.cell_at(*glw.get_image_coords(at))
+        if not cfg.contains(r, c):
+            self.statusBar().showMessage("Copy: no grid cell here")
+            return
+        x0, y0 = cfg.cell_origin(r, c)
+        quad = [glw.deskew_to_raw(x, y) for x, y in ((x0, y0), (x0 + cfg.pitch_x, y0),
+                                                       (x0 + cfg.pitch_x, y0 + cfg.pitch_y), (x0, y0 + cfg.pitch_y))]
+        z = self.current_z
+        layer = self.abs_layer(z)
+        scale, offset = 1.0, 0.0
+        calib = self.layer_calib_data.get(z) if self.layer_calib_data else None
+        if calib is not None and r < calib.shape[0] and c < calib.shape[1]:
+            scale, offset = float(calib[r, c, 0]), float(calib[r, c, 1])
+        ex = ExportManager(self) # The export's drawing: same picture as overlay/
+        ex._refs = vm.reference_bboxes(cfg, glw.coord_transform)
+        patch = ex._extract_patch_unified(z, quad, glw.win_lo, glw.win_hi, scale, offset)
+        self.full_data.release_cache()
+        if patch is None:
+            self.statusBar().showMessage("Copy: the chip is outside the image")
+            return
+        img = patch.convertToFormat(QImage.Format_RGB32)
+        ex._draw_chip_voids(img, ex._index_voids(cfg), cfg, r, c, mode='overlay', current_layer=layer)
+        leg = (glw.bonding_map.get_key(r, c) if glw.bonding_map else "") or ""
+        title = f"X{c:02d}_Y{r:02d}_L{layer:02d}" + (f"_LEG:{ex._safe(leg)}" if leg else "")
+        img = ex._add_title_bar(img, title)
+        QApplication.clipboard().setImage(img)
+        self.statusBar().showMessage(f"Copied {title} ({img.width()} x {img.height()}) to the clipboard")
 
     def measure_scale(self):
         """Measure: two clicks on the image (GLImageWidget.start_measure), then the real length -> Scale."""
