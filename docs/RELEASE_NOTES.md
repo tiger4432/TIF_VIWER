@@ -5,6 +5,12 @@
 - **git checkout(git bundle로 업데이트):** `defaults\` 폴더는 없습니다. `plugins\results_api.py`도 업데이트(merge)로 새 버전이 되고, 현장에서 고친 내용은 `--autostash`가 그 위에 다시 얹습니다(같은 줄을 고쳤으면 git이 충돌로 알림). 아래 노트의 "`defaults\`에서 옮겨 붙이세요"는 zip 설치에만 해당합니다.
 - **zip 설치:** 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다(새 기본값은 zip 안의 `defaults\`).
 
+## 1.1.56
+
+- **차이 맵(9번)에 레이아웃이 남을 때:** 패드(Texture)가 아니라 칩 위치가 기준과 어긋난 것입니다. Debug 위쪽 글에 **"this chip against the reference after the cut: off by (dx, dy) image px"** — Align tol보다 크면 레이아웃이 차이로 나옵니다.
+  - **Align**(새 선택): image(기본, 영상으로 위치 맞춤) / **bbox**(bbox 위치를 그대로 믿음 — Edge BBOX로 bbox를 맞춘 뒤, 영상 맞춤이 틀릴 때).
+  - **Align tol**을 1 작업 px보다 크게도 줄 수 있음(최대 100 px; 크면 기준의 최솟값~최댓값을 그만큼 넓힘 — 약한 오염은 덜 보임).
+
 ## 1.1.55
 
 - **차이 맵(9번)에 남던 밝기 구배:** Shading이 칩마다의 기울기를 평면 하나로, 그것도 처음의 임시 기준에 대고만 뺐습니다. 이제 비교할 때마다 **최종 기준 칩에 대고 2차 곡면**(휘어진 구배, 비네팅)을 강건하게(오염은 제외하고) 맞춰 뺍니다.

@@ -2424,7 +2424,7 @@ class MainWindow(QMainWindow):
             "Blur σ", spin("blur_px", "", 0, 100, 0.5, 1, "Gaussian blur of every chip before the comparison (sigma, image px; 0 = off)"))
         row("Skip", spin("edge_skip_px", "", 0, 1000, 1, 0, "Outermost image px of the chip left out (bbox / package edge)"),
             "Min depth", spin("min_depth_px", "", 0, 10000, 1, 0, "Shallowest stain (image px from the edge)"),
-            "Align tol", spin("edge_tol_px", "", 0, 10, 0.5, 1, "A chip may sit this far (image px) off the median chip (chips are cut on whole px):\n"
+            "Align tol", spin("edge_tol_px", "", 0, 100, 0.5, 1, "A chip may sit this far (image px) off the median chip (chips are cut on whole px):\n"
                                                                   "a pixel within the median chip's values moved by +- this is no difference\n"
                                                                   "(Shift tol > 0: the wider square range instead)"),
             "Along", spin("edge_along_px", "", 0, 1000, 1, 0, "Within this many image px of the chip edge the median chip's range is taken along the\n"
@@ -2454,6 +2454,14 @@ class MainWindow(QMainWindow):
         self.cb_stain_match.setToolTip("Per-chip brightness matching onto the median chip, measured on the chip centre:\n"
                                        "none (default), linear (gain / offset), curve (contrast / gamma too)")
         h4b.addWidget(self.cb_stain_match)
+        h4b.addWidget(QLabel("Align"))
+        self.cb_stain_align = QComboBox()
+        for key, label in (("image", "image"), ("bbox", "bbox")):
+            self.cb_stain_align.addItem(label, key)
+        self.cb_stain_align.setCurrentIndex(max(0, self.cb_stain_align.findData(cfg.get("align", "image"))))
+        self.cb_stain_align.setToolTip("Chip positions: image = aligned on the image (whole px); bbox = the bboxes as they are\n"
+                                       "(use after Edge BBOX when the layout still shows in Debug 9: the image alignment is off)")
+        h4b.addWidget(self.cb_stain_align)
         h4b.addWidget(QLabel("Clean %"))
         h4b.addWidget(spin("clean_ref", "", 0, 100, 5, 0, "Reference (median chip, spread) per edge from the chips cleanest at that edge:\n"
                                                          "0 = automatic (the clean group: within 1.5 x the cleanest 10 %, 8 .. half of the chips),\n"
@@ -2522,6 +2530,8 @@ class MainWindow(QMainWindow):
                 out[k] /= 100.0
         if getattr(self, "cb_stain_compare", None) is not None:
             out["compare"] = self.cb_stain_compare.currentData()
+        if getattr(self, "cb_stain_align", None) is not None:
+            out["align"] = self.cb_stain_align.currentData()
         if getattr(self, "chk_stain_shading", None) is not None:
             out["shading"] = self.chk_stain_shading.isChecked()
         if getattr(self.glw, "golden_cells", None):
@@ -2739,6 +2749,16 @@ class MainWindow(QMainWindow):
         info += store["info"]
         info.append(f"this chip in the reference: {'yes' if cell in store['clean'] else 'no'}" +
                     "".join(f"; {side}: {'yes' if cell in sel else 'no'}" for side, sel in store["strip_clean"].items()))
+        try: # How far this chip sits off the reference after the cut (from the kept images)
+            from sat_widgets.void_detect import _phase_shift
+            g_ref = store["ref"][0][1].astype(np.float32)
+            rdx, rdy = _phase_shift(d["chip"].astype(np.float32), g_ref)
+            k_ = store["f"] * max(1, int(np.ceil(max(H, W) / 256.0)))
+            info.append(f"this chip against the reference after the cut: off by ({rdx * k_:+.1f}, {rdy * k_:+.1f}) image px"
+                        + (" - the layout shows in the deviation: Align bbox (after Edge BBOX) or Align tol up"
+                           if max(abs(rdx), abs(rdy)) * k_ > max(1.0, prm.get("edge_tol_px", 1.0)) else ""))
+        except Exception:
+            pass
         info += [f"dropped: {w[1]} (length {w[2]}, depth {w[3]} px)" for w in d["why"]]
         self._show_trace(f"Edge Stains debug: X{cell[1]:02d}_Y{cell[0]:02d}", info, steps, prm)
 

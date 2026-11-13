@@ -45,6 +45,7 @@
 | Shading | `shading` | 켬 | 칩 안의 밝기 구배(조명) 제거: (칩 − 기준 칩)에 2차 곡면을 강건하게 맞춰 빼고 비교 | 차이 맵에 한쪽이 밝고 반대쪽이 어두운 기울기가 보이면 켬 |
 | Along | `edge_along_px` | 4 | 칩 경계에서 이 거리(px) 안은 기준 범위를 변 방향으로만(0=끔) | 경계 바로 옆 오염을 놓치면 ↑ |
 | Shift tol | `shift_tol_px` | 0 | 칩끼리 어긋남 허용(px; 0이어도 3×3) | 패드·틈이 잡히면 ↑ |
+| Align | `align` | "image" | 칩 위치: image = 영상으로 맞춤(정수 px), bbox = bbox 위치 그대로(Edge BBOX 후) | Debug에 "off by"가 크고 9번에 레이아웃이 보이면 Edge BBOX → bbox |
 | Edges T B L R | `edges` | "tblr" | 볼 변 | 상하단만: "tb" |
 | Match | `match` | "none" | 칩 밝기 맞춤(칩 가운데로): none / linear / curve | 칩마다 전체 밝기가 다르면 linear |
 | Clean % | `clean_ref` | 0 | 변마다 기준 칩을 만들 "가장 깨끗한 칩": 0 = 자동(깨끗한 무리), 5~95 = 정확히 그 비율, 100 = 전체 표본(모두 최대 64개; config는 비율 0~1) | 기준(5번)에 오염이 비치면 자동(0) 또는 작은 값 |
@@ -75,6 +76,8 @@
 
 **보는 순서(못 잡을 때):** 9번에 띠가 파랗게(또는 9b에 노랗게) 보이나? → 안 보이면 Dark / SSIM thr ↓, 또는 5번 기준 칩에 오염이 비치는지 확인(→ Golden). 보이면 10·11번에 점이 남나? → 11에서 사라지면 Density ↓. 12번에서 띠가 이어지나? → 끊기면 Merge r / Along × / Link gap ↑. 13번 영역이 없으면 위쪽 글의 버린 이유(short / thin / not elongated)에 맞는 입력칸을 조정.
 **잘못 잡을 때:** 13번 영역이 생긴 자리의 9·9b를 보고, 정상인데 파랗거나 노라면 Dark / SSIM thr ↑ 또는 Edge tol / Shift tol ↑.
+
+**9번에 레이아웃(칩 무늬)이 보이면:** 위쪽 글의 "off by (dx, dy)"를 보세요. Align tol보다 크면 위치 맞춤이 틀린 것 → Edge BBOX 후 Align = bbox, 또는 Align tol ↑.
 
 PNG로 저장(Save PNGs)해 보내 주시면 어느 단계에서 놓치는지 볼 수 있습니다.
 

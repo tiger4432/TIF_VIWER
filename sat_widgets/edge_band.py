@@ -64,6 +64,8 @@ DEFAULTS = {
     "texture_px": 2.0,      # Pad grid pitch (image px, whole): every chip averaged over a box of it at the image
                             # resolution, before the reduction (no beat pattern) (0 / 1 = off). Pads every other px: 2
     "shading": True,        # Brightness gradient across each chip (plane of chip - median chip) taken off
+    "align": "image",       # Chip positions: "image" (aligned on the image, whole px) or "bbox" (the bboxes as they are:
+                            # after Edge BBOX, when the image alignment is off)
     "edge_tol_px": 1.0,     # Next to the chip edge a chip may sit this far (image px) across the edge off the
                             # median chip (it is cut on whole px): no dark / bright line along the edge
     "bright_min": 0.0,      # Optional: the area between the edge and the line brighter than the chips by this
@@ -354,7 +356,7 @@ def _box_sum(a, k):
     return sum(rows[:, j:j + w] for j in range(k)) / float(k * k)
 
 
-def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tick=None, texture_k=0, plain=False):
+def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tick=None, texture_k=0, plain=False, align=True):
     """
     Chips cut from the raw image as they lie (no rotation, no resampling: a pad grid of about 1 px at
     a small angle gives no moire), moved onto the median chip by whole image px only (measured by
@@ -441,14 +443,15 @@ def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tic
     if len(sample) < 4:
         return {}
     ref = make_ref([(w, (0, 0)) for w in sample.values()])
-    ref = make_ref([(w, shift(w, ref)) for w in sample.values()])
+    if align:
+        ref = make_ref([(w, shift(w, ref)) for w in sample.values()])
     out = {}
     for i, (c, win) in enumerate(windows(cells, 16)):
         if tick is not None and not tick("cut", i + 1, len(cells)):
             return None
         if win is None:
             continue
-        sx, sy = shift(win, ref)
+        sx, sy = shift(win, ref) if align else (0, 0) # align False: the bboxes are trusted (Edge BBOX)
         out[c] = (crop(win, sx, sy), (origin[c][0] + sx, origin[c][1] + sy))
         if plain: # Also without the pad grid averaged (SSIM / texture)
             out[c] = out[c] + (crop(win, sx, sy, avg=False),)
@@ -564,7 +567,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
         texture_k = int(round(p["texture_px"])) if p["texture_px"] >= 1.5 else 0
         plain = use_ssim and texture_k > 1
         key = (id(stack), getattr(stack, "path", None), stack.width, stack.height, z,
-               hash(tuple(sorted(origin.items()))), Wr, Hr, f, M, p["register_frac"], texture_k, plain)
+               hash(tuple(sorted(origin.items()))), Wr, Hr, f, M, p["register_frac"], texture_k, plain, p["align"])
         hit = _CUT_CACHE.get(key)
         if hit is not None:
             cut = dict(hit)
@@ -577,7 +580,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
         else:
             cut = _raw_chips(stack, z, origin, Wr, Hr, f, M, p["register_frac"], keep=trace,
                              tick=lambda stage, i, n, li=li, layer=layer: tick(li, layer, stage, i, n),
-                             texture_k=texture_k, plain=plain)
+                             texture_k=texture_k, plain=plain, align=p["align"] != "bbox")
             if cut is None:
                 return None
             if len(_CUT_CACHE) >= 4: # A few layers at most (memory)
@@ -660,7 +663,10 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                 # +- edge_tol_px (image px, interpolated) in the 8 directions. A 3 x 3 working px min..max spans
                 # f image px: with a pad grid of about 1 px it is the pad level everywhere, and a chip a little
                 # brighter / darker between the pads (the inside of a stain) stays inside it
-                t = min(1.0, p["edge_tol_px"] / f)
+                t = p["edge_tol_px"] / f
+                if t > 1.0: # More than a working px: the min..max over +- that many working px
+                    kk = 2 * int(math.ceil(t)) + 1
+                    return golden, spread, _filt(golden, ImageFilter.MinFilter(kk)), _filt(golden, ImageFilter.MaxFilter(kk))
                 gp = np.pad(golden, 1, mode="edge")
                 gmin, gmax = golden.copy(), golden.copy()
                 for dy in (-1, 0, 1):
@@ -804,6 +810,13 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                                   f"reference: per edge the {len(clean)} of {len(keys)} chips cleanest there (clean_ref {p['clean_ref']})") +
                                  f", traced chip {'in' if tk in (gold or clean) else 'not in'} it" +
                                  "".join(f"; {side}: {'in' if tk in sel else 'not in'}" for side, sel in strip_clean.items())]
+            if tk in chips:
+                from .void_detect import _phase_shift
+                rdx, rdy = _phase_shift(chips[tk], ref[0])
+                trace.setdefault("info", []).append(
+                    f"this chip against the reference after the cut: off by ({rdx * f:+.1f}, {rdy * f:+.1f}) image px"
+                    + (" - more than Align tol: the layout shows in the deviation (Align: bbox after Edge BBOX, or Align tol up)"
+                       if max(abs(rdx), abs(rdy)) * f > max(1.0, p["edge_tol_px"]) else ""))
             steps.append(("5 median chip (reference)", ref[0], "gray"))
             steps.append(("6 chip-to-chip spread", ref[1], "gray"))
             steps.append(("7 reference min (envelope)", ref[2], "gray"))
