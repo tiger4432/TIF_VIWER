@@ -1574,8 +1574,11 @@ class GLImageWidget(QOpenGLWidget):
                 v["radiusX"], v["radiusY"] = r0x * s, r0y * s
 
     def bbox_recognized(self):
-        """Bboxes are recognized (hover, edit, erase, Q, type keys) only on the topmost loaded layer."""
-        return self.current_layer == self.bbox_layer
+        """
+        Bboxes are recognized (hover, edit, erase, Q, type keys) only on the topmost loaded layer, and
+        not while locked (bbox_locked: the markings inside are edited without catching the bbox).
+        """
+        return self.current_layer == self.bbox_layer and not getattr(self, "bbox_locked", False)
 
     def _quadrant_ctx(self):
         return (self.void_manager.reference_bboxes(self.grid_cfg, self.coord_transform), self.grid_cfg)

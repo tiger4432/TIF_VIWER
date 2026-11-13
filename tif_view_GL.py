@@ -722,6 +722,11 @@ class MainWindow(QMainWindow):
         btn_fit_grid = QPushButton("Fit Grid")
         btn_fit_grid.setToolTip("Fit the grid origin, pitch and angle to the bbox centers (asks before applying)")
         btn_fit_grid.clicked.connect(self.fit_grid_to_bboxes)
+        self.chk_lock_bbox = QCheckBox("Lock BBOX")
+        self.chk_lock_bbox.setToolTip("The bboxes are shown but not hovered, selected, moved, erased or retyped:\n"
+                                      "the markings inside them are edited on the topmost layer without catching the bbox")
+        self.chk_lock_bbox.toggled.connect(self._set_bbox_lock)
+        self.chk_lock_bbox.setChecked(self._ui_state("bbox_locked", True)) # Remembered per PC; on by default
         btn_grid_bbox = QPushButton("Grid BBOX")
         btn_grid_bbox.setToolTip("Put the bbox (declared size) of every bonded cell exactly at the grid cell centre:\n"
                                  "no image analysis. For a grid fitted well by hand (Ctrl+Z undoes).")
@@ -740,6 +745,7 @@ class MainWindow(QMainWindow):
         form_calib.addRow(h_auto)
         h_auto2 = QHBoxLayout()
         h_auto2.addWidget(btn_grid_bbox)
+        h_auto2.addWidget(self.chk_lock_bbox)
         h_auto2.addWidget(btn_fit_grid)
         h_auto2.addWidget(btn_next_est)
         form_calib.addRow(h_auto2)
@@ -1848,6 +1854,16 @@ class MainWindow(QMainWindow):
         self.glw.update_grid_params()
         self.statusBar().showMessage(f"Fit Grid applied ({f['n']} bboxes, residual {f['rms']:.2f} px)")
         return dict(new, rms=f["rms"], n=f["n"])
+
+    def _set_bbox_lock(self, on):
+        self._set_ui_state("bbox_locked", on)
+        if not hasattr(self, "glw"):
+            return
+        self.glw.bbox_locked = on
+        if self.glw.active_void is not None and self.void_manager.is_bbox(self.glw.active_void) and on:
+            self.glw.active_void = None
+        self.glw.refresh_hover()
+        self.glw.update()
 
     def grid_bbox(self):
         """Bbox of every bonded cell at the grid cell centre (declared size), no image analysis. One undo step."""
