@@ -66,6 +66,8 @@ DEFAULTS = {
     "shading": True,
     "background": 0.0,      # Shading: brightness differences larger than this share of the chip (smoothed, stains left
                             # out) are taken off every chip against the reference (blotches, vignetting); 0 = a quadratic        # Brightness gradient across each chip (plane of chip - median chip) taken off
+    "subpixel": True,       # After the pad grid is averaged (Texture >= 2): the chips also moved by the part of a px
+                            # (interpolated: smooth now, no moire), so they sit within ~0.1 px of the reference
     "align": "image",       # Chip positions: "image" (aligned on the image, whole px) or "bbox" (the bboxes as they are:
                             # after Edge BBOX, when the image alignment is off)
     "edge_tol_px": 1.0,     # Next to the chip edge a chip may sit this far (image px) across the edge off the
@@ -78,7 +80,7 @@ DEFAULTS = {
                             # (at most 64; 1 = a sample of all): stains at the same place on many chips
                             # (long ones, corners) do not get into the reference
     "golden_cells": None,   # [(row, col)] golden chips picked by hand for the median chip (None: automatic)
-    "compare": "both",     # What differs from the median chip: "intensity" (darker), "ssim" (local structure /
+    "compare": "both",      # What differs from the median chip: "intensity" (darker), "ssim" (local structure /
                             # texture changed: pads covered or smeared, the mean brightness hardly), "both"
     "ssim_sigma_px": 3.0,   # SSIM window (Gaussian sigma, image px)
     "ssim_threshold": 8.0,   # SSIM: a speck where the structure differs by this many chip-to-chip spreads
@@ -358,7 +360,8 @@ def _box_sum(a, k):
     return sum(rows[:, j:j + w] for j in range(k)) / float(k * k)
 
 
-def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tick=None, texture_k=0, plain=False, align=True):
+def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tick=None, texture_k=0, plain=False, align=True,
+               subpixel=False):
     """
     Chips cut from the raw image as they lie (no rotation, no resampling: a pad grid of about 1 px at
     a small angle gives no moire), moved onto the median chip by whole image px only (measured by
@@ -454,7 +457,15 @@ def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tic
         if win is None:
             continue
         sx, sy = shift(win, ref) if align else (0, 0) # align False: the bboxes are trusted (Edge BBOX)
-        out[c] = (crop(win, sx, sy), (origin[c][0] + sx, origin[c][1] + sy))
+        chip = crop(win, sx, sy)
+        if subpixel and align:
+            # The rest of the offset (below a px) taken off by moving the chip, now that the pad grid is averaged out
+            # (a smooth image: interpolation makes no moire); the chips then sit within ~0.1 px of each other
+            from .void_detect import _translate
+            rx, ry = _peak_near(cen(chip), ref[1], 0, 0, 1)
+            if math.isfinite(rx) and math.isfinite(ry) and max(abs(rx), abs(ry)) <= 1.0:
+                chip = _translate(chip, rx, ry)
+        out[c] = (chip, (origin[c][0] + sx, origin[c][1] + sy))
         if plain: # Also without the pad grid averaged (SSIM / texture)
             out[c] = out[c] + (crop(win, sx, sy, avg=False),)
         if keep is not None and c == keep.get("cell"): # Debug trace: the raw window and what was cut
@@ -569,7 +580,8 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
         texture_k = int(round(p["texture_px"])) if p["texture_px"] >= 1.5 else 0
         plain = use_ssim and texture_k > 1
         key = (id(stack), getattr(stack, "path", None), stack.width, stack.height, z,
-               hash(tuple(sorted(origin.items()))), Wr, Hr, f, M, p["register_frac"], texture_k, plain, p["align"])
+               hash(tuple(sorted(origin.items()))), Wr, Hr, f, M, p["register_frac"], texture_k, plain, p["align"],
+               p["subpixel"])
         hit = _CUT_CACHE.get(key)
         if hit is not None:
             cut = dict(hit)
@@ -582,7 +594,8 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
         else:
             cut = _raw_chips(stack, z, origin, Wr, Hr, f, M, p["register_frac"], keep=trace,
                              tick=lambda stage, i, n, li=li, layer=layer: tick(li, layer, stage, i, n),
-                             texture_k=texture_k, plain=plain, align=p["align"] != "bbox")
+                             texture_k=texture_k, plain=plain, align=p["align"] != "bbox",
+                             subpixel=bool(p["subpixel"]) and texture_k > 1)
             if cut is None:
                 return None
             if len(_CUT_CACHE) >= 4: # A few layers at most (memory)

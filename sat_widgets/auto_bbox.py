@@ -706,8 +706,8 @@ def fit_edges(stack, z, grid_cfg, coord_transform, void_manager, bbox_type, size
     with the steeper step and the median size. Bboxes placed by hand ("hand") stay.
     params: "edge_search" (share of the size searched each way, default 0.06), "edge_band" (share of
     the chip through its middle the profile is taken over, default 0.3), "size_tol" (0.02),
-    "edge_pick" ("steepest" step, or the "outer" / "inner" one of the steps at least "pick_frac" (0.5)
-    of the steepest), "apply" (False: nothing changed, for "trace": {"cell": (r, c)} debug).
+    "edge_pick" ("steepest" step, or the "outer" / "inner" / "second" (the second from the outside: the
+    street between the chips gives a pair) one of the steps at least "pick_frac" (0.5) of the steepest), "apply" (False: nothing changed, for "trace": {"cell": (r, c)} debug).
     Returns {"fitted", "one_side", "failed": [(r, c)], "hand", "moved_px"} or None (no bboxes).
     """
     from .core_data import to_gray
@@ -742,14 +742,21 @@ def fit_edges(stack, z, grid_cfg, coord_transform, void_manager, bbox_type, size
         lo, hi = max(1, int(lo)), min(len(g) - 1, int(hi))
         if hi <= lo:
             return None
-        gs = g * sign if sign else np.abs(g)
+        # "second": the steps as Edge debug shows them (size, either direction): the street is a dark band, its two
+        # sides are a pair of opposite steps
+        gs = np.abs(g) if (not sign or (outward and p["edge_pick"] == "second")) else g * sign
         i = lo + int(np.argmax(gs[lo:hi]))
-        if outward and p["edge_pick"] in ("outer", "inner") and gs[i] > 0:
+        if outward and p["edge_pick"] in ("outer", "inner", "second") and gs[i] > 0:
             seg = gs[lo:hi]
             # Local maxima at least pick_frac of the steepest
             pk = [j for j in range(len(seg)) if seg[j] >= p["pick_frac"] * gs[i]
                   and (j == 0 or seg[j] >= seg[j - 1]) and (j == len(seg) - 1 or seg[j] >= seg[j + 1])]
-            if pk:
+            if pk and p["edge_pick"] == "second":
+                # The second step from the outside (left / top: the 2nd from the left, right / bottom: the 1st of the last
+                # two): the street between chips is a dark band, its far side is the neighbour chip's edge
+                j = (pk[1] if len(pk) > 1 else pk[0]) if outward < 0 else (pk[-2] if len(pk) > 1 else pk[-1])
+                i = lo + j
+            elif pk:
                 far_low = (p["edge_pick"] == "outer") == (outward < 0) # Pick the lowest index
                 i = lo + (pk[0] if far_low else pk[-1])
         cm, c0, cp = gs[i - 1], gs[i], gs[i + 1]

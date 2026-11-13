@@ -88,7 +88,7 @@ Auto Calibration의 **Edge BBOX**: bbox마다 네 변 근처에서 칩 외곽의
 
 | 입력칸 / config 키 | 기본 | 뜻 | 이럴 때 |
 |---|---|---|---|
-| Edge pick / `edge_pick` | "steepest" | 변 근처 단차 중 무엇을 칩 경계로: 가장 가파른 것(steepest) / 가장 바깥(outer) / 가장 안쪽(inner) — 가장 가파른 것의 `pick_frac` 이상인 단차 중 | 경계 옆에 밝은 테두리·헤일로·스캔 꼬리가 있어 bbox가 한쪽으로 밀리면 outer 또는 inner |
+| Edge pick / `edge_pick` | "steepest" | 변 근처 단차 중 무엇을 칩 경계로: steepest(가장 가파른 것) / **second (street)**(바깥에서 두 번째: 왼쪽·위 2번째, 오른쪽·아래 1번째 — 칩 사이 길 때문에 단차가 쌍으로 보일 때) / outer / inner(가장 가파른 것의 `pick_frac` 이상인 단차 중 가장 바깥 / 안쪽) | Edge debug에 이중 피크가 보이고 bbox가 밀리면 second |
 | `pick_frac` | 0.5 | outer / inner에서 단차로 칠 최소 크기(가장 가파른 것 대비) | |
 | `edge_search` | 0.06 | 지금 bbox 변에서 앞뒤로 찾는 범위(칩 크기 대비) | bbox가 많이 어긋나 있으면 ↑(이웃 칩 경계가 들어오지 않게) |
 | `edge_band` | 0.3 | 단면을 평균 내는 칩 가운데 띠 폭(칩 크기 대비) | 가운데에 큰 구조물이 있으면 ↓ |

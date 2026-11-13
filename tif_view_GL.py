@@ -777,13 +777,14 @@ class MainWindow(QMainWindow):
         h_edge = QHBoxLayout()
         h_edge.addWidget(QLabel("Edge pick"))
         self.cb_edge_pick = QComboBox()
-        for key, label in (("steepest", "steepest"), ("outer", "outer"), ("inner", "inner")):
+        for key, label in (("steepest", "steepest"), ("second", "second (street)"), ("outer", "outer"), ("inner", "inner")):
             self.cb_edge_pick.addItem(label, key)
         self.cb_edge_pick.setCurrentIndex(max(0, self.cb_edge_pick.findData(
             ((self._config().get("auto_bbox") or {}).get("edges") or {}).get("edge_pick", "steepest"))))
-        self.cb_edge_pick.setToolTip("Edge BBOX: which brightness step near each bbox edge is the chip edge: the steepest,\n"
-                                     "or the outermost / innermost of the steps at least half as steep (a bright rim, a halo\n"
-                                     "or a scan tail next to the outline)")
+        self.cb_edge_pick.setToolTip("Edge BBOX: which brightness step near each bbox edge is the chip edge: the steepest;\n"
+                                     "second (street) = the second from the outside (left / top: the 2nd from the left, right /\n"
+                                     "bottom: the 1st), when the dark street between the chips gives a pair of steps (Edge debug\n"
+                                     "shows a double peak); or the outermost / innermost of the steps at least half as steep")
         h_edge.addWidget(self.cb_edge_pick)
         btn_edge_dbg = QPushButton("Edge debug")
         btn_edge_dbg.setToolTip("Edge BBOX on the chip at the view centre without changing anything: the window with the\n"
