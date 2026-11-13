@@ -46,6 +46,7 @@
 | Along | `edge_along_px` | 4 | 칩 경계에서 이 거리(px) 안은 기준 범위를 변 방향으로만(0=끔) | 경계 바로 옆 오염을 놓치면 ↑ |
 | Shift tol | `shift_tol_px` | 0 | 칩끼리 어긋남 허용(px; 0이어도 3×3) | 패드·틈이 잡히면 ↑ |
 | Align | `align` | "image" | 칩 위치: image = 영상으로 맞춤(정수 px), bbox = bbox 위치 그대로(Edge BBOX 후) | Debug에 "off by"가 크고 9번에 레이아웃이 보이면 Edge BBOX → bbox |
+| Bg % | `background` | 0 | Shading: 칩−기준 칩의 밝기 차이 중 칩 크기의 이 비율보다 큰 것(얼룩·비네팅)을 오염 빼고 매끈하게 추정해 뺌(config는 비율; 0 = 2차 곡면) | 9번에 큰 얼룩이 남으면 5~10 |
 | Edges T B L R | `edges` | "tblr" | 볼 변 | 상하단만: "tb" |
 | Match | `match` | "none" | 칩 밝기 맞춤(칩 가운데로): none / linear / curve | 칩마다 전체 밝기가 다르면 linear |
 | Clean % | `clean_ref` | 0 | 변마다 기준 칩을 만들 "가장 깨끗한 칩": 0 = 자동(깨끗한 무리), 5~95 = 정확히 그 비율, 100 = 전체 표본(모두 최대 64개; config는 비율 0~1) | 기준(5번)에 오염이 비치면 자동(0) 또는 작은 값 |

@@ -5,6 +5,10 @@
 - **git checkout(git bundle로 업데이트):** `defaults\` 폴더는 없습니다. `plugins\results_api.py`도 업데이트(merge)로 새 버전이 되고, 현장에서 고친 내용은 `--autostash`가 그 위에 다시 얹습니다(같은 줄을 고쳤으면 git이 충돌로 알림). 아래 노트의 "`defaults\`에서 옮겨 붙이세요"는 zip 설치에만 해당합니다.
 - **zip 설치:** 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다(새 기본값은 zip 안의 `defaults\`).
 
+## 1.1.57
+
+- **Bg %(큰 얼룩·비네팅 빼기, Shading 옆):** 칩과 기준 칩의 밝기 차이 중 칩 크기의 Bg % 보다 큰 것(얼룩, 비네팅 차이)을 오염은 빼고 매끈하게 추정해 뺍니다. 0(기본) = 2차 곡면(1.1.55). 9번에 큰 얼룩이 남으면 5~10부터. 합성에서는 깨끗한 웨이퍼 과검이 1 → 7로 늘어 기본은 끔.
+
 ## 1.1.56
 
 - **차이 맵(9번)에 레이아웃이 남을 때:** 패드(Texture)가 아니라 칩 위치가 기준과 어긋난 것입니다. Debug 위쪽 글에 **"this chip against the reference after the cut: off by (dx, dy) image px"** — Align tol보다 크면 레이아웃이 차이로 나옵니다.

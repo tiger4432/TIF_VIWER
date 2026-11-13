@@ -2385,7 +2385,7 @@ class MainWindow(QMainWindow):
         def spin(key, label, lo, hi, step, decimals, tip):
             sb = QDoubleSpinBox()
             sb.setRange(lo, hi); sb.setSingleStep(step); sb.setDecimals(decimals)
-            sb.setValue(float(cfg[key]) * (100.0 if key in ("depth_frac", "clean_ref") else 1.0))
+            sb.setValue(float(cfg[key]) * (100.0 if key in ("depth_frac", "clean_ref", "background") else 1.0))
             sb.setToolTip(tip)
             self._stain_inputs[key] = sb
             return sb
@@ -2434,9 +2434,11 @@ class MainWindow(QMainWindow):
         self.chk_stain_shading.setChecked(bool(cfg.get("shading", True)))
         self.chk_stain_shading.setToolTip("Take a brightness gradient across each chip (illumination over the wafer) off\n"
                                           "before the comparison (plane of chip - median chip, fitted robustly)")
-        row("Texture", spin("texture_px", "", 0, 50, 1, 1, "Pad grid pitch (image px): every chip is averaged over a box of it before the\n"
+        row("Texture", spin("texture_px", "", 0, 50, 1, 0, "Pad grid pitch (image px): every chip is averaged over a box of it before the\n"
                                                            "comparison, so the pads do not read as a darker grid (pads every other px: 2; 0 = off)"),
-            self.chk_stain_shading)
+            self.chk_stain_shading,
+            "Bg %", spin("background", "", 0, 100, 1, 0, "Shading: brightness differences (against the median chip) larger than this share of the\n"
+                                                            "chip are taken off (smoothed, stains left out): blotches, vignetting. 0 = a quadratic surface"))
         h4b = QHBoxLayout()
         h4b.addWidget(QLabel("Edges"))
         self._stain_edges = {}
@@ -2525,7 +2527,7 @@ class MainWindow(QMainWindow):
 
     def _edge_stain_params(self):
         out = {k: sb.value() for k, sb in getattr(self, "_stain_inputs", {}).items()}
-        for k in ("depth_frac", "clean_ref"):
+        for k in ("depth_frac", "clean_ref", "background"):
             if k in out:
                 out[k] /= 100.0
         if getattr(self, "cb_stain_compare", None) is not None:

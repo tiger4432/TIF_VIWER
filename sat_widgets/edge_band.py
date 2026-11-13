@@ -63,7 +63,9 @@ DEFAULTS = {
     "link_gap_px": 40,      # Pieces of a dark line this far apart along the edge (image px) are one stain
     "texture_px": 2.0,      # Pad grid pitch (image px, whole): every chip averaged over a box of it at the image
                             # resolution, before the reduction (no beat pattern) (0 / 1 = off). Pads every other px: 2
-    "shading": True,        # Brightness gradient across each chip (plane of chip - median chip) taken off
+    "shading": True,
+    "background": 0.0,      # Shading: brightness differences larger than this share of the chip (smoothed, stains left
+                            # out) are taken off every chip against the reference (blotches, vignetting); 0 = a quadratic        # Brightness gradient across each chip (plane of chip - median chip) taken off
     "align": "image",       # Chip positions: "image" (aligned on the image, whole px) or "bbox" (the bboxes as they are:
                             # after Edge BBOX, when the image alignment is off)
     "edge_tol_px": 1.0,     # Next to the chip edge a chip may sit this far (image px) across the edge off the
@@ -705,9 +707,21 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
         fx = (np.arange(W)[None, :] - W / 2) / W
         fy = (np.arange(H)[:, None] - H / 2) / H
 
+        bg_sig = p["background"] * max(H, W) # Working px
+
         def deshade(a, golden):
-            """The chip with its brightness gradient against this reference taken off: a quadratic surface of
-            (chip - reference) fitted robustly (stains trimmed: beyond 2.5 x the residual spread)."""
+            """The chip with its brightness differences against this reference that are large (background) taken off:
+            background > 0: (chip - reference) smoothed over background x the chip size, stains left out (robust:
+            normalised smoothing without the pixels beyond 2.5 x the residual spread); else a quadratic surface."""
+            if bg_sig > 0:
+                d = a - golden
+                w = np.ones_like(d)
+                for _ in range(2):
+                    bg = _gauss(d * w, bg_sig) / np.maximum(_gauss(w, bg_sig), 1e-3)
+                    res = d - bg
+                    mad = float(np.median(np.abs(res[w > 0]))) * 1.4826 + 1e-6
+                    w = (np.abs(res) <= 2.5 * mad).astype(np.float32)
+                return a - bg
             d = (a - golden)[::q_st, ::q_st].ravel()
             keep = np.ones(d.size, bool)
             for _ in range(3):
