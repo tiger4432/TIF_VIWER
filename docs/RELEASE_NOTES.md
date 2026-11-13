@@ -5,6 +5,13 @@
 - **git checkout(git bundle로 업데이트):** `defaults\` 폴더는 없습니다. `plugins\results_api.py`도 업데이트(merge)로 새 버전이 되고, 현장에서 고친 내용은 `--autostash`가 그 위에 다시 얹습니다(같은 줄을 고쳤으면 git이 충돌로 알림). 아래 노트의 "`defaults\`에서 옮겨 붙이세요"는 zip 설치에만 해당합니다.
 - **zip 설치:** 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다(새 기본값은 zip 안의 `defaults\`).
 
+## 1.1.68
+
+- **Edge Stains 학습 필터(Train / Learned / Reset, Edge Stains 그룹 맨 아래):**
+  - 학습: Detect Edge Stains → 리뷰(A = 오염 맞음, 지우기 = 오염 아님, **Paint line으로 칠한 곳 = 오염**) → **Train**. 후보마다 특징(띠 길이·깊이·종횡비, 띠 점 밀도, 띠·영역이 얼마나 어두운지/밝은지, SSIM 변화, 칩 노이즈, 코너·변·변 위 위치)을 뽑아 학습 데이터에 쌓고(파일당 한 묶음, 다시 Train하면 그 파일만 교체) 전체로 다시 학습합니다. 리뷰 안 한 점선 검출은 빼고, 칠한 곳은 후보로 안 잡혔어도 오염 표본으로 들어갑니다. 제품별 모델(TIF_Viewer_train/products/<제품>/edge_classifier.json).
+  - 사용: **Learned** 체크(학습되면 자동으로 켜짐). 후보를 더 넉넉히 뽑고(Dark·Length × 0.8, config `learn_relax`) 필터가 오염만 남깁니다. 상태바에 필터가 버린 수.
+  - 오염 50~100개, 아닌 것도 비슷하게 쌓이면 의미가 생깁니다. Reset = 이 제품 필터 초기화(*.bak으로 보관).
+
 ## 1.1.67
 
 - **칩마다 다른 얼룩 빼기 기본 켬(Bg % 8):** 계측값 자체에 칩마다 다른 레이아웃 얼룩이 있어 기준 칩으로 상쇄되지 않던 것. 칩 − 기준 칩의 차이 중 칩 크기의 8%보다 큰 것을 오염은 빼고 추정해 뺍니다(가는 검은 띠는 남음). 합성(칩마다 ±10 밝기 얼룩): dark+SSIM 과검 9 → 5, dark만 54 → 74% 찾음. 기존 합성 세트 그대로 100%, 과검 0. 끄려면 Bg % 0(= 2차 곡면만).

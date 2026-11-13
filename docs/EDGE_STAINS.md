@@ -59,6 +59,15 @@
 
   (그 밖에 `register_frac` 0.6: 미세 위치 맞춤에 쓰는 칩 가운데 비율, `bright_min` 0: 영역이 기준보다 이만큼 밝아야 인정(0 = 보지 않음), `work_size` 384: 작업 해상도(칩 긴 변).)
 
+## 학습 필터 (Train / Learned / Reset)
+
+1. Detect Edge Stains를 돌립니다(학습 필터가 있으면 Learned를 꺼서 후보를 다 보거나, 켜고 그대로).
+2. 리뷰: 맞으면 **A**(칩 일괄) 또는 고쳐서 확정, 틀리면 **지우기**, 놓친 것은 **Paint line**으로 칠하기.
+3. **Train**: 이 파일의 후보를 리뷰 결과로 라벨링해 학습 데이터에 넣고 다시 학습합니다. 점선(리뷰 안 함)은 빠집니다.
+4. 다음 파일부터 **Learned**가 켜진 채로 검출: 후보를 넉넉히(Dark·Length × 0.8) 뽑고 필터가 거릅니다.
+
+모델은 제품별(TIF_Viewer_train/products/<제품>/edge_classifier.json). 교차검증 결과(재현율·정밀도)와 많이 쓰인 특징이 Train 후 창에 나옵니다.
+
 ## Debug chip 이미지 읽는 법
 
 버튼 = 화면 가운데 칩, 영상 위 **Ctrl+Shift+D** = 마우스 아래 칩. **Detect Edge Stains를 한 번 돌린 뒤에는 모든 칩의 결과가 저장되어 바로 열립니다**(돌리기 전이면 그 칩만 계산, 마킹은 하지 않음). 위쪽 글: 축소 배율, 기준 칩을 몇 개로 만들었는지(이 칩이 기준에 들어갔는지), 버려진 띠와 이유(short = Length ≥ / Link gap, thin = Min depth, not elongated = Aspect).

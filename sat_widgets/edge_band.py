@@ -92,6 +92,7 @@ DEFAULTS = {
                             # texture changed: pads covered or smeared, the mean brightness hardly), "both"
     "ssim_sigma_px": 3.0,   # SSIM window (Gaussian sigma, image px)
     "ssim_threshold": 8.0,   # SSIM: a speck where the structure differs by this many chip-to-chip spreads
+    "learn_relax": 0.8,     # Learned filter on / training: Dark and Length x this (more candidates, the filter decides)
     "work_size": 384,       # Longest side of the working chip image
     "type": None,           # Void type of the marks (None: the selected type)
 }
@@ -120,6 +121,43 @@ def _gauss(a, sigma):
     for _ in range(3):
         out = _box(out, w, w)
     return out
+
+
+ES_FEATURES = ["log_length", "log_depth", "aspect", "line_density", "dark_line", "dark_area", "dark_p90",
+               "dark_frac", "bright_area", "ssim_line", "ssim_area", "noise", "corner", "top_bottom", "off_centre"]
+
+
+def stain_features(area, line, dev, sdev, edges, dark_thr, s_px, skip):
+    """Features of a stain candidate (area: its mask, line: the joined line pixels, working px) for the learned
+    filter: size and shape, how dark the line / the area, how much brighter, the SSIM change, the chip's noise,
+    corner, edge, place along the edge."""
+    H, W = area.shape
+    rows, cols = np.nonzero(area)
+    if len(rows) == 0:
+        return None
+    t = skip + 2
+    touch = {"top": area[:t].any(), "bottom": area[H - t:].any(), "left": area[:, :t].any(), "right": area[:, W - t:].any()}
+    n_tb = int(touch["top"]) + int(touch["bottom"])
+    n_lr = int(touch["left"]) + int(touch["right"])
+    tb = n_tb >= n_lr
+    ext_c, ext_r = cols.max() + 1 - cols.min(), rows.max() + 1 - rows.min()
+    length, depth = (ext_c, ext_r) if tb else (ext_r, ext_c)
+    if tb:
+        depth = (rows.max() + 1) if touch["top"] and not touch["bottom"] else (H - rows.min()) if touch["bottom"] and not touch["top"] else ext_r
+    else:
+        depth = (cols.max() + 1) if touch["left"] and not touch["right"] else (W - cols.min()) if touch["right"] and not touch["left"] else ext_c
+    grown = _box(area.astype(np.float32), 5, 5) > 0
+    ln = line & grown
+    d_a = -dev[area]
+    d_l = -dev[ln] if ln.any() else np.zeros(1, np.float32)
+    mid = ((cols.min() + cols.max()) / 2.0 / W) if tb else ((rows.min() + rows.max()) / 2.0 / H)
+    noise = float(np.median(np.abs(dev[edges]))) if edges.any() else 0.0
+    return [math.log1p(length * s_px), math.log1p(depth * s_px), length / max(depth, 1.0),
+            float(ln.sum()) / max(length, 1.0), float(d_l.mean()), float(d_a.mean()), float(np.percentile(d_a, 90)),
+            float((d_a >= dark_thr).mean()), float(np.clip(dev[area], 0, None).mean()),
+            float(sdev[ln].mean()) if (sdev is not None and ln.any()) else 0.0,
+            float(sdev[area].mean()) if sdev is not None else 0.0,
+            noise, float(n_tb >= 1 and n_lr >= 1), float(tb), abs(mid - 0.5) * 2.0]
 
 
 def _match_centre(a, golden, centre, n=24):
@@ -581,6 +619,12 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
     from .void_layer_change import _contour
     p = dict(DEFAULTS)
     p.update(params or {})
+    learned = p.get("learned_model")
+    learn = p.get("learn") # Training: a list collecting (cell, features, label) rows
+    if learned is not None or learn is not None:
+        # With the learned filter more candidates are let through (it decides): lower Dark and Length
+        p["dark_threshold"] = p["dark_threshold"] * p["learn_relax"]
+        p["min_length_px"] = p["min_length_px"] * p["learn_relax"]
     to_raw = coord_transform.deskew_to_raw if coord_transform else (lambda x, y: (x, y))
     to_deskew = coord_transform.raw_to_deskew if coord_transform else (lambda x, y: (x, y))
     rects = chip_rects(grid_cfg, refs, cells)
@@ -697,6 +741,38 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
         else: # As they lie: raw pixels
             dk_of = lambda k: at[k]
             to_d = to_deskew
+
+        def to_work(k, gx, gy):
+            """Deskewed point -> working px of chip k."""
+            if rot is not None:
+                ox_, oy_ = dk_of(k)
+                return (gx - ox_) / sx, (gy - oy_) / sy
+            rx_, ry_ = to_raw(gx, gy)
+            return (rx_ - at[k][0]) / sx, (ry_ - at[k][1]) / sy
+
+        def polys_masks(k, key):
+            from PIL import Image as _I, ImageDraw as _D
+            out_ = []
+            for poly in (p.get(key) or {}).get(k, ()):
+                im_ = _I.new("1", (W, H), 0)
+                pts_ = [to_work(k, gx, gy) for gx, gy in poly]
+                if len(pts_) >= 3:
+                    _D.Draw(im_).polygon(pts_, fill=1)
+                    m_ = np.asarray(im_, bool)
+                    if m_.any():
+                        out_.append(m_)
+            return out_
+        truth_masks = lambda k: polys_masks(k, "truth_areas")
+
+        def label_of(k, full):
+            """1: overlaps a painted / reviewed stain; None: overlaps a detection not reviewed yet; else 0."""
+            for tm in truth_masks(k):
+                if (tm & full).sum() >= 0.2 * min(tm.sum(), full.sum()):
+                    return 1
+            for um in polys_masks(k, "unknown_areas"):
+                if (um & full).any():
+                    return None
+            return 0
         chips = {k: _normalize(cut[k][0]) for k in keys}
         cut_plain = {k: cut[k][2] for k in keys} if plain else None
         if tk in cut and "window" in trace:
@@ -1095,6 +1171,31 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                     full |= g[0]
                     best = max(best, g[1])
                 groups.append((full, best))
+            if learned is not None or learn is not None:
+                sd_ = sdev if use_ssim else None
+                kept = []
+                for full, sc in groups:
+                    fv = stain_features(full, lines, dev, sd_, edges, p["dark_threshold"], sx, min(skip_x, skip_y))
+                    if fv is None:
+                        continue
+                    if learn is not None:
+                        lab = label_of(k, full)
+                        if lab is not None:
+                            learn.append((k, fv, lab))
+                    if learned is not None:
+                        sc_ = float(learned.scores(np.asarray([fv]))[0])
+                        if sc_ < learned.cut:
+                            if dbg is not None:
+                                dbg.append((k, "learned filter", round(float(full.any(axis=0).sum() * sx)), round(sc_, 2)))
+                            continue
+                        sc = sc_
+                    kept.append((full, sc))
+                groups = kept
+                if learn is not None: # The painted / reviewed stains of this chip are stains, whether found or not
+                    for tm in truth_masks(k):
+                        fv = stain_features(tm, lines, dev, sd_, edges, p["dark_threshold"], sx, min(skip_x, skip_y))
+                        if fv is not None:
+                            learn.append((k, fv, 1))
             if shown or k == tk or store is not None:
                 area_all = np.zeros((H, W), bool)
                 for full, _ in groups:

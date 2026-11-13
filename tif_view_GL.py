@@ -949,6 +949,7 @@ class MainWindow(QMainWindow):
             self._select_detect_method(prod["detect_method"])
         if hasattr(self, "chk_learned"):
             self._update_learned_state() # Layer change: one learned model per product
+        self._update_stain_learned() # Edge Stains: one learned filter per product
         
         if "um_per_px" in prod:
             self.sb_um_per_px.blockSignals(True)
@@ -2528,6 +2529,25 @@ class MainWindow(QMainWindow):
         btn_dbg.clicked.connect(lambda: self.debug_stain_chip(at_centre=True))
         h6.addWidget(btn_dbg)
         form.addRow(h6)
+        h7 = QHBoxLayout()
+        btn_train = QPushButton("Train")
+        btn_train.setToolTip("Learned filter for Edge Stains: the candidates of this file are labelled - painted (Paint line)\n"
+                             "and reviewed stain marks are stains, deleted detections are not (detections not reviewed yet\n"
+                             "are left out) - added to the training set (one entry per file) and the filter trained on all.\n"
+                             "Run Detect Edge Stains, review (A / delete / Paint line), then Train. Per product.")
+        btn_train.clicked.connect(self.train_edge_stains)
+        h7.addWidget(btn_train)
+        self.chk_stain_learned = QCheckBox("Learned")
+        self.chk_stain_learned.setToolTip("Use the learned filter: more candidates are let through (Dark and Length x learn_relax)\n"
+                                          "and the filter keeps the stains. Enabled once trained")
+        h7.addWidget(self.chk_stain_learned)
+        btn_reset = QPushButton("Reset")
+        btn_reset.setToolTip("Learned filter of this product back to none (model and training set renamed to *.bak)")
+        btn_reset.clicked.connect(self.reset_edge_learned)
+        h7.addWidget(btn_reset)
+        h7.addStretch(1)
+        form.addRow(h7)
+        self._update_stain_learned()
         self.glw.golden_cells = set()
         self.glw.paint_done.connect(self.on_paint_stroke)
         for key, slot in ((QKeySequence("Ctrl+G"), self.toggle_golden_chip), (QKeySequence("Ctrl+Shift+D"), self.debug_stain_chip)):
@@ -2588,6 +2608,140 @@ class MainWindow(QMainWindow):
         glw.update()
         self.update_void_ui()
         self.statusBar().showMessage(f"A: {len(todo)} detected marking(s) of chip X{cell[1]:02d}_Y{cell[0]:02d} reviewed (Ctrl+Z undoes)")
+
+    def _stain_model_paths(self):
+        """(model, training set) of the Edge Stains learned filter: per product under the training folder."""
+        product = self._product_key()
+        base = void_learn._product_dir(product[0]) if product else void_learn.TRAIN_DIR
+        return os.path.join(base, "edge_classifier.json"), os.path.join(base, "edge_dataset.jsonl")
+
+    def _update_stain_learned(self):
+        if getattr(self, "chk_stain_learned", None) is None:
+            return
+        ok = os.path.exists(self._stain_model_paths()[0])
+        self.chk_stain_learned.setEnabled(ok)
+        self.chk_stain_learned.setChecked(ok)
+
+    def _stain_learned_params(self, ep):
+        """Puts the learned model into ep when "Learned" is on. False when it cannot be loaded."""
+        from sat_widgets import edge_band
+        ep.pop("learned_model", None)
+        if getattr(self, "chk_stain_learned", None) is not None and self.chk_stain_learned.isChecked():
+            path = self._stain_model_paths()[0]
+            try:
+                ep["learned_model"] = void_learn.Model.load(path, edge_band.ES_FEATURES)
+            except Exception as e:
+                QMessageBox.warning(self, "Edge Stains", f"Learned filter not usable ({path}): {e}")
+                return False
+        return True
+
+    def _stain_polygons(self, type_name, reviewed):
+        """{cell: [Deskewed polygon]} of the stain marks of type_name: reviewed (painted / reviewed / drawn by hand)
+        or, reviewed False, the detections not reviewed yet (dashed)."""
+        vm, glw = self.void_manager, self.glw
+        to_deskew = glw.raw_to_deskew
+        out = {}
+        for vs in vm.voids.values():
+            for v in vs:
+                if v.get("type") != type_name or vm.is_bbox(v):
+                    continue
+                if (v.get("auto") == "detected") == reviewed:
+                    continue
+                cx, cy = v["globalCX"], v["globalCY"]
+                if v.get("outline") and v.get("outline_r"):
+                    kx = v["radiusX"] / max(v["outline_r"][0], 1e-6)
+                    ky = v["radiusY"] / max(v["outline_r"][1], 1e-6)
+                    poly = [to_deskew(cx + dx * kx, cy + dy * ky) for dx, dy in v["outline"]]
+                else: # A box drawn by hand
+                    rx, ry = v["radiusX"], v["radiusY"]
+                    poly = [to_deskew(cx + a * rx, cy + b * ry) for a, b in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+                cell = glw.grid_cfg.cell_at(*to_deskew(cx, cy))
+                out.setdefault(cell, []).append(poly)
+        return out
+
+    def train_edge_stains(self):
+        """Edge Stains learned filter: candidates of this file labelled by the stain marks, added to the training set,
+        the filter trained on all (sat_widgets/void_learn.py, features edge_band.ES_FEATURES)."""
+        from sat_widgets import edge_band
+        if self._detect_busy():
+            return
+        setup = self._detect_setup("Train (Edge Stains)")
+        if setup is None:
+            return
+        type_name, cells, refs, params, layers = setup
+        ep = dict(params.get("edge_band") or {})
+        ep.update(self._edge_stain_params())
+        type_name = ep.get("type") or type_name
+        truths = self._stain_polygons(type_name, True)
+        pending = self._stain_polygons(type_name, False)
+        n_truth = sum(len(v) for v in truths.values())
+        if not n_truth and QMessageBox.question(
+                self, "Train", f"No painted / reviewed {type_name} marks: this file adds only non-stains. Continue?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        n_pend = sum(len(v) for v in pending.values())
+        if n_pend and QMessageBox.question(
+                self, "Train", f"{n_pend} detected stains are not reviewed yet (dashed): left out of the training.\n"
+                "Review them first (A: stain, Delete: not a stain) to use them. Continue?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+            return
+        ep.pop("learned_model", None)
+        rows = []
+        ep.update(learn=rows, truth_areas=truths, unknown_areas=pending, debug=[])
+        skip = set(params.get("skip_layers") or []) if len(layers) > 1 else set()
+        zs = [z for z, l in enumerate(layers) if l not in skip]
+        pd = QProgressDialog("Edge stains: collecting training candidates...", "Cancel", 0, max(1, 2 * len(zs)), self)
+        pd.setWindowModality(Qt.WindowModal)
+        pd.show()
+
+        def progress(i, n, text):
+            pd.setMaximum(n); pd.setValue(i); pd.setLabelText(text)
+            QApplication.processEvents()
+            return not pd.wasCanceled()
+        try:
+            found = edge_band.detect(self.full_data, zs, [layers[z] for z in zs], self.glw.grid_cfg,
+                                     self.glw.coord_transform, refs, cells, ep, progress)
+        finally:
+            pd.close()
+        if found is None:
+            return
+        key = self.lbl_source.toolTip() or self.le_wafer_id.text() or "unnamed"
+        model, dataset = self._stain_model_paths()
+        data_rows = [{"x": fv, "y": int(lab), "g": f"{c[0]},{c[1]}"} for c, fv, lab in rows]
+        void_learn.add_to_dataset(key, data_rows, dataset)
+        pos = sum(1 for r in data_rows if r["y"])
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            data = void_learn.train_model(0.0, model, rounds=200, dataset=dataset, features=edge_band.ES_FEATURES)
+        except ValueError as e:
+            QMessageBox.warning(self, "Train", f"Added {len(data_rows)} rows of this file ({pos} stains). Not trained yet: {e}.")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._update_stain_learned()
+        pct = lambda v: int(round(100 * v))
+        msg = (f"This file: {n_truth} painted / reviewed stains, {len(data_rows)} rows ({pos} stains)\n"
+               f"Training set: {data['files']} files, {data['voids']} stains, {data['others']} other candidates\n"
+               f"Cross-validated by chip: recall {pct(data['cv_recall'])} %, precision {pct(data['cv_precision'])} %\n"
+               f"Most used features: {', '.join(data['top_features'])}\nModel: {model}")
+        print("Train (Edge Stains):\n" + msg)
+        QMessageBox.information(self, "Train (Edge Stains)", msg)
+
+    def reset_edge_learned(self):
+        model, dataset = self._stain_model_paths()
+        files = [f for f in (model, dataset) if os.path.exists(f)]
+        if not files:
+            QMessageBox.information(self, "Reset", "No Edge Stains learned filter for this product.")
+            return
+        if QMessageBox.question(self, "Reset", "Reset the Edge Stains learned filter?\n\n" + "\n".join(files) +
+                                "\n\nThe files are renamed to *.bak (kept).", QMessageBox.Yes | QMessageBox.No,
+                                QMessageBox.No) != QMessageBox.Yes:
+            return
+        stamp = time.strftime("%Y%m%d_%H%M%S")
+        for f in files:
+            os.replace(f, f"{f}.{stamp}.bak")
+        self._update_stain_learned()
+        self.statusBar().showMessage("Edge Stains learned filter reset")
 
     def _cell_under_mouse(self):
         """Grid cell under the mouse on the image (else at the view centre)."""
@@ -2728,6 +2882,8 @@ class MainWindow(QMainWindow):
         skip = set(params.get("skip_layers") or []) if len(layers) > 1 else set()
         zs = [z for z, l in enumerate(layers) if l not in skip]
         z = glw.current_layer if glw.current_layer in zs else zs[0]
+        if not self._stain_learned_params(ep):
+            return
         trace = ep["trace"] = {"cell": cell}
         ep["debug"] = []
         pd = QProgressDialog("Edge stains debug...", "Cancel", 0, 2, self)
@@ -2904,6 +3060,8 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
             return not pd.wasCanceled()
 
+        if not self._stain_learned_params(ep):
+            return
         masks = {}
         why = ep["debug"] = [] # Why found places were not kept (summary below)
         store = ep["store"] = {} # Debug of every chip (Debug chip shows it without running again)
@@ -2950,6 +3108,9 @@ class MainWindow(QMainWindow):
         parts = []
         for k, ws in drops.items():
             big = max(ws, key=lambda w: w[2])
+            if k == "learned filter": # (cell, reason, length, score)
+                parts.append(f"{len(ws)} candidates dropped by the learned filter (best score {max(w[3] for w in ws):.2f}; uncheck Learned to compare)")
+                continue
             parts.append(f"{len(ws)} lines dropped as {k} (longest {big[2]} px long, {big[3]} px deep: {hints.get(k, k)})")
         parts = parts or ["no other dark lines"]
         msg += " | " + "; ".join(parts)
