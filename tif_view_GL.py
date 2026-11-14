@@ -2743,6 +2743,16 @@ class MainWindow(QMainWindow):
         key = self.lbl_source.toolTip() or self.le_wafer_id.text() or "unnamed"
         model, dataset = self._stain_model_paths()
         data_rows = [{"x": fv, "y": int(lab), "g": f"{c[0]},{c[1]}"} for c, fv, lab in rows]
+        if ep.get("train_cells"):
+            # Only some chips learned this time: the rows this file gave before for its other chips stay (samples
+            # grow as more chips are reviewed, in this session or after the file is opened again)
+            mine = {f"{c[0]},{c[1]}" for c in ep["train_cells"]}
+            if os.path.exists(dataset):
+                with open(dataset, "r", encoding="utf-8") as f_:
+                    for line in f_:
+                        r_ = json.loads(line)
+                        if r_.get("src") == key and r_.get("g") not in mine:
+                            data_rows.append({"x": r_["x"], "y": r_["y"], "g": r_["g"]})
         void_learn.add_to_dataset(key, data_rows, dataset)
         pos = sum(1 for r in data_rows if r["y"])
         QApplication.setOverrideCursor(Qt.WaitCursor)
