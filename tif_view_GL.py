@@ -1567,6 +1567,20 @@ class MainWindow(QMainWindow):
                 if not ev.isAutoRepeat():
                     self.glw.type_number_key(key - Qt.Key_0)
                 return True
+            if key == Qt.Key_T and plain and not self._typing(obj):
+                # T held: Paint line (Edge Stains) like the marking keys - drag over a dark line while T is down
+                if not ev.isAutoRepeat() and getattr(self, "btn_stain_paint", None) is not None and self.full_data is not None:
+                    if et == QEvent.KeyPress:
+                        self._paint_by_key = True
+                        self.btn_stain_paint.setChecked(True)
+                    elif getattr(self, "_paint_by_key", False):
+                        self._paint_by_key = False
+                        stroke = getattr(self.glw, "_stroke", None)
+                        if stroke: # A stroke still being drawn: finished first
+                            self.glw._stroke = None
+                            self.on_paint_stroke(stroke)
+                        self.btn_stain_paint.setChecked(False)
+                return True
             if et == QEvent.KeyPress and key == Qt.Key_Q and plain and not self._typing(obj):
                 if not ev.isAutoRepeat():
                     self.action_void_to_layer.trigger()
@@ -1582,6 +1596,9 @@ class MainWindow(QMainWindow):
         if state != Qt.ApplicationActive and self._held_modes:
             self._held_modes.clear()
             self._apply_held_mode()
+        if state != Qt.ApplicationActive and getattr(self, "_paint_by_key", False):
+            self._paint_by_key = False
+            self.btn_stain_paint.setChecked(False)
 
     def _apply_held_mode(self):
         tool = self._held_modes[-1] if self._held_modes and not self.glw.edit_locked else None
@@ -2514,7 +2531,8 @@ class MainWindow(QMainWindow):
         h6.addWidget(self.btn_stain_golden)
         self.btn_stain_paint = QPushButton("Paint line")
         self.btn_stain_paint.setCheckable(True)
-        self.btn_stain_paint.setToolTip("Mark a stain by hand: paint over its dark line on the image (left drag). The stain is the\n"
+        self.btn_stain_paint.setToolTip("Mark a stain by hand (or hold T on the image, like W / E / R): paint over its dark line\n"
+                                        "(left drag). The stain is the\n"
                                         "nearest chip edge up to the painted line; strokes on the same edge within Merge r are\n"
                                         "joined into one stain (the gap filled). Esc or this button ends painting. Ctrl+Z undoes")
         self.btn_stain_paint.toggled.connect(self.toggle_paint_line)
