@@ -13,7 +13,7 @@ from PySide6.QtCore import Qt, Signal, QRectF, QPointF
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 
 from . import output_columns
-from .products import layout_boxes
+from .products import layout_boxes, layout_shapes
 
 # ==================================================================================
 # Void Data Manager
@@ -229,7 +229,7 @@ class VoidManager:
         layout = self.layout
         if not layout:
             return
-        boxes = layout_boxes(layout)
+        boxes = layout_shapes(layout)
         if not boxes:
             return
         style = layout.get("style", {})
@@ -244,10 +244,13 @@ class VoidManager:
         x0, y0, w, h = bbox
         dw, dh = layout.get("design_size", (w, h))
         sx, sy = w / dw, h / dh
-        for (bx, by, bw, bh) in boxes:
+        for (_n, bx, by, bw, bh, shape) in boxes:
             p0 = to_paint(x0 + bx * sx, y0 + by * sy)
             p1 = to_paint(x0 + (bx + bw) * sx, y0 + (by + bh) * sy)
-            painter.drawRect(QRectF(QPointF(*p0), QPointF(*p1)))
+            if shape == "circle":
+                painter.drawEllipse(QRectF(QPointF(*p0), QPointF(*p1)))
+            else:
+                painter.drawRect(QRectF(QPointF(*p0), QPointF(*p1)))
 
     MANUAL_SNR = 100.0 # SNR of hand markings (detections carry their measured one)
     LAYER0_COLOR = (255, 0, 255) # Badge of voids already visible on layer 0 (see paint_layer0_badge)

@@ -26,6 +26,8 @@ Nothing about a product is defined in code: only the keys present in the file ar
            "repeat": {"cols": 4, "rows": 3, "dx": 60, "dy": 60}},    # array of rects
           {"name": "core", "size": [600, 400]},                      # w, h only: centred on the chip
           {"name": "mark", "size": [50, 50], "center": [0, -300]},   # centred, moved from the chip centre
+          {"name": "dot", "circle": [25, 25, 8], "mirror": "corners"},  # circle: centre x, y from the top-left
+                                             # corner, radius; here at all four corners
           {"name": "fiducial", "rect": [10, 10, 30, 30], "mirror": "corners"}  # the same at all four corners
                                              # (mirrored; "x": left / right only, "y": top / bottom only)
         ]
@@ -88,7 +90,14 @@ def load_products(path):
 
 
 def layout_named_boxes(layout):
-    """Expands layout['boxes'] to [(name, x, y, w, h)] in layout design units (repeats share the name)."""
+    """Expands layout['boxes'] to [(name, x, y, w, h)] in layout design units (repeats share the name; a circle
+    as its bounding box)."""
+    return [b[:5] for b in layout_shapes(layout)]
+
+
+def layout_shapes(layout):
+    """Expands layout['boxes'] to [(name, x, y, w, h, shape)] in layout design units, shape "rect" or "circle"
+    (drawn as the ellipse in the box)."""
     if not layout:
         return []
     design_w, design_h = layout.get("design_size", (0, 0))
@@ -98,14 +107,21 @@ def layout_named_boxes(layout):
         if "inset" in box:
             inset = box["inset"]
             ix, iy = layout[inset] if isinstance(inset, str) else inset
-            out.append((name, ix, iy, design_w - 2 * ix, design_h - 2 * iy))
+            out.append((name, ix, iy, design_w - 2 * ix, design_h - 2 * iy, "rect"))
             continue
-        if "rect" in box:
+        shape = "rect"
+        if "circle" in box: # [x, y, r]: centre x, y from the chip's top-left corner, radius r
+            cx_, cy_, r_ = box["circle"]
+            x, y, w, h = cx_ - r_, cy_ - r_, 2 * r_, 2 * r_
+            shape = "circle"
+        elif "rect" in box:
             x, y, w, h = box["rect"]
         else: # "size": [w, h] centred on the chip ("center": [dx, dy] from the chip centre, default 0, 0)
             w, h = box["size"] if isinstance(box["size"], (list, tuple)) else (box["size"], box["size"])
             dx, dy = box.get("center") or (0, 0)
             x, y = (design_w - w) / 2.0 + dx, (design_h - h) / 2.0 + dy
+        if box.get("shape") in ("circle", "ellipse"):
+            shape = "circle"
         rep = box.get("repeat") or {}
         # "mirror": "corners" / "xy" (the four corners), "x" (left <-> right), "y" (top <-> bottom): copies mirrored
         # about the chip's centre lines, so one corner's boxes are declared once
@@ -124,7 +140,7 @@ def layout_named_boxes(layout):
                         if k in seen: # A box on the centre line mirrors onto itself
                             continue
                         seen.add(k)
-                        out.append((name, ox, oy, w, h))
+                        out.append((name, ox, oy, w, h, shape))
     return out
 
 

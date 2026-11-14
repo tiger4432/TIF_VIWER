@@ -291,6 +291,7 @@ Extraction 아래 **Auto Run** 묶음에 측정 파일 경로(glob, 예: `D:/SAT
   - `SL`은 스크라이브 라인 폭(x, y, um)입니다. `snap_offset: "SL"`인 타입은 bbox 코너에서 이만큼 안쪽 지점을 기준으로 그립니다.
   - 박스는 `"inset": "SL"`(bbox를 SL만큼 안쪽으로 줄인 영역), `"rect": [x, y, w, h]`, `"repeat"`(배열 반복)로 정의합니다.
   - **가운데 기준:** `"size": [w, h]`만 쓰면 칩 가운데에 그 크기의 박스(`"center": [dx, dy]`로 가운데에서 옮김, 한 숫자면 정사각형). 예: `{"name": "core", "size": [600, 400]}`.
+  - **원:** `"circle": [x, y, r]` = 칩 왼쪽 위 코너에서 x, y 떨어진 곳이 중심, 반지름 r. `"mirror": "corners"`와 같이 쓰면 네 코너에 대칭으로. 예: `{"name": "dot", "circle": [40, 40, 15], "mirror": "corners"}`. `"size"` 박스에 `"shape": "circle"`이면 가운데 기준 원.
   - **네 코너 대칭:** `"mirror": "corners"`(또는 `"xy"`)를 붙이면 한 코너에 적은 박스(`rect`·`repeat` 포함)가 칩 가운데 선을 기준으로 뒤집혀 네 코너에 다 그려집니다. `"x"` = 좌우만, `"y"` = 위아래만. 예: `{"name": "fid", "rect": [10, 10, 30, 30], "mirror": "corners"}`. 자동 마킹 타입 규칙(`type_rules`의 `"in": "fid"`)도 네 개 모두에 적용됩니다.
 - 이전 형식(`"bbox": {"w", "h"}` 픽셀 + `layout.design_size`)도 그대로 읽습니다.
 - bbox 크기는 **제품마다** 다르게 적습니다(`chip_size_um` 또는 `bbox`). 제품을 바꾸면 bbox 타입의 기본 크기(그리기, Detect BBOX)가 그 제품 값으로 바뀌고, 둘 다 없는 제품은 `config.json`의 bbox 타입 크기로 돌아갑니다.

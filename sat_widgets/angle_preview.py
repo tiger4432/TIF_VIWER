@@ -28,7 +28,7 @@ from PySide6.QtGui import QImage, QPixmap, QPainter, QPen, QColor
 from PySide6.QtWidgets import QGridLayout, QLabel, QVBoxLayout, QWidget, QSizePolicy
 
 from .core_data import ImageNormalizer, to_uint16
-from .products import layout_boxes
+from .products import layout_shapes
 
 # The four quadrants of the wafer (tiles in this order: top-left, top-right, bottom-left, bottom-right)
 DEFAULT_POINTS = [
@@ -368,9 +368,9 @@ class AnglePreview(QWidget):
                 pen = QPen(QColor(0, 200, 255, 200))
                 pen.setDashPattern([4, 4])
                 p.setPen(pen)
-                for (lx, ly, lw, lh) in layout_boxes(layout):
-                    p.drawRect(QRectF((bx + lx * bw / dw - x0) * sx, (by + ly * bh / dh - y0) * sy,
-                                      lw * bw / dw * sx, lh * bh / dh * sy))
+                for (_n, lx, ly, lw, lh, shape) in layout_shapes(layout):
+                    r_ = QRectF((bx + lx * bw / dw - x0) * sx, (by + ly * bh / dh - y0) * sy, lw * bw / dw * sx, lh * bh / dh * sy)
+                    p.drawEllipse(r_) if shape == "circle" else p.drawRect(r_)
 
         # Grid crossing at the patch center
         pen = QPen(QColor(255, 0, 0, 230))
