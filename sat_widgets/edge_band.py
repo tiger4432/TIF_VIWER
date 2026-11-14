@@ -897,11 +897,12 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
         plain = use_ssim and texture_k > 1
         rot = (math.cos(math.radians(ang)), math.sin(math.radians(ang))) if (p["upright"] and texture_k > 1 and abs(ang) > 1e-4) else None
         key = (id(stack), getattr(stack, "path", None), stack.width, stack.height, z,
-               hash(tuple(sorted(origin.items()))), Wr, Hr, f, M, p["register_frac"], texture_k, plain, p["align"],
-               p["subpixel"], rot, p["texture_blur"])
+               Wr, Hr, f, M, p["register_frac"], texture_k, plain, p["align"], p["subpixel"], rot, p["texture_blur"])
         hit = _CUT_CACHE.get(key)
-        if hit is not None:
-            cut = dict(hit)
+        # Reused when the chips asked for were all cut before at the same places (e.g. Train on a few chips after a
+        # Detect on the whole wafer)
+        if hit is not None and all(hit[0].get(c) == o for c, o in origin.items()):
+            cut = {c: hit[1][c] for c in origin if c in hit[1]}
             if trace is not None and tk in cut: # The traced chip's raw window, read again
                 x_, y_ = cut[tk][1]
                 win_ = _read(stack, z, x_ - M, y_ - M, Wr + 2 * M, Hr + 2 * M)
@@ -917,7 +918,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                 return None
             if len(_CUT_CACHE) >= 4: # A few layers at most (memory)
                 _CUT_CACHE.pop(next(iter(_CUT_CACHE)))
-            _CUT_CACHE[key] = dict(cut)
+            _CUT_CACHE[key] = (dict(origin), dict(cut))
         if len(cut) < 4:
             continue
         keys = [k for k in order if k in cut]
@@ -939,7 +940,16 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             rx_, ry_ = to_raw(gx, gy)
             return (rx_ - at[k][0]) / sx, (ry_ - at[k][1]) / sy
 
+        poly_memo = {}
+
         def polys_masks(k, key):
+            """The polygons of chip k as masks (made once per chip: label_of asks for every candidate)."""
+            if (k, key) in poly_memo:
+                return poly_memo[(k, key)]
+            poly_memo[(k, key)] = out_ = polys_masks_(k, key)
+            return out_
+
+        def polys_masks_(k, key):
             from PIL import Image as _I, ImageDraw as _D
             out_ = []
             for poly in (p.get(key) or {}).get(k, ()):
@@ -1267,6 +1277,11 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
 
         dbg = p.get("debug")
         shown = masks is not None and li == 0
+        if train_cells is not None and masks is None and store is None and trace is None:
+            keys_run = [k for k in keys if k in train_cells] # Training on some chips: the others only for the reference
+        else:
+            keys_run = keys
+
         def per_chip(k):
             """Everything of one chip (several chips at a time on the cores: numpy releases the lock)."""
             dev = dev_of(k, ref)
@@ -1451,10 +1466,10 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
 
         import concurrent.futures as _cf
         with _cf.ThreadPoolExecutor(max_workers=max(1, min(8, (os.cpu_count() or 2)))) as pool:
-            futs = [pool.submit(per_chip, k) for k in keys]
+            futs = [pool.submit(per_chip, k) for k in keys_run]
             for ki, fu in enumerate(futs):
                 fu.result()
-                if not tick(li, layer, "detect", ki + 1, len(keys)):
+                if not tick(li, layer, "detect", ki + 1, len(keys_run)):
                     pool.shutdown(cancel_futures=True)
                     return None
     found.sort(key=lambda t: (t[0], t[5], t[1], t[2])) # Same order whatever the threads did

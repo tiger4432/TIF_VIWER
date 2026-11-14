@@ -2684,6 +2684,14 @@ class MainWindow(QMainWindow):
                 out.setdefault(cell, []).append(poly)
         return out
 
+    @staticmethod
+    def _train_subset(cells, reviewed, n_ref=64):
+        """The chips worked on when only the reviewed ones are learned: the reviewed ones and up to n_ref chips spread
+        over the wafer (the reference / median chip is made from them), not the whole wafer."""
+        cells = sorted(cells)
+        idx = np.linspace(0, len(cells) - 1, min(len(cells), n_ref)).astype(int) if cells else []
+        return sorted({cells[i] for i in idx} | {tuple(c) for c in reviewed if tuple(c) in set(cells)})
+
     def train_edge_stains(self):
         """Edge Stains learned filter: candidates of this file labelled by the stain marks, added to the training set,
         the filter trained on all (sat_widgets/void_learn.py, features edge_band.ES_FEATURES)."""
@@ -2723,6 +2731,7 @@ class MainWindow(QMainWindow):
                 return
             if ans == QMessageBox.Yes:
                 ep["train_cells"] = reviewed
+                cells = self._train_subset(cells, reviewed) # Not the whole wafer: reference sample + reviewed chips
         skip = set(params.get("skip_layers") or []) if len(layers) > 1 else set()
         zs = [z for z, l in enumerate(layers) if l not in skip]
         pd = QProgressDialog("Edge stains: collecting training candidates...", "Cancel", 0, max(1, 2 * len(zs)), self)
@@ -3475,6 +3484,8 @@ class MainWindow(QMainWindow):
         collected = []
         params["learn"] = lambda layer, cell, cands: collected.append((layer, cell, cands))
         params["cand_threshold"] = cand_thr
+        if mine is not None: # Not the whole wafer: the reviewed chips and a sample for the reference
+            cells = self._train_subset(cells, [tuple(int(v) for v in g.split(",")) for g in mine])
         progress, step = self._detect_progress("Collecting training candidates...")
         try:
             result = void_detect.detect_voids(self.full_data, cfg, ct, refs, cells, layers, vm, type_name,
