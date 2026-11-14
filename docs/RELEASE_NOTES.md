@@ -5,6 +5,10 @@
 - **git checkout(git bundle로 업데이트):** `defaults\` 폴더는 없습니다. `plugins\results_api.py`도 업데이트(merge)로 새 버전이 되고, 현장에서 고친 내용은 `--autostash`가 그 위에 다시 얹습니다(같은 줄을 고쳤으면 git이 충돌로 알림). 아래 노트의 "`defaults\`에서 옮겨 붙이세요"는 zip 설치에만 해당합니다.
 - **zip 설치:** 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다(새 기본값은 zip 안의 `defaults\`).
 
+## 1.1.85
+
+- **Edge Stains 학습 컨볼루션 필터:** Train이 9×9 커널도 학습(칠한 선 = 오염, 가장자리 나머지 = 배경, Fisher LDA). Learned를 켜면 잔차 맵에 커널을 씌운 점수가 **Conv ≥**(기본 7, 배경 표준편차 단위) 이상인 곳도 점으로 들어감 — Dark로 자르기 전에 약한 신호를 모아 키우고 간섭 무늬·패드 비트 같은 배경 무늬는 누름. 테스트: 분리도 픽셀 하나 2.7 → 커널 7.7, 얇은 오염 9/15 → 13/15. Debug 9c, Reset에 포함. 학습 때와 레퍼런스 설정이 다르면 상태줄에 표시. docs/EDGE_STAINS.md "학습 컨볼루션 필터".
+
 ## 1.1.84
 
 - **Edge Stains 속도 (Bg):** Bg(배경 평활)를 칩 크기의 ~1/3σ로 줄인 격자에서 계산하고 다시 늘림. Bg를 켜도 칩당 40~110 ms → 2~3 ms(Bg 값이 클수록 차이 큼), 검출 결과 같음(테스트 28/30, 오탐 0).

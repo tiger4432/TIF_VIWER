@@ -2563,6 +2563,13 @@ class MainWindow(QMainWindow):
         self.chk_stain_learned.setToolTip("Use the learned filter: more candidates are let through (Dark and Length x learn_relax)\n"
                                           "and the filter keeps the stains. Enabled once trained")
         h7.addWidget(self.chk_stain_learned)
+        h7.addWidget(QLabel("Conv ≥"))
+        h7.addWidget(spin("conv_threshold", "", 1, 100, 0.5, 1,
+                          "Learned conv filter (trained with Train, used with Learned): a 9 x 9 kernel over the residual\n"
+                          "(chip - median chip) / spread learned from the painted lines - weak dark pixels in the painted\n"
+                          "shape add up, the background patterns (fringes, pad beats, scan lines) are suppressed.\n"
+                          "A speck where its score is at least this many background standard deviations\n"
+                          "(lower: fainter stains, more false; Debug: 9c)"))
         btn_reset = QPushButton("Reset")
         btn_reset.setToolTip("Learned filter of this product back to none (model and training set renamed to *.bak)")
         btn_reset.clicked.connect(self.reset_edge_learned)
@@ -2640,21 +2647,43 @@ class MainWindow(QMainWindow):
         base = void_learn._product_dir(product[0]) if product else void_learn.TRAIN_DIR
         return os.path.join(base, "edge_classifier.json"), os.path.join(base, "edge_dataset.jsonl")
 
+    def _stain_conv_paths(self):
+        """(model, statistics) of the learned conv filter of Edge Stains, next to the learned filter."""
+        base = os.path.dirname(self._stain_model_paths()[0])
+        return os.path.join(base, "edge_conv.npz"), os.path.join(base, "edge_conv_stats.npz")
+
+    @staticmethod
+    def _stain_ref_cfg(ep):
+        """The settings the residual depends on (reference): kept with the conv filter, compared when detecting."""
+        keys = ("compare", "texture_px", "texture_blur", "fourier", "background", "shading", "scan_lines", "per_edge",
+                "clean_ref", "blur_px", "edge_tol_px", "work_size")
+        return ", ".join(f"{k}={ep.get(k)}" for k in keys if k in ep)
+
     def _update_stain_learned(self):
         if getattr(self, "chk_stain_learned", None) is None:
             return
-        ok = os.path.exists(self._stain_model_paths()[0])
+        ok = os.path.exists(self._stain_model_paths()[0]) or os.path.exists(self._stain_conv_paths()[0])
         self.chk_stain_learned.setEnabled(ok)
         self.chk_stain_learned.setChecked(ok)
 
     def _stain_learned_params(self, ep):
         """Puts the learned model into ep when "Learned" is on. False when it cannot be loaded."""
         from sat_widgets import edge_band
+        from sat_widgets import stain_conv
         ep.pop("learned_model", None)
+        ep.pop("conv_model", None)
+        self._stain_conv_note = ""
         if getattr(self, "chk_stain_learned", None) is not None and self.chk_stain_learned.isChecked():
             path = self._stain_model_paths()[0]
             try:
-                ep["learned_model"] = void_learn.Model.load(path, edge_band.ES_FEATURES)
+                if os.path.exists(path):
+                    ep["learned_model"] = void_learn.Model.load(path, edge_band.ES_FEATURES)
+                cpath = self._stain_conv_paths()[0]
+                if os.path.exists(cpath):
+                    ep["conv_model"] = cm = stain_conv.load_model(cpath)
+                    full = dict(edge_band.DEFAULTS, **ep)
+                    if cm.get("cfg") and cm["cfg"] != self._stain_ref_cfg(full):
+                        self._stain_conv_note = " (conv filter trained with other reference settings: Train again)"
             except Exception as e:
                 QMessageBox.warning(self, "Edge Stains", f"Learned filter not usable ({path}): {e}")
                 return False
@@ -2730,8 +2759,10 @@ class MainWindow(QMainWindow):
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return
         ep.pop("learned_model", None)
+        ep.pop("conv_model", None)
         rows = []
-        ep.update(learn=rows, truth_areas=truths, unknown_areas=pending, debug=[])
+        conv_rows = {}
+        ep.update(learn=rows, conv_learn=conv_rows, truth_areas=truths, unknown_areas=pending, debug=[])
         reviewed = sorted(self._stain_reviewed)
         if reviewed:
             ans = QMessageBox.question(
@@ -2774,13 +2805,15 @@ class MainWindow(QMainWindow):
                         if r_.get("src") == key and r_.get("g") not in mine:
                             data_rows.append({"x": r_["x"], "y": r_["y"], "g": r_["g"]})
         void_learn.add_to_dataset(key, data_rows, dataset)
+        conv_msg = self._train_stain_conv(key, conv_rows, ep)
         pos = sum(1 for r in data_rows if r["y"])
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             data = void_learn.train_model(0.0, model, rounds=200, dataset=dataset, features=edge_band.ES_FEATURES)
         except ValueError as e:
+            self._update_stain_learned()
             QMessageBox.warning(self, "Train", self._not_enough_msg(dataset, "stains", f"{len(data_rows)} rows of this file ({pos} stains)",
-                                                                edge_band.ES_FEATURES))
+                                                                edge_band.ES_FEATURES) + "\n\n" + conv_msg)
             return
         finally:
             QApplication.restoreOverrideCursor()
@@ -2789,13 +2822,34 @@ class MainWindow(QMainWindow):
         msg = (f"This file: {n_truth} painted / reviewed stains, {len(data_rows)} rows ({pos} stains)\n"
                f"Training set: {data['files']} files, {data['voids']} stains, {data['others']} other candidates\n"
                f"Cross-validated by chip: recall {pct(data['cv_recall'])} %, precision {pct(data['cv_precision'])} %\n"
-               f"Most used features: {', '.join(data['top_features'])}\nModel: {model}")
+               f"Most used features: {', '.join(data['top_features'])}\nModel: {model}\n\n{conv_msg}")
         print("Train (Edge Stains):\n" + msg)
         QMessageBox.information(self, "Train (Edge Stains)", msg)
 
+    def _train_stain_conv(self, key, conv_rows, ep):
+        """Learned conv filter: this file's chip statistics replace the ones it gave before for those chips, the
+        kernel solved from all. Returns a line for the message."""
+        from sat_widgets import edge_band, stain_conv
+        cpath, spath = self._stain_conv_paths()
+        try:
+            stats = stain_conv.load_stats(spath)
+            for c, st in conv_rows.items():
+                stats[f"{key}|{c[0]},{c[1]}"] = st
+            if conv_rows:
+                os.makedirs(os.path.dirname(spath), exist_ok=True)
+                stain_conv.save_stats(spath, stats)
+            m = stain_conv.train(stats)
+        except ValueError as e:
+            return f"Conv filter: not trained yet - {e}"
+        except Exception as e:
+            return f"Conv filter: failed - {e}"
+        stain_conv.save_model(cpath, m, self._stain_ref_cfg(dict(edge_band.DEFAULTS, **ep)))
+        return (f"Conv filter: separation {m['sep']:.1f} background std (one pixel alone: {abs(m['sep_px']):.1f}), "
+                f"{m['n_pos']} line px / {m['n_neg']} background px from {len(stats)} chips\n{cpath}")
+
     def reset_edge_learned(self):
         model, dataset = self._stain_model_paths()
-        files = [f for f in (model, dataset) if os.path.exists(f)]
+        files = [f for f in (model, dataset, *self._stain_conv_paths()) if os.path.exists(f)]
         if not files:
             QMessageBox.information(self, "Reset", "No Edge Stains learned filter for this product.")
             return
@@ -3171,7 +3225,7 @@ class MainWindow(QMainWindow):
             vm.end_change()
         self.glw.update()
         self.update_void_ui()
-        msg = f"Edge stains: {added} marked ({type_name}, dashed: review with Next Detected), {len(found) - added} already marked"
+        msg = f"Edge stains: {added} marked ({type_name}, dashed: review with Next Detected), {len(found) - added} already marked" + getattr(self, "_stain_conv_note", "")
         # Where the others were lost: the lines dropped by a filter (the longest one of each: most likely a stain)
         drops = {}
         for w in why:

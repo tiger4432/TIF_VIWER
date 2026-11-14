@@ -30,8 +30,11 @@ a 1 px pad grid at 0.3 deg: 0 false (101 with the former rotated cut), about 15 
 """
 import math
 import os
+import threading
 
 import numpy as np
+
+from sat_widgets import stain_conv
 
 DEFAULTS = {
     "depth_frac": 0.25,     # Edge zone: this share of the chip size from the edge inward
@@ -97,6 +100,7 @@ DEFAULTS = {
                             # texture changed: pads covered or smeared, the mean brightness hardly), "both"
     "ssim_sigma_px": 3.0,   # SSIM window (Gaussian sigma, image px)
     "ssim_threshold": 8.0,   # SSIM: a speck where the structure differs by this many chip-to-chip spreads
+    "conv_threshold": 7.0,  # Learned conv filter (trained with Train, used with Learned): its score in background std
     "learn_relax": 0.8,     # Learned filter on / training: Dark and Length x this (more candidates, the filter decides)
     "work_size": 384,       # Longest side of the working chip image
     "type": None,           # Void type of the marks (None: the selected type)
@@ -818,6 +822,9 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
     p = dict(DEFAULTS)
     p.update(params or {})
     learned = p.get("learned_model")
+    conv = p.get("conv_model") # Learned conv filter (stain_conv): its score >= conv_threshold is a speck too
+    conv_learn = p.get("conv_learn") # Training: {cell: chip statistics} collected
+    conv_lock = threading.Lock()
     learn = p.get("learn") # Training: a list collecting (cell, features, label) rows
     train_cells = set(tuple(c) for c in p["train_cells"]) if p.get("train_cells") else None # Only these chips
     if learned is not None or learn is not None:
@@ -1141,7 +1148,8 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                 keep = np.abs(res) <= 2.5 * (float(np.median(np.abs(res[keep]))) * 1.4826 + 1e-6)
             return a - (c[0] + c[1] * fx + c[2] * fy + c[3] * fx * fx + c[4] * fx * fy + c[5] * fy * fy)
 
-        def dev_of(k, ref):
+        def dev_of(k, ref, resid=None):
+            """Deviation map; resid (a list): also gets the residual (chip - median chip) / spread (learned conv filter)."""
             golden, spread, gmin, gmax = ref[:4]
             a = chips[k] if fn is None else fn(chips[k], golden, centre)
             if p["shading"]:
@@ -1151,6 +1159,8 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                 # changes from one row to the next is taken off (a stain changes over many rows: it stays)
                 ro = np.median(a - golden, axis=1)
                 a = a - (ro - _blur1(ro.astype(np.float64), 2.0)).astype(np.float32)[:, None]
+            if resid is not None:
+                resid.append((a - golden) / spread)
             return (np.maximum(a - gmax, 0) - np.maximum(gmin - a, 0)) / spread # > 0 brighter, < 0 darker
 
         ss_sig = max(0.8, p["ssim_sigma_px"] / min(sx, sy))
@@ -1309,8 +1319,31 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
 
         def per_chip(k):
             """Everything of one chip (several chips at a time on the cores: numpy releases the lock)."""
-            dev = dev_of(k, ref)
+            res_ = [] if (conv is not None or conv_learn is not None) else None
+            dev = dev_of(k, ref, res_)
             dark = dev <= -p["dark_threshold"] if p["compare"] != "ssim" else np.zeros((H, W), bool)
+            if conv_learn is not None and (train_cells is None or k in train_cells):
+                # Learned conv filter training: stain pixels = painted / reviewed areas, background = the rest of
+                # the edge strips (unreviewed detections left out); dark residual = stain (sign flipped: > 0)
+                # Stain pixels: the line of each painted / reviewed area = its border inside the chip (the area runs
+                # from the chip edge to the line; its inside may be brighter or darker, the line is what was painted)
+                area_t = np.zeros((H, W), bool)
+                pos = np.zeros((H, W), bool)
+                rim = np.zeros((H, W), bool)
+                rim[:3, :] = rim[-3:, :] = True
+                rim[:, :3] = rim[:, -3:] = True
+                for tm in truth_masks(k):
+                    area_t |= tm
+                    pos |= tm & (_box(tm.astype(np.float32), 5, 5) < 0.999) & ~rim
+                near = _box(area_t.astype(np.float32), 5, 5) > 0
+                for um in polys_masks(k, "unknown_areas"):
+                    near |= um
+                st_ = stain_conv.chip_stats(-res_[0], pos & edges, edges & ~near, seed=hash(k) & 0xffff)
+                with conv_lock:
+                    conv_learn[k] = st_
+            if conv is not None:
+                cz = stain_conv.score(-res_[0], conv)
+                dark = dark | (edges & (cz >= p["conv_threshold"]))
             if use_ssim: # Structure changed (SSIM), in chip-to-chip spreads, counts as a speck too
                 sdev = (dissim(k, ref[6]) - ref[4]) / ref[5]
                 dark = dark | (sdev >= p["ssim_threshold"])
@@ -1326,7 +1359,12 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                     lim_s = max(2.0 * p["ssim_threshold"], float(np.percentile(sdev[edges], 99.5)))
                     steps.append(("9b SSIM change: full yellow = %.1f spreads (threshold %.1f)" % (lim_s, p["ssim_threshold"]),
                                   np.clip(sdev / lim_s, 0, 1), "unit"))
-                steps.append(("10 dark specks (Dark %.1f%s)" % (p["dark_threshold"], ", SSIM %.1f" % p["ssim_threshold"] if use_ssim else ""), dark & edges, "mask"))
+                if conv is not None:
+                    steps.append(("9c learned conv score (background std, full = 2 x Conv %.1f; separation %.1f vs %.1f per pixel)"
+                                  % (p["conv_threshold"], conv["sep"], conv["sep_px"]),
+                                  np.clip(cz / (2 * p["conv_threshold"]), 0, 1), "unit"))
+                steps.append(("10 dark specks (Dark %.1f%s%s)" % (p["dark_threshold"], ", SSIM %.1f" % p["ssim_threshold"] if use_ssim else "",
+                                                                 ", or Conv >= %.1f" % p["conv_threshold"] if conv is not None else ""), dark & edges, "mask"))
                 steps.append(("11 specks kept (Density %.2f, Speck >= %g px2)" % (p["speck_density"], p["min_speck_px"]), specks & edges, "mask"))
             lines = np.zeros((H, W), bool)
             pieces = np.zeros((H, W), bool) # Specks left by Piece >= (debug)
