@@ -23,7 +23,11 @@ Nothing about a product is defined in code: only the keys present in the file ar
           {"name": "die", "inset": "SL"},    # bbox inset by a layout key ("SL") or by [x, y]
           {"name": "pad", "rect": [40, 40, 60, 60]},                 # [x, y, w, h] from bbox top-left
           {"name": "bump", "rect": [100, 100, 20, 20],
-           "repeat": {"cols": 4, "rows": 3, "dx": 60, "dy": 60}}     # array of rects
+           "repeat": {"cols": 4, "rows": 3, "dx": 60, "dy": 60}},    # array of rects
+          {"name": "core", "size": [600, 400]},                      # w, h only: centred on the chip
+          {"name": "mark", "size": [50, 50], "center": [0, -300]},   # centred, moved from the chip centre
+          {"name": "fiducial", "rect": [10, 10, 30, 30], "mirror": "corners"}  # the same at all four corners
+                                             # (mirrored; "x": left / right only, "y": top / bottom only)
         ]
       }
     }
@@ -96,11 +100,31 @@ def layout_named_boxes(layout):
             ix, iy = layout[inset] if isinstance(inset, str) else inset
             out.append((name, ix, iy, design_w - 2 * ix, design_h - 2 * iy))
             continue
-        x, y, w, h = box["rect"]
+        if "rect" in box:
+            x, y, w, h = box["rect"]
+        else: # "size": [w, h] centred on the chip ("center": [dx, dy] from the chip centre, default 0, 0)
+            w, h = box["size"] if isinstance(box["size"], (list, tuple)) else (box["size"], box["size"])
+            dx, dy = box.get("center") or (0, 0)
+            x, y = (design_w - w) / 2.0 + dx, (design_h - h) / 2.0 + dy
         rep = box.get("repeat") or {}
+        # "mirror": "corners" / "xy" (the four corners), "x" (left <-> right), "y" (top <-> bottom): copies mirrored
+        # about the chip's centre lines, so one corner's boxes are declared once
+        mir = str(box.get("mirror") or "").lower()
+        mx = mir in ("x", "xy", "corners", "4", "all")
+        my = mir in ("y", "xy", "corners", "4", "all")
+        seen = set()
         for r in range(int(rep.get("rows", 1))):
             for c in range(int(rep.get("cols", 1))):
-                out.append((name, x + c * rep.get("dx", 0), y + r * rep.get("dy", 0), w, h))
+                bx, by = x + c * rep.get("dx", 0), y + r * rep.get("dy", 0)
+                for fx in ((False, True) if mx else (False,)):
+                    for fy in ((False, True) if my else (False,)):
+                        ox = design_w - bx - w if fx else bx
+                        oy = design_h - by - h if fy else by
+                        k = (round(ox, 6), round(oy, 6))
+                        if k in seen: # A box on the centre line mirrors onto itself
+                            continue
+                        seen.add(k)
+                        out.append((name, ox, oy, w, h))
     return out
 
 

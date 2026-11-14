@@ -5,6 +5,13 @@
 - **git checkout(git bundle로 업데이트):** `defaults\` 폴더는 없습니다. `plugins\results_api.py`도 업데이트(merge)로 새 버전이 되고, 현장에서 고친 내용은 `--autostash`가 그 위에 다시 얹습니다(같은 줄을 고쳤으면 git이 충돌로 알림). 아래 노트의 "`defaults\`에서 옮겨 붙이세요"는 zip 설치에만 해당합니다.
 - **zip 설치:** 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다(새 기본값은 zip 안의 `defaults\`).
 
+## 1.1.74
+
+- **레이아웃(products.json `layout.boxes`) 그리기:**
+  - `"mirror": "corners"`(또는 `"xy"`): 한 코너에 적은 박스(`rect`, `repeat` 포함)를 칩 가운데 선 기준으로 뒤집어 **네 코너에 대칭**으로 그림. `"x"` 좌우만, `"y"` 위아래만.
+  - `"size": [w, h]`만 쓰면 **칩 가운데 기준** 박스(`"center": [dx, dy]`로 가운데에서 옮김).
+  - 화면·내보내기 겹쳐 그리기·자동 마킹 타입 규칙 모두 같은 박스를 씁니다.
+
 ## 1.1.73
 
 - Paint line 단축키를 **Y**로 바꿈(T → Y): 영상 위에서 Y를 누른 채 왼쪽 드래그로 칠하기.
