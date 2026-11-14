@@ -403,6 +403,7 @@ class MainWindow(QMainWindow):
         
         # 3.5 Void Marking Control
         self.void_manager = VoidManager(declaration_path("config.json"))
+        self._stain_reviewed = set() # Chips reviewed (A / Paint line) in this file: the Edge Stains Train set
         self.glw.void_manager = self.void_manager
         self.glw.voids_changed.connect(self.update_void_ui)
         self.glw.void_type_shortcut_triggered.connect(self.on_void_type_shortcut)
@@ -1360,6 +1361,7 @@ class MainWindow(QMainWindow):
         self._close_data()
         self.full_data = stack
         self.layer_offset = stack.layer_number(0)
+        self._stain_reviewed = set() # A new file: no chip reviewed yet
         self.glw.bbox_layer = self.layer_offset
         self.void_manager.replace_all()
 
@@ -2615,8 +2617,10 @@ class MainWindow(QMainWindow):
         cell = cfg.cell_at(*glw.get_image_coords(at))
         todo = [v for vs in vm.voids.values() for v in vs
                 if v.get("auto") == "detected" and cfg.cell_at(*glw.raw_to_deskew(v["globalCX"], v["globalCY"])) == cell]
+        self._stain_reviewed.add(cell) # Reviewed chip: Train (Edge Stains) can learn from the reviewed chips only
         if not todo:
-            self.statusBar().showMessage(f"A: no detected markings to review in chip X{cell[1]:02d}_Y{cell[0]:02d}")
+            self.statusBar().showMessage(f"A: chip X{cell[1]:02d}_Y{cell[0]:02d} reviewed (no detected markings: "
+                                         f"clean as it is; {len(self._stain_reviewed)} chips reviewed)")
             return
         vm.begin_change()
         try:
@@ -2627,7 +2631,8 @@ class MainWindow(QMainWindow):
             vm.end_change()
         glw.update()
         self.update_void_ui()
-        self.statusBar().showMessage(f"A: {len(todo)} detected marking(s) of chip X{cell[1]:02d}_Y{cell[0]:02d} reviewed (Ctrl+Z undoes)")
+        self.statusBar().showMessage(f"A: {len(todo)} detected marking(s) of chip X{cell[1]:02d}_Y{cell[0]:02d} reviewed "
+                                     f"({len(self._stain_reviewed)} chips reviewed; Ctrl+Z undoes)")
 
     def _stain_model_paths(self):
         """(model, training set) of the Edge Stains learned filter: per product under the training folder."""
@@ -2708,6 +2713,16 @@ class MainWindow(QMainWindow):
         ep.pop("learned_model", None)
         rows = []
         ep.update(learn=rows, truth_areas=truths, unknown_areas=pending, debug=[])
+        reviewed = sorted(self._stain_reviewed)
+        if reviewed:
+            ans = QMessageBox.question(
+                self, "Train", f"Learn from the {len(reviewed)} reviewed chips only (A or Paint line on them)?\n"
+                "Yes: only those (the other chips may hold stains nobody marked yet).\nNo: every chip of the file.",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.Yes)
+            if ans == QMessageBox.Cancel:
+                return
+            if ans == QMessageBox.Yes:
+                ep["train_cells"] = reviewed
         skip = set(params.get("skip_layers") or []) if len(layers) > 1 else set()
         zs = [z for z, l in enumerate(layers) if l not in skip]
         pd = QProgressDialog("Edge stains: collecting training candidates...", "Cancel", 0, max(1, 2 * len(zs)), self)
@@ -2856,6 +2871,7 @@ class MainWindow(QMainWindow):
                         joined.append((layer, v))
                         strokes.append(pts + pts[:1])
         outline, (gx0, gy0, gx1, gy1), side, (t0, t1) = edge_band.stain_from_strokes(strokes, rect, width, side)
+        self._stain_reviewed.add(tuple(cell))
         type_name = (self.cb_stain_type.currentData() if getattr(self, "cb_stain_type", None) is not None else None) \
             or glw.active_type
         layer = joined[0][0] if joined else glw.current_layer

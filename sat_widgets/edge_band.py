@@ -804,6 +804,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
     p.update(params or {})
     learned = p.get("learned_model")
     learn = p.get("learn") # Training: a list collecting (cell, features, label) rows
+    train_cells = set(tuple(c) for c in p["train_cells"]) if p.get("train_cells") else None # Only these chips
     if learned is not None or learn is not None:
         # With the learned filter more candidates are let through (it decides): lower Dark and Length
         p["dark_threshold"] = p["dark_threshold"] * p["learn_relax"]
@@ -1386,7 +1387,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                     fv = stain_features(full, lines, dev, sd_, edges, p["dark_threshold"], sx, min(skip_x, skip_y))
                     if fv is None:
                         continue
-                    if learn is not None:
+                    if learn is not None and (train_cells is None or k in train_cells):
                         lab = label_of(k, full)
                         if lab is not None:
                             learn.append((k, fv, lab))
@@ -1399,7 +1400,8 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                         sc = sc_
                     kept.append((full, sc))
                 groups = kept
-                if learn is not None: # The painted / reviewed stains of this chip are stains, whether found or not
+                if learn is not None and (train_cells is None or k in train_cells): # The painted / reviewed stains of
+                    # this chip are stains, whether found or not
                     for tm in truth_masks(k):
                         fv = stain_features(tm, lines, dev, sd_, edges, p["dark_threshold"], sx, min(skip_x, skip_y))
                         if fv is not None:
