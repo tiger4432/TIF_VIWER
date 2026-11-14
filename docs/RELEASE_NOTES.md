@@ -5,6 +5,11 @@
 - **git checkout(git bundle로 업데이트):** `defaults\` 폴더는 없습니다. `plugins\results_api.py`도 업데이트(merge)로 새 버전이 되고, 현장에서 고친 내용은 `--autostash`가 그 위에 다시 얹습니다(같은 줄을 고쳤으면 git이 충돌로 알림). 아래 노트의 "`defaults\`에서 옮겨 붙이세요"는 zip 설치에만 해당합니다.
 - **zip 설치:** 새 zip을 같은 폴더에 덮어 풀면 되고, 현장에서 고친 `config.json` / `products.json` / `deploy.json` / `plugins\` 는 바뀌지 않습니다(새 기본값은 zip 안의 `defaults\`).
 
+## 1.1.84
+
+- **Edge Stains 속도 (Bg):** Bg(배경 평활)를 칩 크기의 ~1/3σ로 줄인 격자에서 계산하고 다시 늘림. Bg를 켜도 칩당 40~110 ms → 2~3 ms(Bg 값이 클수록 차이 큼), 검출 결과 같음(테스트 28/30, 오탐 0).
+- **Detect 속도 (디버그 저장):** Debug chip용으로 모든 칩을 저장할 때 칩마다 전체 백분위수를 구하던 것을 표본(4칸 건너)으로; SSIM 기준 밝기 범위는 레퍼런스당 한 번만. 196칩 테스트에서 percentile 4.9 s → 거의 0.
+
 ## 1.1.83
 
 - **학습 데이터 부족 메시지:** "3 voids and 3 non-voids" 대신, 지금까지 쌓인 오염(보이드) 예 / 아닌 예 개수와 무엇을 더 하면 되는지(칩을 더 리뷰, 깨끗한 칩도 A) 보여 줌. 그 파일의 표본은 저장되어 다음 Train에 더해집니다.

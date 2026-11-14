@@ -271,6 +271,21 @@ def _reduce(a, f):
     return a[:h * f, :w * f].reshape(h, f, w, f).mean(axis=(1, 3))
 
 
+def _upsample(a, r, shape):
+    """Bilinear back from a grid of r x r block means (block centres) to shape."""
+    if r <= 1:
+        return a[:shape[0], :shape[1]]
+    h, w = a.shape
+    yi = np.clip((np.arange(shape[0]) + 0.5) / r - 0.5, 0, h - 1)
+    xi = np.clip((np.arange(shape[1]) + 0.5) / r - 0.5, 0, w - 1)
+    y0, x0 = np.floor(yi).astype(int), np.floor(xi).astype(int)
+    y1, x1 = np.minimum(y0 + 1, h - 1), np.minimum(x0 + 1, w - 1)
+    fy, fx = (yi - y0).astype(np.float32)[:, None], (xi - x0).astype(np.float32)[None, :]
+    top = a[y0][:, x0] * (1 - fx) + a[y0][:, x1] * fx
+    bot = a[y1][:, x0] * (1 - fx) + a[y1][:, x1] * fx
+    return (top * (1 - fy) + bot * fy).astype(np.float32)
+
+
 def _label(mask):
     """Connected components (8-neighbour) of a boolean mask: (label image, area per label); label 0 = background
     (area 0)."""
@@ -1107,15 +1122,17 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             """The chip with its brightness differences against this reference that are large (background) taken off:
             background > 0: (chip - reference) smoothed over background x the chip size, stains left out (robust:
             normalised smoothing without the pixels beyond 2.5 x the residual spread); else a quadratic surface."""
-            if bg_sig > 0:
+            if bg_sig > 0: # On a grid reduced to ~sigma/3 (the surface is smooth there): fast for any Bg
                 d = a - golden
-                w = np.ones_like(d)
+                r = max(1, int(bg_sig / 3.0))
+                ds_ = _reduce(np.pad(d, ((0, -d.shape[0] % r), (0, -d.shape[1] % r)), mode="edge"), r)
+                w = np.ones_like(ds_)
                 for _ in range(2):
-                    bg = _gauss(d * w, bg_sig) / np.maximum(_gauss(w, bg_sig), 1e-3)
-                    res = d - bg
+                    bg = _gauss(ds_ * w, bg_sig / r) / np.maximum(_gauss(w, bg_sig / r), 1e-3)
+                    res = ds_ - bg
                     mad = float(np.median(np.abs(res[w > 0]))) * 1.4826 + 1e-6
                     w = (np.abs(res) <= 2.5 * mad).astype(np.float32)
-                return a - bg
+                return a - _upsample(bg, r, d.shape)
             d = (a - golden)[::q_st, ::q_st].ravel()
             keep = np.ones(d.size, bool)
             for _ in range(3):
@@ -1137,6 +1154,14 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             return (np.maximum(a - gmax, 0) - np.maximum(gmin - a, 0)) / spread # > 0 brighter, < 0 darker
 
         ss_sig = max(0.8, p["ssim_sigma_px"] / min(sx, sy))
+        _rng = {}
+
+        def _range_of(g):
+            key = id(g)
+            if key not in _rng:
+                lo, hi = np.percentile(g[::2, ::2], [1, 99])
+                _rng[key] = (g, float(hi - lo) + 1e-3)
+            return _rng[key][1]
 
         def tex_of(k):
             return chips[k] if tex is None else tex[k].astype(np.float32)
@@ -1147,7 +1172,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             pads a fraction of a px off (chips are cut on whole px) do not change it, while the structure part of
             SSIM read them as a change everywhere on the pads."""
             a = tex_of(k)
-            L = float(np.percentile(golden, 99) - np.percentile(golden, 1)) + 1e-3
+            L = _range_of(golden)
             c2 = (0.03 * L) ** 2
             ma, mb = _gauss(a, ss_sig), _gauss(golden, ss_sig)
             va = np.maximum(_gauss(a * a, ss_sig) - ma * ma, 0)
@@ -1267,7 +1292,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             def q8(a, lo, hi):
                 return np.clip((small(a) - lo) / max(hi - lo, 1e-6) * 255, 0, 255).astype(np.uint8)
             store.update(layer=layer, f=f, Wr=Wr, Hr=Hr, M=M, H=H, W=W, use_ssim=use_ssim, chips={}, params=dict(p),
-                         ref=[(name, q8(a, *np.percentile(a, [1, 99]))) for name, a in
+                         ref=[(name, q8(a, *np.percentile(a[::2, ::2], [1, 99]))) for name, a in
                               (("5 median chip (reference)", ref[0]), ("6 chip-to-chip spread", ref[1]),
                                ("7 reference min", ref[2]), ("8 reference max", ref[3]))],
                          info=[f"reduction {f} (image px per working px), chip {Wr} x {Hr} image px",
@@ -1433,12 +1458,12 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                 trace.setdefault("info", []).extend(f"dropped: {d[1]} (length {d[2]}, depth {d[3]} px)" for d in (dbg or []) if d[0] == k)
             if store is not None:
                 lim = 2.0 * p["dark_threshold"]
-                cl, ch = np.percentile(chips[k], [1, 99])
+                cl, ch = np.percentile(chips[k][::4, ::4], [1, 99])
+                s_lim = max(2.0 * p["ssim_threshold"], float(np.percentile(sdev[::2, ::2][edges[::2, ::2]], 99.5))) if use_ssim else None
                 store["chips"][k] = {
                     "at": at[k], "chip": q8(chips[k], cl, ch),
                     "dev": q8(dev, -lim, lim), "dev_lim": lim,
-                    "sdev": q8(sdev, 0, max(2.0 * p["ssim_threshold"], float(np.percentile(sdev[edges], 99.5)))) if use_ssim else None,
-                    "sdev_lim": max(2.0 * p["ssim_threshold"], float(np.percentile(sdev[edges], 99.5))) if use_ssim else None,
+                    "sdev": q8(sdev, 0, s_lim) if use_ssim else None, "sdev_lim": s_lim,
                     "dark": np.packbits(dark & edges), "specks": np.packbits(specks & edges),
                     "lines": np.packbits(lines), "area": np.packbits(area_all),
                     "why": [d for d in (dbg or []) if d[0] == k], "found": len(groups)}
