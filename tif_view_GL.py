@@ -3453,6 +3453,18 @@ class MainWindow(QMainWindow):
                 "Review them first (E + click: correct, R + click: wrong) to use them. Continue?",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return
+        mine = None
+        reviewed = sorted(self._stain_reviewed)
+        if reviewed:
+            ans = QMessageBox.question(
+                self, "Train", f"Learn from the {len(reviewed)} reviewed chips only (A or Paint line on them)?\n"
+                "Yes: only those (the other chips may hold voids nobody marked yet; the rows this file gave\n"
+                "before for its other chips stay). No: every chip of the file.",
+                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel, QMessageBox.Yes)
+            if ans == QMessageBox.Cancel:
+                return
+            if ans == QMessageBox.Yes:
+                mine = {f"{c[0]},{c[1]}" for c in reviewed}
         params.pop("learned_model", None)
         if params.get("method") == "patchcore":
             params["method"] = "die_to_die" # The learned filter works on the die-to-die deviation
@@ -3476,6 +3488,15 @@ class MainWindow(QMainWindow):
         key = self.lbl_source.toolTip() or self.le_wafer_id.text() or "unnamed"
         product = self._product_key() if lc else None # Layer change: one model per product
         dataset = void_learn.dataset_path(method, product)
+        if mine is not None:
+            # Only the reviewed chips this time; this file's rows of its other chips (an earlier Train) stay
+            rows = [r for r in rows if r["g"] in mine]
+            if os.path.exists(dataset):
+                with open(dataset, "r", encoding="utf-8") as f_:
+                    for line in f_:
+                        r_ = json.loads(line)
+                        if r_.get("src") == key and r_.get("g") not in mine:
+                            rows.append({k_: r_[k_] for k_ in ("x", "y", "g")})
         void_learn.add_to_dataset(key, rows, dataset)
         path = void_learn.model_path(self._config().get("void_detect", {}), method, product)
         QApplication.setOverrideCursor(Qt.WaitCursor)
