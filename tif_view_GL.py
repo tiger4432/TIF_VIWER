@@ -1567,8 +1567,8 @@ class MainWindow(QMainWindow):
                 if not ev.isAutoRepeat():
                     self.glw.type_number_key(key - Qt.Key_0)
                 return True
-            if key == Qt.Key_T and plain and not self._typing(obj):
-                # T held: Paint line (Edge Stains) like the marking keys - drag over a dark line while T is down
+            if key == Qt.Key_Y and plain and not self._typing(obj):
+                # Y held: Paint line (Edge Stains) like the marking keys - drag over a dark line while Y is down
                 if not ev.isAutoRepeat() and getattr(self, "btn_stain_paint", None) is not None and self.full_data is not None:
                     if et == QEvent.KeyPress:
                         self._paint_by_key = True
@@ -2531,7 +2531,7 @@ class MainWindow(QMainWindow):
         h6.addWidget(self.btn_stain_golden)
         self.btn_stain_paint = QPushButton("Paint line")
         self.btn_stain_paint.setCheckable(True)
-        self.btn_stain_paint.setToolTip("Mark a stain by hand (or hold T on the image, like W / E / R): paint over its dark line\n"
+        self.btn_stain_paint.setToolTip("Mark a stain by hand (or hold Y on the image, like W / E / R): paint over its dark line\n"
                                         "(left drag). The stain is the\n"
                                         "nearest chip edge up to the painted line; strokes on the same edge within Merge r are\n"
                                         "joined into one stain (the gap filled). Esc or this button ends painting. Ctrl+Z undoes")
