@@ -72,30 +72,41 @@ def move_done(cur):
 
 
 def auto(quiet=False):
-    """Applies the newest bundle in releases\\ that is newer and applies. Returns True when updated."""
+    """Applies the bundles in releases\\ one after another while one is newer and applies (a series of
+    since-bundles: 1.1.76 -> .77 -> .78 ...; a whole one jumps straight to its version). Returns True when updated."""
     if not os.path.isdir(os.path.join(ROOT, ".git")):
         if not quiet:
             print("Not a git checkout: bundles cannot be applied here (use update.bat or unpack the zip).")
         return False
-    cur = installed()
-    for ver, since, path in candidates():
-        if vkey(ver) <= vkey(cur):
-            continue
-        if since and vkey(since) > vkey(cur):
-            print(f"{os.path.basename(path)}: needs {since} first (installed {cur}) - skipped")
-            continue
-        try:
-            before, after = apply(path)
-        except RuntimeError as e:
-            print(f"{os.path.basename(path)}: not applied - {e}")
-            continue
-        print(f"Updated {cur} -> {installed()} from {os.path.basename(path)}\n  before: {before}\n  now:    {after}")
+    start = installed()
+    updated = False
+    while True:
+        cur = installed()
+        step = None
+        for ver, since, path in candidates(): # Newest first: a whole bundle or the furthest one that applies now
+            if vkey(ver) <= vkey(cur) or (since and vkey(since) > vkey(cur)):
+                continue
+            try:
+                before, after = apply(path)
+            except RuntimeError as e:
+                print(f"{os.path.basename(path)}: not applied - {e}")
+                continue
+            print(f"Updated {cur} -> {installed()} from {os.path.basename(path)}\n  before: {before}\n  now:    {after}")
+            step = path
+            break
+        if step is None:
+            break
+        updated = True
         move_done(installed())
-        return True
-    move_done(cur)
-    if not quiet:
-        print(f"No newer bundle in {DROP} (installed {cur}).")
-    return False
+    move_done(installed())
+    waiting = [os.path.basename(p_) for v_, s_, p_ in candidates() if vkey(v_) > vkey(installed())]
+    if waiting:
+        print("Not applied (an earlier release is missing): " + ", ".join(waiting))
+    if updated and installed() != start:
+        print(f"Done: {start} -> {installed()}")
+    elif not quiet and not updated:
+        print(f"No newer bundle in {DROP} (installed {installed()}).")
+    return updated
 
 
 def main(argv):
