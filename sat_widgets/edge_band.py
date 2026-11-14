@@ -67,7 +67,7 @@ DEFAULTS = {
     "texture_blur": 1.5,    # ... and a Gaussian blur of this sigma (image px) at the image resolution (pitch changing /
                             # pad grid turned: the beat pattern the box leaves); 0 = off
     "shading": True,
-    "background": 0.08,     # Shading: brightness differences larger than this share of the chip (smoothed, stains left
+    "background": 0.0,      # Shading: brightness differences larger than this share of the chip (smoothed, stains left
                             # out) are taken off every chip against the reference (blotches, vignetting); 0 = a quadratic        # Brightness gradient across each chip (plane of chip - median chip) taken off
     "upright": True,        # Chips turned upright by the grid angle after the pad grid is averaged (Texture >= 2): the
                             # edges run along the rows / columns of the work image
@@ -515,6 +515,28 @@ def _texture_kernel(k, sigma):
     return w.astype(np.float32), list(range(off0, off0 + len(w)))
 
 
+def _filter_reduce(a, w, offs, pr, hh, ww, f):
+    """a (with pr px of margin all round) filtered by the 1-D kernel along both axes and reduced by f x f block
+    means: the x pass, the x reduction, then the y pass on the reduced columns and the y reduction (the same as
+    filtering and reducing after, for less work). Returns (hh // f, ww // f)."""
+    lo, hi = max(0, -min(offs)), max(0, max(offs))
+    h, wd = a.shape
+    p = np.pad(a, ((0, 0), (lo, hi)), mode="edge")
+    rows = np.zeros((h, wd), np.float32)
+    for wt, o in zip(w, offs):
+        rows += wt * p[:, lo + o:lo + o + wd]
+    rows = rows[:, pr:pr + ww]
+    nx = ww // f
+    rows = rows[:, :nx * f].reshape(h, nx, f).mean(axis=2)
+    p = np.pad(rows, ((lo, hi), (0, 0)), mode="edge")
+    cols = np.zeros((h, nx), np.float32)
+    for wt, o in zip(w, offs):
+        cols += wt * p[lo + o:lo + o + h]
+    cols = cols[pr:pr + hh]
+    ny = hh // f
+    return cols[:ny * f].reshape(ny, f, nx).mean(axis=1).astype(np.float32)
+
+
 def _sep_filter(a, w, offs):
     """a filtered by the 1-D kernel (w at offsets offs) along both axes (edges extended), same shape."""
     lo, hi = max(0, -min(offs)), max(0, max(offs))
@@ -612,13 +634,13 @@ def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tic
         hh, ww_ = Hr + 2 * e, Wr + 2 * e
         if avg and kern is not None:
             # Pad grid averaged out at the raw resolution (Texture box and Tex sigma Gaussian as one separable
-            # kernel), only on the part needed (+ the kernel's reach)
+            # kernel), only on the part needed (+ the kernel's reach), and reduced axis by axis in between
+            # (filtering along y commutes with the block means along x: the y pass runs on f x fewer columns)
             pr = min(kern_r, y0, x0, win.shape[0] - (y0 + hh), win.shape[1] - (x0 + ww_))
-            a = _sep_filter(win[y0 - pr:y0 + hh + pr, x0 - pr:x0 + ww_ + pr].astype(np.float32), kern, kern_off)
-            a = a[pr:pr + hh, pr:pr + ww_]
+            a = _filter_reduce(win[y0 - pr:y0 + hh + pr, x0 - pr:x0 + ww_ + pr].astype(np.float32), kern, kern_off,
+                               pr, hh, ww_, f)
         else:
-            a = win[y0:y0 + hh, x0:x0 + ww_]
-        a = _reduce(a, f).astype(np.float32)
+            a = _reduce(win[y0:y0 + hh, x0:x0 + ww_], f).astype(np.float32)
         if rot is None:
             return a
         # Turned upright (grid angle) after the reduction: the chip edges run along the rows / columns. With the pad
@@ -631,7 +653,18 @@ def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tic
     hw, ww = Hr // f + 2 * (M // f), Wr // f + 2 * (M // f)
     taper = np.outer(_tukey(hw, M // f), _tukey(ww, M // f)).astype(np.float32)
 
+    whole_memo = {}
+
     def whole(win):
+        """whole_ (below), kept for the sample's windows (asked for 2 .. 3 times each)."""
+        if id(win) in whole_memo:
+            return whole_memo[id(win)]
+        out_ = whole_(win)
+        if id(win) in sample_ids:
+            whole_memo[id(win)] = out_
+        return out_
+
+    def whole_(win):
         """The window (chip and the street around it) reduced and blurred, faded out over the margin only:
         the chip outline and its large structures decide the coarse alignment, a pad grid does not."""
         a = _gauss(_reduce(win, f).astype(np.float32)[:hw, :ww], sig)
@@ -665,13 +698,13 @@ def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tic
         by the shifts. Several chips at a time."""
         def one_(it):
             w, (sx, sy) = it
-            m = np.pad(w, M, mode="edge")[M + sy:M + sy + w.shape[0], M + sx:M + sx + w.shape[1]]
-            return whole(m), profiles(m), (cen(crop(w, sx, sy)) if centre else None)
+            m = w if (sx == 0 and sy == 0) else np.pad(w, M, mode="edge")[M + sy:M + sy + w.shape[0], M + sx:M + sx + w.shape[1]]
+            return whole(m), None, (cen(crop(w, sx, sy)) if centre else None)
         with _cf.ThreadPoolExecutor(max_workers=n_workers) as pool_:
             res = list(pool_.map(one_, items))
         return (np.median(np.stack([r_[0] for r_ in res]), axis=0),
                 np.median(np.stack([r_[2] for r_ in res]), axis=0) if centre else None,
-                (np.median(np.stack([r_[1][0] for r_ in res]), axis=0), np.median(np.stack([r_[1][1] for r_ in res]), axis=0)))
+                None)
 
     cells = sorted(origin)
     pick = [cells[i] for i in sorted(set(np.linspace(0, len(cells) - 1, min(len(cells), sample_n)).astype(int)))]
