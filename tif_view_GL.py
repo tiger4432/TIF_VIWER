@@ -2448,9 +2448,6 @@ class MainWindow(QMainWindow):
             "Fourier", spin("fourier", "", 0, 100, 0.5, 1, "Fourier filter: periodic patterns that differ from chip to chip (interference fringes,\n"
                                                            "pad grid beating with the pixels) are narrow spectrum peaks of (chip - median chip);\n"
                                                            "peaks this many times above their surroundings are brought down. 0 = off; lower = more"),
-            "Warp", spin("warp_tiles", "", 0, 32, 1, 0, "Local alignment: each chip moved onto the reference in Warp x Warp pieces (a chip\n"
-                                                         "bent a little: pads closer here, farther there, the layout stays in Debug 9). 0 = off; 4 .. 8"),
-            "Warp px", spin("warp_px", "", 0.5, 100, 0.5, 1, "A piece is moved at most this far (image px)"),
             "Bg %", spin("background", "", 0, 100, 1, 0, "Shading: brightness differences (against the median chip) larger than this share of the\n"
                                                             "chip are taken off (smoothed, stains left out): blotches, vignetting. 0 = a quadratic surface"))
         h4b = QHBoxLayout()
@@ -3082,16 +3079,21 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Edge stains: canceled")
             return
         vm, to_raw, to_deskew = self.void_manager, self.glw.deskew_to_raw, self.glw.raw_to_deskew
+        marked = {} # cell -> [(Deskewed centre, radii)] of the markings there (not bboxes): one pass, not one per find
+        for vs in vm.voids.values():
+            for v in vs:
+                if not vm.is_bbox(v):
+                    mx_, my_ = to_deskew(v["globalCX"], v["globalCY"])
+                    marked.setdefault(self.glw.grid_cfg.cell_at(mx_, my_), []).append((mx_, my_, v["radiusX"], v["radiusY"]))
         added = 0
         vm.begin_change()
         try:
             for layer, gx, gy, rx, ry, cell, score, outline in found:
                 # Skip what is marked already (any layer): a rerun does not double the marks
-                if any(not vm.is_bbox(v) and abs(to_deskew(v["globalCX"], v["globalCY"])[0] - gx) < rx + v["radiusX"]
-                       and abs(to_deskew(v["globalCX"], v["globalCY"])[1] - gy) < ry + v["radiusY"]
-                       for vs in vm.voids.values() for v in vs):
+                if any(abs(mx_ - gx) < rx + mrx and abs(my_ - gy) < ry + mry for mx_, my_, mrx, mry in marked.get(cell, ())):
                     continue
                 v = vm.add_void(layer, *to_raw(gx, gy), rx, ry, type_name)
+                marked.setdefault(cell, []).append((gx, gy, rx, ry))
                 v["auto"] = "detected" # Dashed until reviewed (Next Detected)
                 v["score"] = score
                 if outline: # Segmented stain (Shapes, debug): raw px offsets from the centre

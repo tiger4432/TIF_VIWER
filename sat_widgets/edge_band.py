@@ -29,6 +29,7 @@ Synthetic single-layer wafers (alike 280 px chips, stains on half): 9 wafers 648
 a 1 px pad grid at 0.3 deg: 0 false (101 with the former rotated cut), about 15 s per 196 chips.
 """
 import math
+import os
 
 import numpy as np
 
@@ -107,7 +108,7 @@ def _box(a, h, w):
     if h <= 1 and w <= 1:
         return a
     ph, pw = h // 2, w // 2
-    p = np.pad(a, ((ph, h - 1 - ph), (pw, w - 1 - pw)), mode="edge").astype(np.float64)
+    p = np.pad(np.asarray(a, np.float32), ((ph, h - 1 - ph), (pw, w - 1 - pw)), mode="edge").astype(np.float64)
     c = np.cumsum(np.cumsum(p, axis=0), axis=1)
     c = np.pad(c, ((1, 0), (1, 0)))
     s = c[h:, w:] - c[:-h, w:] - c[h:, :-w] + c[:-h, :-w]
@@ -496,6 +497,39 @@ def _notch(d, ratio, r_min=2.0):
     return np.fft.irfft2(F, s=(h, w)).astype(np.float32), n
 
 
+def _texture_kernel(k, sigma):
+    """1-D kernel (weights, offsets) of the Texture box (k px, the offsets as _box_sum: k // 2 back) followed by a
+    Gaussian (sigma px); (None, None) when both are off."""
+    w = np.ones(1)
+    off0 = 0
+    if k and k > 1:
+        w = np.ones(int(k)) / float(k)
+        off0 = -(int(k) // 2)
+    if sigma and sigma > 0:
+        r = max(1, int(math.ceil(3 * sigma)))
+        g = np.exp(-0.5 * (np.arange(-r, r + 1) / sigma) ** 2)
+        w = np.convolve(w, g / g.sum())
+        off0 -= r
+    if len(w) == 1:
+        return None, None
+    return w.astype(np.float32), list(range(off0, off0 + len(w)))
+
+
+def _sep_filter(a, w, offs):
+    """a filtered by the 1-D kernel (w at offsets offs) along both axes (edges extended), same shape."""
+    lo, hi = max(0, -min(offs)), max(0, max(offs))
+    h, wd = a.shape
+    p = np.pad(a, ((lo, hi), (0, 0)), mode="edge")
+    rows = np.zeros((h, wd), np.float32)
+    for wt, o in zip(w, offs):
+        rows += wt * p[lo + o:lo + o + h]
+    p = np.pad(rows, ((0, 0), (lo, hi)), mode="edge")
+    out = np.zeros((h, wd), np.float32)
+    for wt, o in zip(w, offs):
+        out += wt * p[:, lo + o:lo + o + wd]
+    return out
+
+
 def _hp(a, sigma=4.0):
     """High-pass for comparing alignments: a minus its Gaussian blur (fringes, blotches off)."""
     a = np.asarray(a, np.float32)
@@ -553,23 +587,46 @@ def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tic
                     yield c, (None if big is None else big[y:y + Hr + 2 * M, x:x + Wr + 2 * M])
                 i = j
 
+    crop_memo = {}
+
     def crop(win, sx, sy, avg=True):
+        key_ = (id(win), int(sx), int(sy), avg)
+        if key_ in crop_memo:
+            return crop_memo[key_]
+        out_ = crop_(win, sx, sy, avg)
+        if id(win) in sample_ids: # The sample's windows are cut again and again: kept
+            crop_memo[key_] = out_
+        return out_
+
+    sample_ids = set()
+
+    def crop_(win, sx, sy, avg=True):
         """The chip moved by (sx, sy) whole px, the pad grid averaged out at the raw resolution (box of texture_k
         px: before the reduction, so it is flat wherever the pads fall in the blocks: no beat pattern), reduced."""
         sx, sy = int(np.clip(sx, -M, M)), int(np.clip(sy, -M, M))
-        src = _box_sum(win, texture_k) if (avg and texture_k > 1) else win
-        if avg and texture_blur > 0: # Pad pitch changing (2 .. 3 px) or a turned pad grid: a box of one pitch leaves a
-            src = _gauss(src.astype(np.float32), texture_blur) # beat pattern; a Gaussian takes the rest off
+        e = 0
+        if rot is not None: # A margin e (whole blocks) around the chip keeps the corners when it is turned upright
+            e = min(rot_e, M - max(abs(sx), abs(sy)))
+            e -= e % f
+        y0, x0 = M + sy - e, M + sx - e
+        hh, ww_ = Hr + 2 * e, Wr + 2 * e
+        if avg and kern is not None:
+            # Pad grid averaged out at the raw resolution (Texture box and Tex sigma Gaussian as one separable
+            # kernel), only on the part needed (+ the kernel's reach)
+            pr = min(kern_r, y0, x0, win.shape[0] - (y0 + hh), win.shape[1] - (x0 + ww_))
+            a = _sep_filter(win[y0 - pr:y0 + hh + pr, x0 - pr:x0 + ww_ + pr].astype(np.float32), kern, kern_off)
+            a = a[pr:pr + hh, pr:pr + ww_]
+        else:
+            a = win[y0:y0 + hh, x0:x0 + ww_]
+        a = _reduce(a, f).astype(np.float32)
         if rot is None:
-            return _reduce(src[M + sy:M + sy + Hr, M + sx:M + sx + Wr], f).astype(np.float32)
+            return a
         # Turned upright (grid angle) after the reduction: the chip edges run along the rows / columns. With the pad
-        # grid averaged the chip is smooth and the interpolation makes no moire. A margin e (whole blocks) around it
-        # keeps the corners
-        e = min(rot_e, M - max(abs(sx), abs(sy)))
-        e -= e % f
-        a = _reduce(src[M + sy - e:M + sy + Hr + e, M + sx - e:M + sx + Wr + e], f)
-        return _rotate_bilinear(a.astype(np.float32), H, W, rot[0], rot[1])
+        # grid averaged the chip is smooth and the interpolation makes no moire
+        return _rotate_bilinear(a, H, W, rot[0], rot[1])
 
+    kern, kern_off = _texture_kernel(texture_k, texture_blur)
+    kern_r = int(max(abs(o) for o in kern_off)) + 1 if kern is not None else 0
     sig = max(1.5, max(H, W) / 100.0) # Working px: blur for the coarse alignment (a pad grid is gone)
     hw, ww = Hr // f + 2 * (M // f), Wr // f + 2 * (M // f)
     taper = np.outer(_tukey(hw, M // f), _tukey(ww, M // f)).astype(np.float32)
@@ -600,19 +657,21 @@ def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tic
             return 0, 0
         return int(np.clip(round(dx * f), -M, M)), int(np.clip(round(dy * f), -M, M))
 
-    def make_ref(items):
-        """items: [(window, (sx, sy))] -> (median whole window, median centre), moved by the shifts."""
-        wh = []
-        for w, (sx, sy) in items:
+    import concurrent.futures as _cf
+    n_workers = max(1, min(8, (os.cpu_count() or 2)))
+
+    def make_ref(items, centre=True):
+        """items: [(window, (sx, sy))] -> (median whole window, median centre (None: not asked), profiles), moved
+        by the shifts. Several chips at a time."""
+        def one_(it):
+            w, (sx, sy) = it
             m = np.pad(w, M, mode="edge")[M + sy:M + sy + w.shape[0], M + sx:M + sx + w.shape[1]]
-            wh.append(whole(m))
-        prof = []
-        for w, (sx, sy) in items:
-            m = np.pad(w, M, mode="edge")[M + sy:M + sy + w.shape[0], M + sx:M + sx + w.shape[1]]
-            prof.append(profiles(m))
-        return (np.median(np.stack(wh), axis=0),
-                np.median(np.stack([cen(crop(w, sx, sy)) for w, (sx, sy) in items]), axis=0),
-                (np.median(np.stack([q[0] for q in prof]), axis=0), np.median(np.stack([q[1] for q in prof]), axis=0)))
+            return whole(m), profiles(m), (cen(crop(w, sx, sy)) if centre else None)
+        with _cf.ThreadPoolExecutor(max_workers=n_workers) as pool_:
+            res = list(pool_.map(one_, items))
+        return (np.median(np.stack([r_[0] for r_ in res]), axis=0),
+                np.median(np.stack([r_[2] for r_ in res]), axis=0) if centre else None,
+                (np.median(np.stack([r_[1][0] for r_ in res]), axis=0), np.median(np.stack([r_[1][1] for r_ in res]), axis=0)))
 
     cells = sorted(origin)
     pick = [cells[i] for i in sorted(set(np.linspace(0, len(cells) - 1, min(len(cells), sample_n)).astype(int)))]
@@ -624,15 +683,16 @@ def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tic
             return None
     if len(sample) < 4:
         return {}
-    ref = make_ref([(w, (0, 0)) for w in sample.values()])
+    sample_ids.update(id(w) for w in sample.values())
+    ref = make_ref([(w, (0, 0)) for w in sample.values()], centre=not align) # The centre only for the last one
     if align:
-        ref = make_ref([(w, shift(w, ref)) for w in sample.values()])
+        with _cf.ThreadPoolExecutor(max_workers=n_workers) as pool_:
+            shifts_ = list(pool_.map(lambda w: shift(w, ref), sample.values()))
+        ref = make_ref(list(zip(sample.values(), shifts_)))
     out = {}
-    for i, (c, win) in enumerate(windows(cells, 16)):
-        if tick is not None and not tick("cut", i + 1, len(cells)):
-            return None
-        if win is None:
-            continue
+
+    def one(c, win):
+        """Cut one chip (run on several cores: numpy releases the interpreter lock in its loops)."""
         sx, sy = shift(win, ref) if align else (0, 0) # align False: the bboxes are trusted (Edge BBOX)
         chip = crop(win, sx, sy)
         if subpixel and align:
@@ -642,15 +702,46 @@ def _raw_chips(stack, z, origin, Wr, Hr, f, M, frac, sample_n=48, keep=None, tic
             rx, ry = _peak_near(cen(chip), ref[1], 0, 0, 1)
             if math.isfinite(rx) and math.isfinite(ry) and max(abs(rx), abs(ry)) <= 1.0:
                 chip = _translate(chip, rx, ry)
-        out[c] = (chip, (origin[c][0] + sx, origin[c][1] + sy))
+        res = (chip, (origin[c][0] + sx, origin[c][1] + sy))
         if plain: # Also without the pad grid averaged (SSIM / texture)
-            out[c] = out[c] + (crop(win, sx, sy, avg=False),)
-        if keep is not None and c == keep.get("cell"): # Debug trace: the raw window and what was cut
-            keep["window"] = win.copy()
-            keep["shift"] = (sx, sy)
-            keep["M"] = M
+            res = res + (crop(win, sx, sy, avg=False),)
+        return c, res, (sx, sy)
+
+    import concurrent.futures as _cf
+    n_done = 0
+    with _cf.ThreadPoolExecutor(max_workers=n_workers) as pool:
+        pending = []
+        for c, win in windows(cells, 16):
+            if win is None:
+                n_done += 1
+                continue
+            if keep is not None and c == keep.get("cell"): # Debug trace: the raw window
+                keep["window"] = win.copy()
+                keep["M"] = M
+            pending.append(pool.submit(one, c, sample.get(c, win))) # A sample chip: its window (cuts kept)
+            if len(pending) >= 32 or True:
+                while pending and (len(pending) >= 32 or pending[0].done()):
+                    c_, res, sh = pending.pop(0).result()
+                    out[c_] = res
+                    if keep is not None and c_ == keep.get("cell"):
+                        keep["shift"] = sh
+                    n_done += 1
+                    if tick is not None and not tick("cut", n_done, len(cells)):
+                        pool.shutdown(cancel_futures=True)
+                        return None
+        for fu in pending:
+            c_, res, sh = fu.result()
+            out[c_] = res
+            if keep is not None and c_ == keep.get("cell"):
+                keep["shift"] = sh
+            n_done += 1
+            if tick is not None and not tick("cut", n_done, len(cells)):
+                pool.shutdown(cancel_futures=True)
+                return None
     stack.release_cache()
     return out
+
+
 
 
 def _range_along(a, k, axis):
@@ -719,6 +810,11 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
     k_al_y = 2 * max(1, int(round(p["merge_along"] * p["merge_radius_px"] / sy))) + 1 # Along y (left / right)
     k_ac_x = 2 * max(1, int(round(p["merge_radius_px"] / sx))) + 1
     k_ac_y = 2 * max(1, int(round(p["merge_radius_px"] / sy))) + 1
+
+    strip_box = {}
+    for _a, m_, sd_ in strips: # Bounding rectangle of each edge strip
+        rr_, cc_ = np.nonzero(m_.any(axis=1))[0], np.nonzero(m_.any(axis=0))[0]
+        strip_box[sd_] = (int(rr_.min()), int(rr_.max()) + 1, int(cc_.min()), int(cc_.max()) + 1) if len(rr_) else (0, 0, 0, 0)
 
     def line_closing(m, along):
         """Dilate then erode by a box longer along the edge (merge_along x merge radius) than across."""
@@ -1047,7 +1143,7 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
             auto = p["clean_ref"] <= 0
             n_clean = min(64, max(min(8, len(keys)), int(round((0.5 if auto else p["clean_ref"]) * len(keys)))))
             regions = [(side, strip) for _, strip, side in strips]
-            for it in range(2):
+            for it in range(2 if p["per_edge"] else 1): # Per edge: a second pass against the pieced reference
                 dirt = {k: [] for k in keys}
                 for i, k in enumerate(keys):
                     a = np.clip(np.abs(dev_of(k, ref)), 0, 10)
@@ -1137,9 +1233,8 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
 
         dbg = p.get("debug")
         shown = masks is not None and li == 0
-        for ki, k in enumerate(keys):
-            if not tick(li, layer, "detect", ki + 1, len(keys)):
-                return None
+        def per_chip(k):
+            """Everything of one chip (several chips at a time on the cores: numpy releases the lock)."""
             dev = dev_of(k, ref)
             dark = dev <= -p["dark_threshold"] if p["compare"] != "ssim" else np.zeros((H, W), bool)
             if use_ssim: # Structure changed (SSIM), in chip-to-chip spreads, counts as a speck too
@@ -1181,7 +1276,14 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                         ext = (hi - lo + 1) * (sx if along == "x" else sy)
                         sp &= (ext >= p["min_piece_px"])[lab]
                     pieces |= sp
-                line = line_closing(sp, along) & strip
+                # Closing on the strip's rectangle only (+ the kernel's reach), not the whole chip: 4 x less work
+                r0_, r1_, c0_, c1_ = strip_box[side]
+                kh_, kw_ = (k_ac_y, k_al_x) if along == "x" else (k_al_y, k_ac_x)
+                R0_, R1_ = max(0, r0_ - kh_), min(H, r1_ + kh_)
+                C0_, C1_ = max(0, c0_ - kw_), min(W, c1_ + kw_)
+                line = np.zeros((H, W), bool)
+                line[R0_:R1_, C0_:C1_] = line_closing(sp[R0_:R1_, C0_:C1_], along)
+                line &= strip
                 lines |= line
                 # Pieces of the line are linked along the edge across gaps up to link_gap_px: a stain is a run
                 # along the edge with line pixels, its area the chip edge up to the farthest line pixel
@@ -1311,6 +1413,16 @@ def detect(stack, zs, layer_numbers, grid_cfg, coord_transform, refs, cells, par
                     return 0.0 if v <= 0 else float(n) if v >= n - 1 else v + 0.5
                 outline = [to_d(ox + at_edge(c0 + px, W) * sx, oy + at_edge(r0 + py, H) * sy) for py, px in _contour(part)]
                 found.append((layer, (gx0 + gx1) / 2, (gy0 + gy1) / 2, (gx1 - gx0) / 2, (gy1 - gy0) / 2, k, sc, outline))
+
+        import concurrent.futures as _cf
+        with _cf.ThreadPoolExecutor(max_workers=max(1, min(8, (os.cpu_count() or 2)))) as pool:
+            futs = [pool.submit(per_chip, k) for k in keys]
+            for ki, fu in enumerate(futs):
+                fu.result()
+                if not tick(li, layer, "detect", ki + 1, len(keys)):
+                    pool.shutdown(cancel_futures=True)
+                    return None
+    found.sort(key=lambda t: (t[0], t[5], t[1], t[2])) # Same order whatever the threads did
     return found
 
 
