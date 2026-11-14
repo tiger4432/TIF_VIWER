@@ -9,6 +9,8 @@ set "REQS=requirements.txt"
 if "%WITH_PATCHCORE%"=="1" set "REQS=%REQS% requirements-patchcore.txt"
 call tools\setup_venv.bat .venv %REQS% || goto :error
 call .venv\Scripts\activate.bat || goto :error
+REM A git checkout: release bundles put into releases\ are applied first (tools\bundle_update.py)
+if exist ".git" (python tools\bundle_update.py & if errorlevel 3 if not errorlevel 4 "%~f0" %*)
 python tif_view_GL.py
 exit /b %errorlevel%
 
