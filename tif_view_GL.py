@@ -2685,6 +2685,17 @@ class MainWindow(QMainWindow):
         return out
 
     @staticmethod
+    def _not_enough_msg(dataset, what, added, features=None):
+        """Why the filter is not trained yet: the counts in the training set so far and what to do."""
+        X, y, _g, src = void_learn.load_dataset(dataset, features)
+        pos, neg = int((y > 0).sum()), int((y == 0).sum())
+        return (f"Saved {added}. Not trained yet.\n\n"
+                f"The filter learns from both kinds of examples and needs at least 3 of each:\n"
+                f"  {what} (marked / painted / reviewed with A): {pos} so far\n"
+                f"  not {what} (candidates on reviewed chips with nothing marked there, deleted detections): {neg} so far\n"
+                f"over {len(src)} file(s). Review more chips (also clean ones with A) and press Train again: the examples add up.")
+
+    @staticmethod
     def _train_subset(cells, reviewed, n_ref=64):
         """The chips worked on when only the reviewed ones are learned: the reviewed ones and up to n_ref chips spread
         over the wafer (the reference / median chip is made from them), not the whole wafer."""
@@ -2768,7 +2779,8 @@ class MainWindow(QMainWindow):
         try:
             data = void_learn.train_model(0.0, model, rounds=200, dataset=dataset, features=edge_band.ES_FEATURES)
         except ValueError as e:
-            QMessageBox.warning(self, "Train", f"Added {len(data_rows)} rows of this file ({pos} stains). Not trained yet: {e}.")
+            QMessageBox.warning(self, "Train", self._not_enough_msg(dataset, "stains", f"{len(data_rows)} rows of this file ({pos} stains)",
+                                                                edge_band.ES_FEATURES))
             return
         finally:
             QApplication.restoreOverrideCursor()
@@ -3518,7 +3530,8 @@ class MainWindow(QMainWindow):
                                           features=void_layer_change.FEATURES if lc else None, trees=lc,
                                           fp_per_file=fp_target)
         except ValueError as e:
-            QMessageBox.warning(self, "Train", f"Added {len(rows)} candidates of this file. Not trained yet: {e}.")
+            QMessageBox.warning(self, "Train", self._not_enough_msg(dataset, "voids", f"{len(rows)} candidates of this file",
+                                                                void_layer_change.FEATURES if lc else None))
             return
         finally:
             QApplication.restoreOverrideCursor()
